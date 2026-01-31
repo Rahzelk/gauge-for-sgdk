@@ -168,6 +168,11 @@ typedef struct Gauge Gauge;
      Optional 64-tile ROM strip for TRAIL (trail-specific shapes).
      If NULL, trail rendering falls back to BODY rules.
 
+   tilesetBridgeBySegment[segmentId]:
+     Optional 45-tile ROM strip for BRIDGE (segment transition).
+     Used only when a segment ends before the gauge END is reached.
+     If NULL, the last tile of the segment becomes a forced BREAK (index 44).
+
    orientation:
      GAUGE_ORIENT_HORIZONTAL or GAUGE_ORIENT_VERTICAL.
 
@@ -201,6 +206,12 @@ typedef struct
     const u32 *tilesetEndBySegment[GAUGE_MAX_SEGMENTS];  /* END: optional 45-tile strips */
     const u32 *tilesetBreakBySegment[GAUGE_MAX_SEGMENTS];/* BREAK: optional 45-tile strips */
     const u32 *tilesetTrailBySegment[GAUGE_MAX_SEGMENTS];/* TRAIL: optional 64-tile strips */
+    const u32 *tilesetBridgeBySegment[GAUGE_MAX_SEGMENTS];/* BRIDGE: optional 45-tile strips */
+
+    /* --- Segment boundary LUTs (by fillIndex) --- */
+    u8 bridgeEndByFillIndex[GAUGE_MAX_LENGTH];     /* 1 if fillIndex is last cell of a segment with bridge */
+    u8 bridgeBreakByFillIndex[GAUGE_MAX_LENGTH];   /* 1 if fillIndex is forced BREAK before a segment end */
+    u8 bridgeBreakBoundaryByFillIndex[GAUGE_MAX_LENGTH]; /* boundary fillIndex for forced BREAK */
 
     /* --- Visual properties (all u8 for compact packing) --- */
     u8 orientation;                              /* GAUGE_ORIENT_HORIZONTAL=0 or GAUGE_ORIENT_VERTICAL=1 */
@@ -257,6 +268,7 @@ void GaugeLayout_init(GaugeLayout *layout,
  * @param endTilesets   Array of GAUGE_MAX_SEGMENTS END tileset pointers (optional, can be NULL)
  * @param breakTilesets Array of GAUGE_MAX_SEGMENTS BREAK tileset pointers (optional, can be NULL)
  * @param trailTilesets Array of GAUGE_MAX_SEGMENTS TRAIL tileset pointers (optional, can be NULL)
+ * @param bridgeTilesets Array of GAUGE_MAX_SEGMENTS BRIDGE tileset pointers (optional, can be NULL)
  * @param segmentIdByCell Array of length elements specifying segment ID per cell
  * @param orientation   GAUGE_ORIENT_HORIZONTAL or GAUGE_ORIENT_VERTICAL
  * @param paletteLine   Palette line (0-3, typically PAL0-PAL3)
@@ -271,6 +283,7 @@ void GaugeLayout_initEx(GaugeLayout *layout,
                         const u32 * const *endTilesets,
                         const u32 * const *breakTilesets,
                         const u32 * const *trailTilesets,
+                        const u32 * const *bridgeTilesets,
                         const u8 *segmentIdByCell,
                         GaugeOrientation orientation,
                         u8 paletteLine,
@@ -385,6 +398,7 @@ typedef struct
     const u32 *endFillStrip45;      /* END strip (NULL if not supported) */
     const u32 *breakFillStrip45;    /* BREAK strip (NULL if not supported) */
     const u32 *trailFillStrip64;    /* TRAIL strip (NULL if not supported) */
+    const u32 *bridgeFillStrip45;   /* BRIDGE strip (NULL if not supported) */
     const u32 *loadedFillStrip45;   /* Last strip uploaded (for cache) */
     u16 vramTileIndex;              /* VRAM tile index for this cell */
     u8 loadedFillIdx;               /* Last fill index uploaded (0xFF=none) */
@@ -403,6 +417,7 @@ typedef struct
     u16 vramTileEmpty[GAUGE_MAX_SEGMENTS];       /* Empty tile per segment (0,0) */
     u16 vramTileFullValue[GAUGE_MAX_SEGMENTS];   /* Full value tile per segment (8,8) */
     u16 vramTileFullTrail[GAUGE_MAX_SEGMENTS];   /* Full trail tile per segment (0,8) */
+    u16 vramTileBridge[GAUGE_MAX_SEGMENTS];      /* Bridge tile per segment (dynamic) */
 
     /* --- Partial tiles (streamed on demand, scalars per GaugePart) --- */
     u16 vramTilePartialValue;       /* Partial value tile - also used for "both" case */
@@ -419,6 +434,7 @@ typedef struct
     u8 loadedFillIdxPartialEnd;     /* Loaded fill index for END */
     u8 loadedSegmentPartialTrailSecond; /* Which segment's second trail break is loaded */
     u8 loadedFillIdxPartialTrailSecond; /* Loaded fill index for second trail break */
+    u8 loadedFillIdxBridge[GAUGE_MAX_SEGMENTS]; /* Loaded fill index for bridge tile */
 
     /* --- Tilemap cache (for change detection) --- */
     u16 cellCurrentTileIndex[GAUGE_MAX_LENGTH];  /* Currently displayed VRAM tile per cell */
