@@ -1,2 +1,6 @@
 out/
 src/boot/
+AGENTS.md
+tools/
+references/
+.vscode/

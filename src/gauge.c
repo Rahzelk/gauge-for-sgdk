@@ -1,457 +1,1916 @@
 #include "gauge.h"
 
-/* (valuePxInTile, trailPxInTile) -> idx 0..44 */
-static const u8 s_fillIdxByValueTrail[9][9] =
+/* =============================================================================
+   gauge.c â€” Simplified single-lane HUD gauge implementation for SGDK
+   =============================================================================
+ 
+   IMPLEMENTATION NOTES:
+   ---------------------
+   - Tile index LUT (s_fillTileStripsIndexByValueTrail) provides O(1) lookup
+   - Change detection avoids redundant rendering
+
+   PERFORMANCE CHARACTERISTICS:
+   - GaugeLogic_tick: ~50-100 cycles (mostly conditionals)
+   - process_fixed_mode: ~200 cycles per cell (DMA dominant)
+   - process_dynamic_mode: ~300-500 cycles total (tilemap writes dominant)
+
+   ============================================================================= */
+
+/* -----------------------------------------------------------------------------
+   Constants
+   ----------------------------------------------------------------------------- */
+#define TILE_TO_PIXEL_SHIFT  3
+
+/* Invalid/uninitialized marker for cache values */
+#define CACHE_INVALID_U16    0xFFFF
+#define CACHE_INVALID_U8     0xFF
+
+/* Helper macros */
+#define CALC_ANIM_STEP(diff, shift)   ((u16)(((diff) >> (shift)) + 1))
+#define FILL_IDX_TO_OFFSET(idx)       (((u16)(idx)) << 3)
+
+
+/* -----------------------------------------------------------------------------
+   Debug logging removed (no active debug code paths).
+   ----------------------------------------------------------------------------- */
+
+
+
+/* =============================================================================
+   Tile index lookup table
+   =============================================================================
+   Maps (valuePxInTile, trailPxInTile) to tile index in 45-tile strip.
+
+   Row = valuePxInTile (0..8)
+   Column = trailPxInTile (0..8)
+
+   Constraint: trail >= value (invalid combinations marked 0xFF = CACHE_INVALID_U8)
+
+   The 45-tile strip is organized as triangular matrix (trail >= value):
+   - Tiles 0-8:   value=0, trail=0..8  (9 tiles: empty to full trail)
+   - Tiles 9-16:  value=1, trail=1..8  (8 tiles)
+   - Tiles 17-23: value=2, trail=2..8  (7 tiles)
+   - ...
+   - Tile 44:     value=8, trail=8     (1 tile: fully filled)
+   Total: 9+8+7+6+5+4+3+2+1 = 45 tiles
+
+   Visual representation of a single tile's fill zones:
+     +--------+
+     |TTTTTTTT|  T = trail pixels (trailPx - valuePx)
+     |VVVVTTTT|  V = value pixels
+     |VVVV    |  (blank) = empty pixels
+     +--------+
+
+   ============================================================================= */
+static const u8 s_fillTileStripsIndexByValueTrail[9][9] =
 {
-    { 0, 1, 2, 3, 4, 5, 6, 7, 8 },
-    { 0, 9,10,11,12,13,14,15,16 },
-    { 0, 0,17,18,19,20,21,22,23 },
-    { 0, 0, 0,24,25,26,27,28,29 },
-    { 0, 0, 0, 0,30,31,32,33,34 },
-    { 0, 0, 0, 0, 0,35,36,37,38 },
-    { 0, 0, 0, 0, 0, 0,39,40,41 },
-    { 0, 0, 0, 0, 0, 0, 0,42,43 },
-    { 0, 0, 0, 0, 0, 0, 0, 0,44 },
+    /*          trail=0  1    2    3    4    5    6    7    8  */
+    /* val=0 */ {   0,   1,   2,   3,   4,   5,   6,   7,   8 },
+    /* val=1 */ { 0xFF,  9,  10,  11,  12,  13,  14,  15,  16 },
+    /* val=2 */ { 0xFF,0xFF, 17,  18,  19,  20,  21,  22,  23 },
+    /* val=3 */ { 0xFF,0xFF,0xFF, 24,  25,  26,  27,  28,  29 },
+    /* val=4 */ { 0xFF,0xFF,0xFF,0xFF, 30,  31,  32,  33,  34 },
+    /* val=5 */ { 0xFF,0xFF,0xFF,0xFF,0xFF, 35,  36,  37,  38 },
+    /* val=6 */ { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF, 39,  40,  41 },
+    /* val=7 */ { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF, 42,  43 },
+    /* val=8 */ { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF, 44 }
 };
 
-static inline u16 clamp_u16(u16 v, u16 lo, u16 hi)
+/* =============================================================================
+   Trail tile index lookup table (64-tile strip)
+   =============================================================================
+   Maps (valuePxInTile, trailPxInTile) to tile index in 64-tile trail strip.
+   Used for TRAIL BREAK cells (transition zone between value and trail edges).
+
+   Row = valuePxInTile (0..8)
+   Column = trailPxInTile (0..8)
+
+   Unlike the 45-tile body strip, this strip uses a different tile layout
+   optimized for trail-specific rendering (e.g., different edge shapes).
+   Column 8 maps to the same tile as column 7 (trail=7 and trail=8 share
+   the same visual when the cell is fully covered by trail).
+
+   Note: 0xFF entries (trail < value) are invalid and never accessed.
+   ============================================================================= */
+static const u8 s_trailTileStripsIndexByValueTrail[9][9] =
 {
-    if (v < lo) return lo;
-    if (v > hi) return hi;
-    return v;
+    /*          trail=0  1    2    3    4    5    6    7    8  */
+    /* val=0 */ {   0,   1,   2,   3,   4,   5,   6,   7,   7 },
+    /* val=1 */ { 0xFF,  8,   9,  10,  11,  12,  13,  14,  14 },
+    /* val=2 */ { 0xFF,  15, 16,  17,  18,  19,  20,  21,  21 },
+    /* val=3 */ { 0xFF,  22, 23,  24,  25,  26,  27,  28,  28 },
+    /* val=4 */ { 0xFF,  29, 30,  31,  32,  33,  34,  35,  35 },
+    /* val=5 */ { 0xFF,  36, 37,  38,  39,  40,  41,  42,  42 },
+    /* val=6 */ { 0xFF,  43, 44,  45,  46,  47,  48,  49,  49 },
+    /* val=7 */ { 0xFF,  50, 51,  52,  53,  54,  55,  56,  56 },
+    /* val=8 */ { 0xFF,  57, 58,  59,  60,  61,  62,  63,  63 }
+};
+
+
+/* =============================================================================
+   Helper functions (inlined for performance)
+   ============================================================================= */
+
+/**
+ * Clamp value to tile pixel range [0, 8].
+ *
+ * Lower clamp is branchless via arithmetic masking:
+ * - If v < 0, bit 15 is set, so ~(v >> 15) = 0x0000 which zeroes v.
+ * - If v >= 0, ~(v >> 15) = 0xFFFF which preserves v.
+ * Upper clamp uses a single branch (rare: only on break cells).
+ *
+ * Cost: ~8-12 cycles (asr + not + and + cmp + branch)
+ * vs original: ~10-20 cycles (2 branches worst-case)
+ */
+static inline u8 clamp_to_tile_size(s16 v)
+{
+    /* Branchless lower clamp: zero if negative.
+     * v >> 15 is SIGNED (arithmetic) shift: gives -1 (0xFFFF) if v < 0, 0 otherwise.
+     * ~(-1) = 0 zeroes v; ~0 = 0xFFFF preserves v.
+     * IMPORTANT: must NOT cast v to u16 before shift — that would make it unsigned
+     * and give 0 or 1 instead of 0 or 0xFFFF, breaking the mask. */
+    u16 clamped = (u16)(v & ~(v >> 15));
+    /* Upper clamp: cap at 8 (rare case, only at break cells) */
+    return (clamped > GAUGE_PIXELS_PER_TILE) ? GAUGE_PIXELS_PER_TILE : (u8)clamped;
 }
 
-static inline u16 sat_sub_u16(u16 a, u16 b)
-{
-    return (b >= a) ? 0 : (u16)(a - b);
-}
-
-static inline u16 sat_add_u16(u16 a, u16 b, u16 maxVal)
-{
-    u32 s = (u32)a + (u32)b;
-    return (s >= (u32)maxVal) ? maxVal : (u16)s;
-}
-
-static inline u8 clamp_px_0_8(s16 v)
-{
-    if (v <= 0) return 0;
-    if (v >= 8) return 8;
-    return (u8)v;
-}
-
+/**
+ * Convert gauge value to pixel position.
+ * Uses LUT if available, otherwise returns value directly (1:1 mapping).
+ *
+ * The LUT is auto-generated by Gauge_init when maxValue != maxFillPixels,
+ * or can be provided by user via Gauge_initEx.
+ */
 static inline u16 value_to_pixels(const GaugeLogic *logic, u16 value)
 {
-    if (logic->valueToPixelsLUT) return logic->valueToPixelsLUT[value];
+    if (logic->valueToPixelsLUT)
+        return logic->valueToPixelsLUT[value];
     return value;
 }
 
+/**
+ * Compute fill amounts for a given fillIndex (0..length-1).
+ *
+ * Core algorithm for pixel-perfect gauge rendering.
+ * Determines how many pixels of value and trail are visible in one cell.
+ *
+ * @param layout       Layout containing fillOffset
+ * @param fillIndex    Logical fill position (0 = first filled cell)
+ * @param valuePixels  Current value fill in pixels
+ * @param trailPixels  Current trail fill in pixels
+ * @param outValuePx   [out] Value fill in this cell (0-8)
+ * @param outTrailPx   [out] Trail fill in this cell (0-8, always >= outValuePx)
+ *
+ * Invariant: outTrailPx >= outValuePx (trail can never be behind value).
+ * Cost: ~20 cycles (2x clamp + 1 compare)
+ */
+static inline void compute_fill_for_fill_index(const GaugeLayout *layout,
+                                               u8 fillIndex,
+                                               u16 valuePixels,
+                                               u16 trailPixels,
+                                               u8 *outValuePx,
+                                               u8 *outTrailPx)
+{
+    const u16 cellStartPixel = layout->fillOffset + ((u16)fillIndex << TILE_TO_PIXEL_SHIFT);
+
+    u8 valuePxInCell = clamp_to_tile_size((s16)valuePixels - (s16)cellStartPixel);
+    u8 trailPxInCell = clamp_to_tile_size((s16)trailPixels - (s16)cellStartPixel);
+
+    /* Enforce trail >= value invariant */
+    if (trailPxInCell < valuePxInCell)
+        trailPxInCell = valuePxInCell;
+
+    *outValuePx = valuePxInCell;
+    *outTrailPx = trailPxInCell;
+}
+
+/**
+ * Compute fill amounts for a cell by its cellIndex.
+ * Wrapper around compute_fill_for_fill_index using the fillIndexByCell lookup.
+ *
+ * @param layout       Layout configuration
+ * @param cellIndex    Cell index in the layout (0..length-1)
+ * @param valuePixels  Current value fill in pixels
+ * @param trailPixels  Current trail fill in pixels
+ * @param outValuePx   [out] Value fill in this cell (0-8)
+ * @param outTrailPx   [out] Trail fill in this cell (0-8, always >= outValuePx)
+ */
+static inline void compute_fill_for_cell(const GaugeLayout *layout,
+                                         u8 cellIndex,
+                                         u16 valuePixels,
+                                         u16 trailPixels,
+                                         u8 *outValuePx,
+                                         u8 *outTrailPx)
+{
+    compute_fill_for_fill_index(layout, layout->fillIndexByCell[cellIndex],
+                                valuePixels, trailPixels, outValuePx, outTrailPx);
+}
+
+/**
+ * Compute the break fillIndex and its pixel offset within that cell.
+ *
+ * Given a pixel position, determines which cell (by fillIndex) contains that
+ * pixel and how many pixels are filled within that cell.
+ *
+ * Special case: exact tile boundary (pixel % 8 == 0 && pixel > 0) maps to
+ * the previous cell with 8px filled, not the next cell with 0px.
+ *
+ * @param layout      Layout containing fillOffset and length
+ * @param pixels      Pixel position to locate
+ * @param outPxInTile [out] Pixels filled in the located cell (0-8)
+ * @return fillIndex of the cell containing this pixel position
+ *
+ * Cost: ~25 cycles (subtract + shift + mask test + clamp)
+ */
+static inline u8 compute_fill_index_and_px(const GaugeLayout *layout,
+                                           u16 pixels,
+                                           u8 *outPxInTile)
+{
+    s16 rel = (s16)pixels - (s16)layout->fillOffset;
+    if (rel < 0)
+    {
+        *outPxInTile = 0;
+        return 0;
+    }
+
+    u16 fillIndex;
+    u8 pxInTile;
+
+    /* Exact tile boundary: use previous cell with 8px filled. */
+    if ((rel > 0) && ((rel & (GAUGE_PIXELS_PER_TILE - 1)) == 0))
+    {
+        fillIndex = (u16)((rel >> TILE_TO_PIXEL_SHIFT) - 1);
+        pxInTile = GAUGE_PIXELS_PER_TILE;
+    }
+    else
+    {
+        fillIndex = (u16)(rel >> TILE_TO_PIXEL_SHIFT);
+        const u16 cellStartPixel = layout->fillOffset + ((u16)fillIndex << TILE_TO_PIXEL_SHIFT);
+        pxInTile = clamp_to_tile_size((s16)pixels - (s16)cellStartPixel);
+    }
+
+    if (fillIndex >= layout->length)
+    {
+        fillIndex = (u16)(layout->length - 1);
+        pxInTile = GAUGE_PIXELS_PER_TILE;
+    }
+
+    *outPxInTile = pxInTile;
+
+    return (u8)fillIndex;
+}
+
+/**
+ * Compute tile position on WINDOW plane.
+ */
+static inline void compute_tile_xy(u8 orient,
+                                   u16 originX, u16 originY,
+                                   u8 cell,
+                                   u16 *outX, u16 *outY)
+{
+    if (orient == GAUGE_ORIENT_HORIZONTAL)
+    {
+        *outX = (u16)(originX + cell);
+        *outY = originY;
+    }
+    else
+    {
+        *outX = originX;
+        *outY = (u16)(originY + cell);
+    }
+}
+
+
+
 /* =============================================================================
-   GaugeLayout
+   GaugeBreakInfo — Pre-computed break/transition zone data
+   =============================================================================
+
+   Shared by process_fixed_mode() and process_dynamic_mode().
+   Contains all the information needed to classify cells in the break zone
+   between the value edge and the trail edge.
+
+   Gauge rendering visualized (horizontal, fill forward):
+
+     Cell:     [0   ][1   ][2   ][3   ][4   ][5   ][6   ][7   ]
+     Fill:     |FULL |FULL |BREAK|VALUE|TRAIL|TRAIL|END  |EMPTY|
+     Pixels:   ████████████▓▓▓▓▒▒▒░░░░░░░░░░░░░░░▒▒▒▒
+
+     FULL        = value fills entire cell (8px)
+     BREAK       = transition cell before value edge (BODY tileset)
+     VALUE CELL  = cell containing the value edge (partial value px)
+     TRAIL CELLS = cells between value and trail edges (TRAIL tileset)
+     END         = cell containing the trail edge / cap (END tileset)
+     EMPTY       = no fill (0px)
+
+   Multi-part gauges: if value or trail edges fall outside this layout's
+   pixel range [fillOffset .. fillOffset + length*8], the corresponding
+   break features are disabled for this part.
    ============================================================================= */
+
+typedef struct
+{
+    /* Break cell fill indices (CACHE_INVALID_U8 if not applicable) */
+    u8 valueFillIndex;          /* Fill index of the value break cell */
+    u8 trailFillIndex;          /* Fill index of the trail break cell */
+    u8 valuePxInBreakCell;      /* Pixels of value in the value break cell (0-8) */
+    u8 trailPxInBreakCell;      /* Pixels of trail in the trail break cell (0-8) */
+
+    /* Cell indices (via inverse LUT) */
+    u8 valueCellIndex;          /* Layout cell index for value break */
+    u8 trailCellIndex;          /* Layout cell index for trail break */
+
+    /* END/BREAK zone indices */
+    u8 endFillIndex;            /* Fill index for END cap tile (CACHE_INVALID_U8 if none) */
+    u8 valueBreakFillIndex;     /* Fill index for VALUE BREAK cell (CACHE_INVALID_U8 if none) */
+    u8 trailBreakFillIndex;     /* Fill index for TRAIL BREAK 1 (CACHE_INVALID_U8 if none) */
+    u8 trailBreakFillIndex2;    /* Fill index for TRAIL BREAK 2 (CACHE_INVALID_U8 if none) */
+
+    /* Pre-computed END cell fill values */
+    u8 endValuePxInTile;        /* Value pixels in END cell (0-8) */
+    u8 endTrailPxInTile;        /* Trail pixels in END cell (0-8) */
+
+    /* Flags */
+    u8 trailBreakActive;        /* Trail break zone is active */
+    u8 trailBreakSecondActive;  /* Second trail break cell exists */
+    u8 regionRenderActive;      /* Region-based rendering applies */
+
+} GaugeBreakInfo;
+
+/**
+ * Compute all break/transition zone information for a gauge part.
+ *
+ * This function determines where the value and trail edges fall within the
+ * layout, and pre-computes all indices and flags needed for per-cell
+ * classification in the render loop.
+ *
+ * @param layout              Layout configuration (with inverse LUT)
+ * @param valuePixels         Current value fill in pixels
+ * @param trailPixelsRendered Current trail fill in pixels (after blink)
+ * @param out                 [out] Pre-computed break zone information
+ *
+ * Cost: ~80 cycles (2x compute_fill_index_and_px + LUT lookups + flags)
+ */
+static inline void compute_break_info(const GaugeLayout *layout,
+                                      u16 valuePixels,
+                                      u16 trailPixelsRendered,
+                                      GaugeBreakInfo *out)
+{
+    /* Compute value/trail break positions (fillIndex + px inside that cell) */
+    out->valueFillIndex = compute_fill_index_and_px(layout, valuePixels, &out->valuePxInBreakCell);
+    out->trailFillIndex = compute_fill_index_and_px(layout, trailPixelsRendered, &out->trailPxInBreakCell);
+
+    /* O(1) inverse LUT lookup instead of O(n) linear scan (~300 cycles saved) */
+    out->valueCellIndex = layout->cellIndexByFillIndex[out->valueFillIndex];
+    out->trailCellIndex = layout->cellIndexByFillIndex[out->trailFillIndex];
+
+    const u8 valueSegId = layout->segmentIdByCell[out->valueCellIndex];
+    const u8 trailSegId = layout->segmentIdByCell[out->trailCellIndex];
+    const u8 valueSegmentHasEnd = (layout->tilesetEndBySegment[valueSegId] != NULL);
+    const u8 trailSegmentHasEnd = (layout->tilesetEndBySegment[trailSegId] != NULL);
+    const u8 valueSegmentHasTrail = (layout->tilesetTrailBySegment[valueSegId] != NULL);
+
+    /* Detect if break cells belong to this layout (multi-part gauges) */
+    const u16 layoutStart = layout->fillOffset;
+    const u16 layoutEnd = (u16)(layoutStart + ((u16)layout->length << TILE_TO_PIXEL_SHIFT));
+    const u8 valueInLayout = (valuePixels >= layoutStart && valuePixels <= layoutEnd);
+    const u8 trailInLayout = (trailPixelsRendered >= layoutStart && trailPixelsRendered <= layoutEnd);
+
+    /* END cap: placed on the visible trail break cell */
+    out->endFillIndex = (trailInLayout && trailSegmentHasEnd) ? out->trailFillIndex : CACHE_INVALID_U8;
+
+    /* VALUE BREAK: one cell before value break */
+    out->valueBreakFillIndex =
+        (valueInLayout && valueSegmentHasEnd && out->valueFillIndex > 0)
+        ? (u8)(out->valueFillIndex - 1) : CACHE_INVALID_U8;
+
+    /* TRAIL BREAK: active only when value and trail are not in the same cell */
+    out->trailBreakActive =
+        (trailInLayout && valueInLayout && valueSegmentHasEnd && valueSegmentHasTrail &&
+         (out->valueCellIndex != out->trailCellIndex));
+    out->trailBreakFillIndex = out->trailBreakActive ? out->valueFillIndex : CACHE_INVALID_U8;
+    out->trailBreakSecondActive =
+        (out->trailBreakActive && (out->trailFillIndex > (u8)(out->valueFillIndex + 1)));
+    out->trailBreakFillIndex2 = out->trailBreakSecondActive
+        ? (u8)(out->trailFillIndex - 1) : CACHE_INVALID_U8;
+
+    /* Region rendering: active when both edges are visible and have END tilesets */
+    out->regionRenderActive = (valueInLayout && trailInLayout &&
+                               valueSegmentHasEnd && trailSegmentHasEnd);
+
+    /* Precompute END cell fill values */
+    out->endValuePxInTile = 0;
+    out->endTrailPxInTile = 0;
+    if (trailInLayout && out->endFillIndex != CACHE_INVALID_U8)
+    {
+        compute_fill_for_fill_index(layout, out->endFillIndex,
+                                    valuePixels, trailPixelsRendered,
+                                    &out->endValuePxInTile, &out->endTrailPxInTile);
+    }
+}
+
+
+/**
+ * Upload a cell tile from ROM strip to VRAM (fixed mode).
+ */
+static inline void upload_cell_if_needed(GaugeStreamCell *cell,
+                                         const u32 *wantedStrip,
+                                         u8 desiredStripIdx)
+{
+    if (!wantedStrip) return;
+    if (cell->loadedFillIdx == desiredStripIdx &&
+        cell->loadedFillStrip45 == wantedStrip)
+        return;
+
+    const u32 *src = wantedStrip + FILL_IDX_TO_OFFSET(desiredStripIdx);
+    VDP_loadTileData(src, cell->vramTileIndex, 1, DMA_QUEUE);
+    cell->loadedFillIdx = desiredStripIdx;
+    cell->loadedFillStrip45 = wantedStrip;
+}
+
+/**
+ * Upload a fill tile from ROM strip to VRAM.
+ */
+static inline void upload_fill_tile(const u32 *strip, u8 fillIndex, u16 vramTile, u8 dmaMode)
+{
+    const u32 *src = strip + FILL_IDX_TO_OFFSET(fillIndex);
+    VDP_loadTileData(src, vramTile, 1, dmaMode);
+}
+
+
+/* =============================================================================
+   GaugeLayout implementation
+   ============================================================================= */
+
+void GaugeLayout_initEx(GaugeLayout *layout,
+                        u8 length,
+                        GaugeFillDirection fillDir,
+                        const u32 * const *bodyTilesets,
+                        const u32 * const *endTilesets,
+                        const u32 * const *breakTilesets,
+                        const u32 * const *trailTilesets,
+                        const u8 *segmentIdByCell,
+                        GaugeOrientation orientation,
+                        u8 paletteLine,
+                        u8 priority,
+                        u8 vflip,
+                        u8 hflip)
+{
+    /* Validate and clamp length */
+    if (length == 0) length = 1;
+    if (length > GAUGE_MAX_LENGTH) length = GAUGE_MAX_LENGTH;
+
+    layout->length = length;
+    layout->fillOffset = 0;
+
+    /* Copy tilesets (NULL-safe) */
+    for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
+    {
+        layout->tilesetBySegment[i] = bodyTilesets ? bodyTilesets[i] : NULL;
+        layout->tilesetEndBySegment[i] = endTilesets ? endTilesets[i] : NULL;
+        layout->tilesetBreakBySegment[i] = breakTilesets ? breakTilesets[i] : NULL;
+        layout->tilesetTrailBySegment[i] = trailTilesets ? trailTilesets[i] : NULL;
+    }
+
+    /* Copy segment IDs per cell (NULL = all segment 0) */
+    for (u8 i = 0; i < length; i++)
+    {
+        layout->segmentIdByCell[i] = segmentIdByCell ? segmentIdByCell[i] : 0;
+    }
+
+    /* Clear unused cells */
+    for (u8 i = length; i < GAUGE_MAX_LENGTH; i++)
+    {
+        layout->segmentIdByCell[i] = 0;
+    }
+
+    /* Set fill direction */
+    if (fillDir == GAUGE_FILL_REVERSE)
+        GaugeLayout_setFillReverse(layout);
+    else
+        GaugeLayout_setFillForward(layout);
+
+    /* Set visual properties */
+    layout->orientation = orientation;
+    layout->paletteLine = paletteLine;
+    layout->priority = priority ? 1 : 0;
+    layout->vflip = vflip ? 1 : 0;
+    layout->hflip = hflip ? 1 : 0;
+}
+
+void GaugeLayout_init(GaugeLayout *layout,
+                      u8 length,
+                      GaugeFillDirection fillDir,
+                      const u32 * const *tilesets,
+                      const u8 *segmentIdByCell,
+                      GaugeOrientation orientation,
+                      u8 paletteLine,
+                      u8 priority,
+                      u8 vflip,
+                      u8 hflip)
+{
+    GaugeLayout_initEx(layout, length, fillDir, tilesets, NULL, NULL,
+                       NULL, segmentIdByCell, orientation, paletteLine,
+                       priority, vflip, hflip);
+}
 
 void GaugeLayout_setFillForward(GaugeLayout *layout)
 {
-    for (u8 c = 0; c < layout->lengthTiles; c++)
+    for (u8 c = 0; c < layout->length; c++)
+    {
         layout->fillIndexByCell[c] = c;
+        layout->cellIndexByFillIndex[c] = c;
+    }
 }
 
 void GaugeLayout_setFillReverse(GaugeLayout *layout)
 {
-    for (u8 c = 0; c < layout->lengthTiles; c++)
-        layout->fillIndexByCell[c] = (u8)(layout->lengthTiles - 1 - c);
-}
-
-void GaugeLayout_buildLaneListsFromRom(GaugeLayout *layout, const GaugeRom *rom)
-{
-    layout->lane0CellCount = 0;
-    layout->lane1CellCount = 0;
-
-    if (!rom) return;
-
-    for (u8 cell = 0; cell < layout->lengthTiles; cell++)
+    for (u8 c = 0; c < layout->length; c++)
     {
-        const u8 seg = layout->segmentIdByCell[cell];
-        if (seg >= rom->segmentCount) continue;
-
-        const u8 mask = rom->segmentLaneMask[seg];
-
-        if ((mask & GAUGE_LANE_MASK_0) && rom->fillTileStrips[seg][GAUGE_LANE_0])
-        {
-            layout->lane0CellList[layout->lane0CellCount++] = cell;
-            if (layout->lane0CellCount >= GAUGE_MAX_CELLS)
-                break;
-        }
-
-        if ((mask & GAUGE_LANE_MASK_1) && rom->fillTileStrips[seg][GAUGE_LANE_1])
-        {
-            layout->lane1CellList[layout->lane1CellCount++] = cell;
-            if (layout->lane1CellCount >= GAUGE_MAX_CELLS)
-                break;
-        }
+        const u8 fillIdx = (u8)(layout->length - 1 - c);
+        layout->fillIndexByCell[c] = fillIdx;
+        layout->cellIndexByFillIndex[fillIdx] = c;
     }
 }
 
-void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src, const GaugeRom *rom)
+void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src)
 {
-    dst->lengthTiles = src->lengthTiles;
+    dst->length = src->length;
+    dst->fillOffset = src->fillOffset;
 
-    for (u8 c = 0; c < src->lengthTiles; c++)
+    /* Reverse segment order */
+    for (u8 c = 0; c < src->length; c++)
     {
-        const u8 srcCell = (u8)(src->lengthTiles - 1 - c);
+        const u8 srcCell = (u8)(src->length - 1 - c);
         dst->segmentIdByCell[c] = src->segmentIdByCell[srcCell];
     }
 
-    /* Mirrored HUD usually fills from the opposite end */
-    GaugeLayout_setFillReverse(dst);
+    /* Copy tilesets */
+    for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
+    {
+        dst->tilesetBySegment[i] = src->tilesetBySegment[i];
+        dst->tilesetEndBySegment[i] = src->tilesetEndBySegment[i];
+        dst->tilesetBreakBySegment[i] = src->tilesetBreakBySegment[i];
+        dst->tilesetTrailBySegment[i] = src->tilesetTrailBySegment[i];
+    }
 
-    GaugeLayout_buildLaneListsFromRom(dst, rom);
+    /* Opposite fill direction from source */
+    if (src->fillIndexByCell[0] == 0)
+        GaugeLayout_setFillReverse(dst);
+    else
+        GaugeLayout_setFillForward(dst);
+
+    /* Copy base visual properties */
+    dst->orientation = src->orientation;
+    dst->paletteLine = src->paletteLine;
+    dst->priority = src->priority;
+
+    /* Set flip based on orientation */
+    if (src->orientation == GAUGE_ORIENT_HORIZONTAL)
+    {
+        dst->hflip = 1;
+        dst->vflip = 0;
+    }
+    else
+    {
+        dst->hflip = 0;
+        dst->vflip = 1;
+    }
 }
 
+
 /* =============================================================================
-   GaugeLogic
+   GaugeLogic implementation
    ============================================================================= */
 
 void GaugeLogic_init(GaugeLogic *logic,
                      u16 maxValue,
                      u16 maxFillPixels,
-                     const u16 *valueToPixelsLUT)
+                     const u16 *valueToPixelsLUT,
+                     u8 trailEnabled,
+                     u16 initialValue)
 {
-    logic->maxValue = maxValue;
-    logic->currentValue = maxValue;
-
-    logic->maxFillPixels = maxFillPixels;
-    logic->valueToPixelsLUT = valueToPixelsLUT;
-
-    logic->valueTargetPixels = clamp_u16(value_to_pixels(logic, maxValue), 0, maxFillPixels);
-    logic->valuePixels = logic->valueTargetPixels;
-
-    logic->trailPixels = logic->valuePixels;
-
-    logic->holdFramesRemaining = 0;
-    logic->blinkFramesRemaining = 0;
-
-    /* Defaults */
-    logic->valueAnimEnabled = 0;
-    logic->valueAnimShift = 4;
-    logic->trailAnimShift = 4;
-    logic->blinkShift = 3;
+    GaugeLogic_initWithAnim(logic, maxValue, maxFillPixels, valueToPixelsLUT,
+                            trailEnabled, initialValue,
+                            0,  /* valueAnimEnabled = instant */
+                            GAUGE_DEFAULT_VALUE_ANIM_SHIFT,
+                            GAUGE_DEFAULT_TRAIL_ANIM_SHIFT,
+                            GAUGE_DEFAULT_BLINK_SHIFT);
 }
 
-void GaugeLogic_setAnimation(GaugeLogic *logic,
+void GaugeLogic_initWithAnim(GaugeLogic *logic,
+                             u16 maxValue,
+                             u16 maxFillPixels,
+                             const u16 *valueToPixelsLUT,
+                             u8 trailEnabled,
+                             u16 initialValue,
                              u8 valueAnimEnabled,
                              u8 valueAnimShift,
                              u8 trailAnimShift,
                              u8 blinkShift)
 {
-    logic->valueAnimEnabled = valueAnimEnabled ? 1 : 0;
+    /* Core state */
+    logic->maxValue = maxValue;
+    logic->currentValue = (initialValue > maxValue) ? maxValue : initialValue;
 
-    logic->valueAnimShift = (valueAnimShift == 0) ? 4 : valueAnimShift;
-    logic->trailAnimShift = (trailAnimShift == 0) ? 4 : trailAnimShift;
-    logic->blinkShift     = (blinkShift == 0) ? 3 : blinkShift;
-}
+    logic->maxFillPixels = maxFillPixels;
+    logic->valueToPixelsLUT = valueToPixelsLUT;
 
-void GaugeLogic_setValue(GaugeLogic *logic, u16 newValue)
-{
-    logic->currentValue = (newValue > logic->maxValue) ? logic->maxValue : newValue;
-
-    logic->valueTargetPixels = clamp_u16(value_to_pixels(logic, logic->currentValue), 0, logic->maxFillPixels);
+    /* Compute initial pixel values */
+    const u16 initialPixels = value_to_pixels(logic, logic->currentValue);
+    logic->valueTargetPixels = (initialPixels > maxFillPixels) ? maxFillPixels : initialPixels;
     logic->valuePixels = logic->valueTargetPixels;
-
-    /* Cancel trailing effect (example: debug set HP directly) */
     logic->trailPixels = logic->valuePixels;
+
+    /* Timers */
     logic->holdFramesRemaining = 0;
     logic->blinkFramesRemaining = 0;
+    logic->blinkTimer = 0;
+
+    /* Animation config */
+    logic->valueAnimEnabled = valueAnimEnabled ? 1 : 0;
+    logic->valueAnimShift = (valueAnimShift == 0) ? GAUGE_DEFAULT_VALUE_ANIM_SHIFT : valueAnimShift;
+    logic->trailAnimShift = (trailAnimShift == 0) ? GAUGE_DEFAULT_TRAIL_ANIM_SHIFT : trailAnimShift;
+    logic->blinkShift = (blinkShift == 0) ? GAUGE_DEFAULT_BLINK_SHIFT : blinkShift;
+
+    logic->trailEnabled = trailEnabled ? 1 : 0;
+
+    /* Initialize render cache to force first render */
+    logic->lastValuePixels = CACHE_INVALID_U16;
+    logic->lastTrailPixelsRendered = CACHE_INVALID_U16;
+    logic->lastBlinkOn = CACHE_INVALID_U8;
+
+    /* If trail disabled, ensure consistent state */
+    if (!logic->trailEnabled)
+    {
+        logic->trailPixels = logic->valuePixels;
+        logic->holdFramesRemaining = 0;
+        logic->blinkFramesRemaining = 0;
+    }
 }
 
-void GaugeLogic_applyDecrease(GaugeLogic *logic,
-                              u16 amount,
-                              u8 holdFrames,
-                              u8 blinkFrames)
-{
-    /* Life bar example:
-       - damage decreases HP immediately (value)
-       - trail jumps to previous displayed width to show the lost part */
-    const u16 previousDisplayedValuePixels = logic->valuePixels;
-
-    logic->currentValue = sat_sub_u16(logic->currentValue, amount);
-
-    logic->valueTargetPixels = clamp_u16(value_to_pixels(logic, logic->currentValue), 0, logic->maxFillPixels);
-    if (!logic->valueAnimEnabled)
-        logic->valuePixels = logic->valueTargetPixels;
-
-    if (logic->trailPixels < previousDisplayedValuePixels)
-        logic->trailPixels = previousDisplayedValuePixels;
-
-    logic->holdFramesRemaining = holdFrames;
-    logic->blinkFramesRemaining = blinkFrames;
-}
-
-void GaugeLogic_applyIncrease(GaugeLogic *logic, u16 amount)
-{
-    /* Life bar example:
-       - heal increases HP (value)
-       - no trailing red part on heal => trail resets to value */
-    logic->currentValue = sat_add_u16(logic->currentValue, amount, logic->maxValue);
-
-    logic->valueTargetPixels = clamp_u16(value_to_pixels(logic, logic->currentValue), 0, logic->maxFillPixels);
-    if (!logic->valueAnimEnabled)
-        logic->valuePixels = logic->valueTargetPixels;
-
-    logic->trailPixels = logic->valuePixels;
-    logic->holdFramesRemaining = 0;
-    logic->blinkFramesRemaining = 0;
-}
-
+/**
+ * GaugeLogic_tick -- Advance the logic state machine by one frame.
+ *
+ * State machine transitions (per frame):
+ *
+ *   [IDLE] -----(Gauge_decrease)-----> [HOLD]
+ *     ^                                  |
+ *     |                          holdFramesRemaining--
+ *     |                                  |
+ *     |                          holdFramesRemaining==0
+ *     |                                  v
+ *     |                               [BLINK]
+ *     |                                  |
+ *     |                         blinkFramesRemaining--
+ *     |                         blinkTimer++
+ *     |                                  |
+ *     |                         blinkFramesRemaining==0
+ *     |                                  v
+ *     |                              [SHRINK]
+ *     |                                  |
+ *     |                        trailPixels -= step
+ *     |                                  |
+ *     |                        trailPixels <= valuePixels
+ *     +----------------------------------+
+ *
+ * Value animation (independent of trail):
+ *   valuePixels converges toward valueTargetPixels using exponential decay:
+ *   step = (distance >> valueAnimShift) + 1
+ *
+ * OPTIMIZATION NOTES:
+ * - Early returns for common cases (no animation needed)
+ * - Shift operations instead of division
+ * - Saturating subtract via arithmetic masking (branchless)
+ * - Minimal branches in hot paths
+ *
+ * Cost: ~50-100 cycles (mostly conditionals, no memory-intensive ops)
+ */
 void GaugeLogic_tick(GaugeLogic *logic)
 {
-    /* 1) animate valuePixels toward valueTargetPixels (optional) */
-    if (logic->valueAnimEnabled && (logic->valuePixels != logic->valueTargetPixels))
+    /* --- Value animation (if enabled) --- */
+    if (logic->valueAnimEnabled && logic->valuePixels != logic->valueTargetPixels)
     {
         if (logic->valuePixels < logic->valueTargetPixels)
         {
+            /* Increasing (heal animation) */
             const u16 diff = (u16)(logic->valueTargetPixels - logic->valuePixels);
-            const u16 step = (u16)((diff >> logic->valueAnimShift) + 1);
-            logic->valuePixels += step;
+            const u16 step = CALC_ANIM_STEP(diff, logic->valueAnimShift);
+            logic->valuePixels = (u16)(logic->valuePixels + step);
+
             if (logic->valuePixels > logic->valueTargetPixels)
                 logic->valuePixels = logic->valueTargetPixels;
+            if (logic->valuePixels > logic->maxFillPixels)
+                logic->valuePixels = logic->maxFillPixels;
         }
         else
         {
+            /* Decreasing (damage animation)
+             * Saturating subtract: if result wraps negative, mask zeroes it out.
+             * Cost: ~10 cycles (sub + asr + not + and) vs ~14 cycles (cmp + branch + clr) */
             const u16 diff = (u16)(logic->valuePixels - logic->valueTargetPixels);
-            const u16 step = (u16)((diff >> logic->valueAnimShift) + 1);
-            logic->valuePixels = (logic->valuePixels > step) ? (u16)(logic->valuePixels - step) : 0;
+            const u16 step = CALC_ANIM_STEP(diff, logic->valueAnimShift);
+            s16 result = (s16)logic->valuePixels - (s16)step;
+            logic->valuePixels = (u16)(result & ~(result >> 15));
+
             if (logic->valuePixels < logic->valueTargetPixels)
                 logic->valuePixels = logic->valueTargetPixels;
         }
     }
 
-    /* 2) blink timer */
-    if (logic->blinkFramesRemaining)
-        logic->blinkFramesRemaining--;
 
-    /* 3) hold then trail shrinks toward valuePixels */
-    if (logic->holdFramesRemaining)
+    /* --- Trail handling --- */
+    if (!logic->trailEnabled)
+    {
+        /* Trail disabled: keep in sync with value */
+        logic->trailPixels = logic->valuePixels;
+        return;
+    }
+
+    /* Increment blink timer (used for blink pattern) */
+    if (logic->blinkFramesRemaining > 0)
+    {
+        logic->blinkTimer++;
+        logic->blinkFramesRemaining--;
+    }
+
+    /* Hold phase: trail stays at previous position */
+    if (logic->holdFramesRemaining > 0)
     {
         logic->holdFramesRemaining--;
+        return;
+    }
+
+    /* Trail shrink phase: move toward value.
+     * Uses saturating subtract to avoid underflow without branch. */
+    if (logic->trailPixels > logic->valuePixels)
+    {
+        const u16 diff = (u16)(logic->trailPixels - logic->valuePixels);
+        const u16 step = CALC_ANIM_STEP(diff, logic->trailAnimShift);
+        s16 result = (s16)logic->trailPixels - (s16)step;
+        logic->trailPixels = (u16)(result & ~(result >> 15));
+
+        if (logic->trailPixels < logic->valuePixels)
+            logic->trailPixels = logic->valuePixels;
     }
     else
     {
-        if (logic->trailPixels > logic->valuePixels)
+        logic->trailPixels = logic->valuePixels;
+    }
+}
+
+
+/* =============================================================================
+   GaugePart internals
+   ============================================================================= */
+
+/* =============================================================================
+   Dynamic VRAM mode implementation
+   ============================================================================= */
+
+/**
+ * Initialize dynamic mode VRAM allocation.
+ *
+ * VRAM layout (allocated sequentially from vramBase):
+ *
+ *   Per used segment (repeated for each segment with a body tileset):
+ *   +-------------------+
+ *   | Empty tile (0,0)  |  1 tile  — value=0, trail=0
+ *   +-------------------+
+ *   | Full value (8,8)  |  1 tile  — value=8, trail=8
+ *   +-------------------+
+ *   | Full trail (0,8)  |  1 tile  — value=0, trail=8  (only if trailEnabled)
+ *   +-------------------+
+ *
+ *   Partial tiles (1 per GaugePart, shared across all segments):
+ *   +-------------------+
+ *   | Partial value     |  1 tile  — streamed on demand (also "both" case)
+ *   +-------------------+
+ *   | Partial trail     |  1 tile  — streamed on demand (only if trailEnabled)
+ *   +-------------------+
+ *   | Partial END       |  1 tile  — cap tile (only if any segment has END)
+ *   +-------------------+
+ *   | Partial trail 2nd |  1 tile  — 2nd trail break (only if trail + END)
+ *   +-------------------+
+ *
+ * Standard tiles are pre-loaded once at init (preload_dynamic_standard_tiles).
+ * Partial tiles are streamed per-frame only when their content changes.
+ *
+ * @param dyn          Dynamic mode data to initialize
+ * @param layout       Layout configuration (segments, tilesets)
+ * @param vramBase     Base VRAM tile index
+ * @param trailEnabled Whether trail rendering is active
+ */
+static void init_dynamic_vram(GaugeDynamic *dyn, const GaugeLayout *layout, u16 vramBase, u8 trailEnabled)
+{
+    u16 nextVram = vramBase;
+    u8 hasEndTileset = 0;
+
+    /* Initialize cache to invalid */
+    for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
+    {
+        dyn->vramTileEmpty[i] = 0;
+        dyn->vramTileFullValue[i] = 0;
+        dyn->vramTileFullTrail[i] = 0;
+    }
+
+    dyn->loadedSegmentPartialValue = CACHE_INVALID_U8;
+    dyn->loadedFillIdxPartialValue = CACHE_INVALID_U8;
+    dyn->loadedSegmentPartialTrail = CACHE_INVALID_U8;
+    dyn->loadedFillIdxPartialTrail = CACHE_INVALID_U8;
+    dyn->loadedSegmentPartialEnd = CACHE_INVALID_U8;
+    dyn->loadedFillIdxPartialEnd = CACHE_INVALID_U8;
+    dyn->loadedSegmentPartialTrailSecond = CACHE_INVALID_U8;
+    dyn->loadedFillIdxPartialTrailSecond = CACHE_INVALID_U8;
+
+    /* Initialize tilemap cache */
+    for (u8 i = 0; i < GAUGE_MAX_LENGTH; i++)
+    {
+        dyn->cellCurrentTileIndex[i] = CACHE_INVALID_U16;
+    }
+
+    /* Determine which segments are used */
+    u8 segmentUsed[GAUGE_MAX_SEGMENTS] = {0};
+    for (u8 i = 0; i < layout->length; i++)
+    {
+        const u8 segId = layout->segmentIdByCell[i];
+        if (layout->tilesetBySegment[segId])
         {
-            const u16 diff = (u16)(logic->trailPixels - logic->valuePixels);
-            const u16 step = (u16)((diff >> logic->trailAnimShift) + 1);
-            logic->trailPixels = (logic->trailPixels > step) ? (u16)(logic->trailPixels - step) : 0;
-            if (logic->trailPixels < logic->valuePixels)
-                logic->trailPixels = logic->valuePixels;
+            segmentUsed[segId] = 1;
+        }
+    }
+
+    /* Determine if any used segment has END tiles */
+    for (u8 segId = 0; segId < GAUGE_MAX_SEGMENTS; segId++)
+    {
+        if (segmentUsed[segId] && layout->tilesetEndBySegment[segId])
+            hasEndTileset = 1;
+    }
+
+    /* Allocate standard tiles for each used segment */
+    for (u8 segId = 0; segId < GAUGE_MAX_SEGMENTS; segId++)
+    {
+        if (!segmentUsed[segId])
+            continue;
+
+        /* Empty tile (0,0) */
+        dyn->vramTileEmpty[segId] = nextVram;
+        nextVram++;
+
+        /* Full value tile (8,8) */
+        dyn->vramTileFullValue[segId] = nextVram;
+        nextVram++;
+
+        /* Full trail tile (0,8) - only if trail enabled */
+        if (trailEnabled)
+        {
+            dyn->vramTileFullTrail[segId] = nextVram;
+            nextVram++;
+        }
+    }
+
+    /* Partial tiles (scalars - 1 per GaugePart, streamed on demand) */
+    dyn->vramTilePartialValue = nextVram;  /* Also used for "both" case */
+    nextVram++;
+
+    if (trailEnabled)
+    {
+        dyn->vramTilePartialTrail = nextVram;
+        nextVram++;
+    }
+    else
+    {
+        /* If trail disabled, set to 0 (won't be used) */
+        dyn->vramTilePartialTrail = 0;
+    }
+
+    if (hasEndTileset)
+    {
+        dyn->vramTilePartialEnd = nextVram;
+        nextVram++;
+    }
+    else
+    {
+        dyn->vramTilePartialEnd = 0;
+    }
+
+    if (trailEnabled && hasEndTileset)
+    {
+        dyn->vramTilePartialTrailSecond = nextVram;
+        nextVram++;
+    }
+    else
+    {
+        dyn->vramTilePartialTrailSecond = 0;
+    }
+}
+
+/**
+ * Preload standard tiles for dynamic mode.
+ */
+static void preload_dynamic_standard_tiles(GaugeDynamic *dyn, const GaugeLayout *layout, u8 trailEnabled)
+{
+    const u8 emptyIndex = s_fillTileStripsIndexByValueTrail[0][0];       /* value=0, trail=0 */
+    const u8 fullValueIndex = s_fillTileStripsIndexByValueTrail[8][8];   /* value=8, trail=8 */
+    const u8 fullTrailIndexBody = s_fillTileStripsIndexByValueTrail[0][8];   /* value=0, trail=8 */
+    const u8 fullTrailIndexTrail = s_trailTileStripsIndexByValueTrail[0][8]; /* value=0, trail=8 */
+
+    for (u8 segId = 0; segId < GAUGE_MAX_SEGMENTS; segId++)
+    {
+        const u32 *bodyStrip = layout->tilesetBySegment[segId];
+        if (!bodyStrip)
+            continue;
+
+        /* Upload empty tile */
+        if (dyn->vramTileEmpty[segId] != 0)
+            upload_fill_tile(bodyStrip, emptyIndex, dyn->vramTileEmpty[segId], DMA_QUEUE);
+
+        /* Upload full value tile */
+        if (dyn->vramTileFullValue[segId] != 0)
+            upload_fill_tile(bodyStrip, fullValueIndex, dyn->vramTileFullValue[segId], DMA_QUEUE);
+
+        /* Upload full trail tile (only if trail enabled) */
+        if (trailEnabled && dyn->vramTileFullTrail[segId] != 0)
+        {
+            const u32 *trailStrip = layout->tilesetTrailBySegment[segId];
+            if (trailStrip)
+                upload_fill_tile(trailStrip, fullTrailIndexTrail, dyn->vramTileFullTrail[segId], DMA_QUEUE);
+            else
+                upload_fill_tile(bodyStrip, fullTrailIndexBody, dyn->vramTileFullTrail[segId], DMA_QUEUE);
+        }
+    }
+}
+
+/**
+ * Initialize tilemap positions and write initial tilemap (all empty).
+ */
+static void init_dynamic_tilemap(GaugePart *part)
+{
+    GaugeLayout *layout = &part->layout;
+    GaugeDynamic *dyn = &part->dyn;
+
+    /* Pre-calculate tilemap positions and cell validity for each cell */
+    for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
+    {
+        compute_tile_xy(layout->orientation, part->originX, part->originY, cellIndex,
+                        &layout->tilemapPosByCell[cellIndex].x,
+                        &layout->tilemapPosByCell[cellIndex].y);
+
+        /* Pre-compute cell validity (avoids tileset NULL check in render loop) */
+        const u8 segId = layout->segmentIdByCell[cellIndex];
+        dyn->cellValid[cellIndex] = (layout->tilesetBySegment[segId] != NULL) ? 1 : 0;
+    }
+
+    /* Write initial tilemap (all empty tiles) */
+    for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
+    {
+        if (!dyn->cellValid[cellIndex])
+            continue;
+
+        const u8 segId = layout->segmentIdByCell[cellIndex];
+        const u16 vramTile = dyn->vramTileEmpty[segId];
+        const u16 attr = TILE_ATTR_FULL(layout->paletteLine, layout->priority,
+                                        layout->vflip, layout->hflip, vramTile);
+
+        VDP_setTileMapXY(WINDOW, attr,
+                         layout->tilemapPosByCell[cellIndex].x,
+                         layout->tilemapPosByCell[cellIndex].y);
+
+        /* Initialize cache to avoid redundant writes on first update */
+        dyn->cellCurrentTileIndex[cellIndex] = vramTile;
+    }
+}
+
+/**
+ * Initialize tilemap for fixed mode (one VRAM tile per cell).
+ */
+static void write_tilemap_fixed_init(GaugePart *part)
+{
+    const GaugeLayout *layout = &part->layout;
+    part->cellCount = 0;
+
+    for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
+    {
+        const u8 segId = layout->segmentIdByCell[cellIndex];
+        const u32 *bodyStrip = layout->tilesetBySegment[segId];
+
+        if (!bodyStrip)
+            continue;
+
+        if (part->cellCount >= GAUGE_MAX_LENGTH)
+            break;
+
+        const u16 vramTile = (u16)(part->vramBase + part->cellCount);
+        const u16 attr = TILE_ATTR_FULL(layout->paletteLine, layout->priority,
+                                        layout->vflip, layout->hflip, vramTile);
+
+        u16 x, y;
+        compute_tile_xy(layout->orientation, part->originX, part->originY, cellIndex, &x, &y);
+
+        VDP_setTileMapXY(WINDOW, attr, x, y);
+
+        /* Precompute per-cell strips to avoid segment lookups every frame */
+        const u32 *endStrip = layout->tilesetEndBySegment[segId];
+        const u32 *breakStrip = layout->tilesetBreakBySegment[segId];
+        const u32 *trailStrip = layout->tilesetTrailBySegment[segId];
+
+        /* Fallback rules:
+         * - No END => BODY only (ignore BREAK)
+         * - END exists + no BREAK => BREAK uses BODY
+         */
+        if (!endStrip)
+        {
+            breakStrip = NULL;
+        }
+        else if (!breakStrip)
+        {
+            breakStrip = bodyStrip;
+        }
+
+        part->cells[part->cellCount].vramTileIndex = vramTile;
+        part->cells[part->cellCount].bodyFillStrip45 = bodyStrip;
+        part->cells[part->cellCount].endFillStrip45 = endStrip;
+        part->cells[part->cellCount].breakFillStrip45 = breakStrip;
+        part->cells[part->cellCount].trailFillStrip64 = trailStrip;
+        part->cells[part->cellCount].loadedFillStrip45 = NULL;
+        part->cells[part->cellCount].loadedFillIdx = CACHE_INVALID_U8;
+        part->cells[part->cellCount].cellIndex = cellIndex;
+        part->cellCount++;
+
+    } 
+}
+
+/**
+ * Process fixed mode: stream tiles for all cells via DMA.
+ *
+ * Each cell has its own dedicated VRAM tile. When the gauge value changes,
+ * only the affected cells get new tile data DMA'd from ROM strips.
+ * Change detection per cell (loadedFillIdx + loadedFillStrip45) avoids
+ * redundant DMA transfers.
+ *
+ * Algorithm:
+ * 1. Compute break zone boundaries (breakLow..breakHigh)
+ * 2. For each cell (countdown loop):
+ *    a. Early-exit if trivially full or empty (skip classification)
+ *    b. Classify cell into visual mode (END/TRAIL_BREAK/VALUE_BREAK/etc.)
+ *    c. Select appropriate ROM strip and fill index
+ *    d. DMA tile data if changed (upload_cell_if_needed)
+ *
+ * @param part                 Part to render
+ * @param valuePixels          Current value fill in pixels
+ * @param trailPixelsRendered  Current trail fill in pixels (after blink)
+ *
+ * Cost: ~200 cycles per cell (DMA setup dominant), ~50 cycles for trivial cells
+ */
+static void process_fixed_mode(GaugePart *part, u16 valuePixels, u16 trailPixelsRendered)
+{
+    const GaugeLayout *layout = &part->layout;
+
+    /* Compute break zone info (shared logic with dynamic mode) */
+    GaugeBreakInfo brk;
+    compute_break_info(layout, valuePixels, trailPixelsRendered, &brk);
+
+    /* Pre-compute break zone boundaries for early-exit optimization.
+     * breakLow  = lowest fillIndex that could be a special cell (value/trail break)
+     * breakHigh = highest fillIndex that could be a special cell
+     * Cells outside [breakLow..breakHigh] are trivially full or empty (~70-80%).
+     * Saves ~50 cycles per trivial cell (5 boolean comparisons skipped). */
+    const u8 breakLow = (brk.valueBreakFillIndex != CACHE_INVALID_U8)
+                       ? brk.valueBreakFillIndex : brk.valueFillIndex;
+    const u8 breakHigh = brk.trailFillIndex;
+
+    /* Countdown loop: 68000 zero-flag test is free after decrement (dbra) */
+    u8 i = part->cellCount;
+    while (i--)
+    {
+        GaugeStreamCell *cell = &part->cells[i];
+        const u8 cellFillIndex = layout->fillIndexByCell[cell->cellIndex];
+
+        /* === Early-exit: trivial cells (full value or empty) ===
+         * ~70-80% of cells hit this path, skipping the 5-boolean
+         * classification below. Saves ~50 cycles per cell. */
+        if (cellFillIndex < breakLow)
+        {
+            upload_cell_if_needed(cell, cell->bodyFillStrip45,
+                                  s_fillTileStripsIndexByValueTrail[8][8]);
+            continue;
+        }
+        if (cellFillIndex > breakHigh)
+        {
+            upload_cell_if_needed(cell, cell->bodyFillStrip45,
+                                  s_fillTileStripsIndexByValueTrail[0][0]);
+            continue;
+        }
+
+        /* === Break zone: classify cell by visual mode ===
+         * Priority order:
+         * 1. END         — cap/termination tile
+         * 2. TRAIL_BREAK — first trail transition cell (after value break)
+         * 3. TRAIL_BREAK2— second trail transition (before END)
+         * 4. TRAIL_FULL  — full trail between value and trail edges
+         * 5. VALUE_BREAK — transition cell before value edge
+         * 6. DEFAULT     — standard fill or region-based rendering
+         */
+        const u8 cellIsEnd = (brk.endFillIndex != CACHE_INVALID_U8 &&
+                              cell->endFillStrip45 && cellFillIndex == brk.endFillIndex);
+        const u8 cellIsTrailBreak =
+            (brk.trailBreakActive && cell->trailFillStrip64 && cellFillIndex == brk.trailBreakFillIndex);
+        const u8 cellIsTrailBreak2 =
+            (brk.trailBreakSecondActive && cell->trailFillStrip64 && cellFillIndex == brk.trailBreakFillIndex2);
+        const u8 cellIsTrailFull =
+            (brk.trailBreakActive && cell->trailFillStrip64 &&
+             cellFillIndex > brk.valueFillIndex && cellFillIndex < brk.trailFillIndex);
+        const u8 cellIsValueBreak = (brk.valueBreakFillIndex != CACHE_INVALID_U8 &&
+                                     cellFillIndex == brk.valueBreakFillIndex);
+
+        const u32 *stripToUse = cell->bodyFillStrip45;
+        u8 desiredStripIndex = 0;
+
+        if (cellIsEnd)
+        {
+            /* END uses the end strip and the standard fill LUT. */
+            stripToUse = cell->endFillStrip45;
+            desiredStripIndex = s_fillTileStripsIndexByValueTrail[brk.endValuePxInTile][brk.endTrailPxInTile];
+        }
+        else if (cellIsTrailBreak)
+        {
+            /* TRAIL BREAK 1 (after B):
+             * If next cell is full trail, force trailPx=8 for proper raccord.
+             */
+            stripToUse = cell->trailFillStrip64;
+            if (brk.trailBreakSecondActive)
+                desiredStripIndex = s_trailTileStripsIndexByValueTrail[brk.valuePxInBreakCell][8];
+            else
+                desiredStripIndex = s_trailTileStripsIndexByValueTrail[brk.valuePxInBreakCell][brk.trailPxInBreakCell];
+        }
+        else if (cellIsTrailBreak2)
+        {
+            /* TRAIL BREAK 2 (before E): same fill index as END but on TRAIL tileset.
+             * Special case: if END index is 8, use trail LUT [0][endIndex].
+             */
+            stripToUse = cell->trailFillStrip64;
+            const u8 endIndex = s_fillTileStripsIndexByValueTrail[brk.endValuePxInTile][brk.endTrailPxInTile];
+            if (endIndex == 8)
+                desiredStripIndex = s_trailTileStripsIndexByValueTrail[0][endIndex];
+            else
+                desiredStripIndex = endIndex;
+        }
+        else if (cellIsTrailFull)
+        {
+            /* TRAIL FULL uses the trail strip, fixed full index (7). */
+            stripToUse = cell->trailFillStrip64;
+            desiredStripIndex = 7;
+        }
+        else if (cellIsValueBreak)
+        {
+            /* VALUE BREAK always uses BODY (never BREAK tileset).
+             * - If trailBreakActive: index = valuePxInBreakCell
+             * - Else: index follows END (same fill as break)
+             */
+            stripToUse = cell->bodyFillStrip45;
+            if (brk.trailBreakActive)
+                desiredStripIndex = brk.valuePxInBreakCell;
+            else
+                desiredStripIndex = s_fillTileStripsIndexByValueTrail[brk.endValuePxInTile][brk.endTrailPxInTile];
         }
         else
         {
-            logic->trailPixels = logic->valuePixels;
+            if (brk.regionRenderActive)
+            {
+                /* Region-based rendering when trail is active. */
+                if (cellFillIndex < brk.valueFillIndex)
+                {
+                    /* BODY full */
+                    stripToUse = cell->bodyFillStrip45;
+                    desiredStripIndex = s_fillTileStripsIndexByValueTrail[8][8]; /* 44 */
+                }
+                else if (cellFillIndex > brk.trailFillIndex)
+                {
+                    /* BODY empty */
+                    stripToUse = cell->bodyFillStrip45;
+                    desiredStripIndex = s_fillTileStripsIndexByValueTrail[0][0]; /* 0 */
+                }
+                else if (cellFillIndex > brk.valueFillIndex && cellFillIndex < brk.trailFillIndex)
+                {
+                    /* TRAIL full */
+                    stripToUse = cell->trailFillStrip64;
+                    desiredStripIndex = 7;
+                }
+            }
+            else
+            {
+                /* Default behavior: standard fill computation (no trail break). */
+                if (brk.endFillIndex != CACHE_INVALID_U8)
+                {
+                    if (cellFillIndex == brk.endFillIndex)
+                        stripToUse = cell->endFillStrip45;
+                    else if (cellFillIndex == brk.valueBreakFillIndex && cell->breakFillStrip45)
+                        stripToUse = cell->breakFillStrip45;
+                }
+
+                u8 valuePxInTile = 0;
+                u8 trailPxInTile = 0;
+
+                if (stripToUse == cell->breakFillStrip45)
+                {
+                    /* BREAK should track END evolution (same fill as break). */
+                    valuePxInTile = brk.endValuePxInTile;
+                    trailPxInTile = brk.endTrailPxInTile;
+                }
+                else
+                {
+                    compute_fill_for_cell(layout, cell->cellIndex,
+                                          valuePixels, trailPixelsRendered,
+                                          &valuePxInTile, &trailPxInTile);
+                }
+
+                desiredStripIndex = s_fillTileStripsIndexByValueTrail[valuePxInTile][trailPxInTile];
+            }
+        }
+        upload_cell_if_needed(cell, stripToUse, desiredStripIndex);
+    }
+}
+
+/**
+ * Process dynamic mode -- Tilemap-based rendering algorithm.
+ *
+ * Unlike fixed mode, dynamic mode uses shared VRAM tiles and updates the
+ * tilemap to point cells at the appropriate pre-loaded or streamed tile.
+ * This uses less VRAM but more CPU (tilemap writes vs DMA).
+ *
+ * Algorithm:
+ * 1. Compute break zone boundaries (breakLow..breakHigh)
+ * 2. For each cell (countdown loop):
+ *    a. Early-exit if trivially full or empty (tilemap-only update)
+ *    b. Classify cell into visual mode (same as fixed mode)
+ *    c. Select VRAM tile (pre-loaded standard or streamed partial)
+ *    d. Stream partial tile data if segment/fill changed
+ *    e. Update tilemap if VRAM tile assignment changed
+ *
+ * Pre-computed data used:
+ * - layout->tilemapPosByCell: screen coordinates per cell (computed at init)
+ * - dyn->cellValid: cell validity flags (avoids NULL checks in render loop)
+ * - dyn->cellCurrentTileIndex: tilemap cache for change detection
+ *
+ * @param part                 Part to render
+ * @param valuePixels          Current value fill in pixels
+ * @param trailPixelsRendered  Current trail fill in pixels (after blink)
+ *
+ * Cost: ~50 cycles for trivial cells, ~300-500 cycles for break zone cells
+ */
+static void process_dynamic_mode(GaugePart *part, u16 valuePixels, u16 trailPixelsRendered)
+{
+    GaugeDynamic *dyn = &part->dyn;
+    const GaugeLayout *layout = &part->layout;
+
+    /* Pre-compute tilemap attribute base (without tile index) */
+    const u16 attrBase = TILE_ATTR_FULL(layout->paletteLine, layout->priority,
+                                        layout->vflip, layout->hflip, 0);
+
+    /* Compute break zone info (shared logic with fixed mode) */
+    GaugeBreakInfo brk;
+    compute_break_info(layout, valuePixels, trailPixelsRendered, &brk);
+
+    /* Pre-compute break zone boundaries for early-exit (same logic as fixed mode) */
+    const u8 breakLow = (brk.valueBreakFillIndex != CACHE_INVALID_U8)
+                       ? brk.valueBreakFillIndex : brk.valueFillIndex;
+    const u8 breakHigh = brk.trailFillIndex;
+
+    /* Forward iteration required: dynamic mode shares partial VRAM tiles across cells.
+     * With countdown, a lower-index cell could overwrite partial tile data needed by a
+     * higher-index cell that was processed first. Forward order ensures the last writer
+     * (highest fillIndex) wins, which matches the original design assumption.
+     * NOTE: countdown is safe for fixed mode (each cell has its own VRAM tile). */
+    for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
+    {
+        /* Skip invalid cells (pre-computed in init_dynamic_tilemap) */
+        if (!dyn->cellValid[cellIndex])
+            continue;
+
+        const u8 cellFillIndex = layout->fillIndexByCell[cellIndex];
+        const u8 segId = layout->segmentIdByCell[cellIndex];
+
+        /* === Early-exit: trivial cells (full value or empty) ===
+         * Standard tiles are pre-loaded in VRAM, only tilemap update needed.
+         * ~70-80% of cells hit this path. */
+        if (cellFillIndex < breakLow)
+        {
+            const u16 vt = dyn->vramTileFullValue[segId];
+            if (dyn->cellCurrentTileIndex[cellIndex] != vt)
+            {
+                VDP_setTileMapXY(WINDOW, attrBase | vt,
+                                 layout->tilemapPosByCell[cellIndex].x,
+                                 layout->tilemapPosByCell[cellIndex].y);
+                dyn->cellCurrentTileIndex[cellIndex] = vt;
+            }
+            continue;
+        }
+        if (cellFillIndex > breakHigh)
+        {
+            const u16 vt = dyn->vramTileEmpty[segId];
+            if (dyn->cellCurrentTileIndex[cellIndex] != vt)
+            {
+                VDP_setTileMapXY(WINDOW, attrBase | vt,
+                                 layout->tilemapPosByCell[cellIndex].x,
+                                 layout->tilemapPosByCell[cellIndex].y);
+                dyn->cellCurrentTileIndex[cellIndex] = vt;
+            }
+            continue;
+        }
+
+        /* === Break zone: full classification needed === */
+        const u8 cellHasEnd = (layout->tilesetEndBySegment[segId] != NULL);
+        const u8 cellHasTrail = (layout->tilesetTrailBySegment[segId] != NULL);
+        const u32 *bodyStrip = layout->tilesetBySegment[segId];
+        const u32 *endStrip = layout->tilesetEndBySegment[segId];
+        const u32 *trailStrip = cellHasTrail ? layout->tilesetTrailBySegment[segId] : bodyStrip;
+
+        const u8 cellIsEnd = (brk.endFillIndex != CACHE_INVALID_U8 &&
+                              cellHasEnd && cellFillIndex == brk.endFillIndex);
+        const u8 cellIsTrailBreak =
+            (brk.trailBreakActive && cellHasTrail && cellFillIndex == brk.trailBreakFillIndex);
+        const u8 cellIsTrailBreak2 =
+            (brk.trailBreakSecondActive && cellHasTrail && cellFillIndex == brk.trailBreakFillIndex2);
+        const u8 cellIsTrailFull =
+            (brk.trailBreakActive && cellHasTrail &&
+             cellFillIndex > brk.valueFillIndex && cellFillIndex < brk.trailFillIndex);
+        const u8 cellIsValueBreak = (brk.valueBreakFillIndex != CACHE_INVALID_U8 &&
+                                     cellFillIndex == brk.valueBreakFillIndex);
+
+        u16 vramTile;
+        u8 needsUpload = 0;
+        u8 fillStripIndex = 0;
+        const u32 *stripToUse = NULL;
+
+        if (cellIsEnd)
+        {
+            /* END uses the end strip and the standard fill LUT. */
+            stripToUse = endStrip;
+            fillStripIndex = s_fillTileStripsIndexByValueTrail[brk.endValuePxInTile][brk.endTrailPxInTile];
+            vramTile = dyn->vramTilePartialEnd;
+
+            if (dyn->loadedSegmentPartialEnd != segId ||
+                dyn->loadedFillIdxPartialEnd != fillStripIndex)
+            {
+                needsUpload = 1;
+                dyn->loadedSegmentPartialEnd = segId;
+                dyn->loadedFillIdxPartialEnd = fillStripIndex;
+            }
+        }
+        else if (cellIsTrailBreak)
+        {
+            /* TRAIL BREAK 1 (after B): if next cell is full trail, force trailPx=8. */
+            stripToUse = trailStrip;
+            if (brk.trailBreakSecondActive)
+                fillStripIndex = s_trailTileStripsIndexByValueTrail[brk.valuePxInBreakCell][8];
+            else
+                fillStripIndex = s_trailTileStripsIndexByValueTrail[brk.valuePxInBreakCell][brk.trailPxInBreakCell];
+            vramTile = dyn->vramTilePartialTrail;
+
+            if (dyn->loadedSegmentPartialTrail != segId ||
+                dyn->loadedFillIdxPartialTrail != fillStripIndex)
+            {
+                needsUpload = 1;
+                dyn->loadedSegmentPartialTrail = segId;
+                dyn->loadedFillIdxPartialTrail = fillStripIndex;
+            }
+        }
+        else if (cellIsTrailBreak2)
+        {
+            /* TRAIL BREAK 2 (before E): same fill index as END but on TRAIL tileset. */
+            stripToUse = trailStrip;
+            const u8 endIndex = s_fillTileStripsIndexByValueTrail[brk.endValuePxInTile][brk.endTrailPxInTile];
+            if (endIndex == 8)
+                fillStripIndex = s_trailTileStripsIndexByValueTrail[0][endIndex];
+            else
+                fillStripIndex = endIndex;
+            vramTile = dyn->vramTilePartialTrailSecond;
+
+            if (dyn->loadedSegmentPartialTrailSecond != segId ||
+                dyn->loadedFillIdxPartialTrailSecond != fillStripIndex)
+            {
+                needsUpload = 1;
+                dyn->loadedSegmentPartialTrailSecond = segId;
+                dyn->loadedFillIdxPartialTrailSecond = fillStripIndex;
+            }
+        }
+        else if (cellIsTrailFull)
+        {
+            /* TRAIL FULL uses the trail strip, fixed full index (7). */
+            vramTile = dyn->vramTileFullTrail[segId];
+        }
+        else if (cellIsValueBreak)
+        {
+            /* VALUE BREAK always uses BODY.
+             * - If trailBreakActive: index = valuePxInBreakCell
+             * - Else: index follows END (same fill as break)
+             */
+            stripToUse = bodyStrip;
+            if (brk.trailBreakActive)
+                fillStripIndex = brk.valuePxInBreakCell;
+            else
+                fillStripIndex = s_fillTileStripsIndexByValueTrail[brk.endValuePxInTile][brk.endTrailPxInTile];
+            vramTile = dyn->vramTilePartialValue;
+
+            if (dyn->loadedSegmentPartialValue != segId ||
+                dyn->loadedFillIdxPartialValue != fillStripIndex)
+            {
+                needsUpload = 1;
+                dyn->loadedSegmentPartialValue = segId;
+                dyn->loadedFillIdxPartialValue = fillStripIndex;
+            }
+        }
+        else if (brk.regionRenderActive)
+        {
+            /* Region-based rendering when trail is active. */
+            if (cellFillIndex < brk.valueFillIndex)
+            {
+                /* BODY full */
+                vramTile = dyn->vramTileFullValue[segId];
+            }
+            else if (cellFillIndex > brk.trailFillIndex)
+            {
+                /* BODY empty */
+                vramTile = dyn->vramTileEmpty[segId];
+            }
+            else if (cellFillIndex > brk.valueFillIndex && cellFillIndex < brk.trailFillIndex)
+            {
+                /* TRAIL full */
+                vramTile = dyn->vramTileFullTrail[segId];
+            }
+            else
+            {
+                /* Value/trail break cells are handled by special cases above. */
+                vramTile = dyn->vramTileEmpty[segId];
+            }
+        }
+        else
+        {
+            /* Default behavior: standard fill computation (no END/TRAIL rules). */
+            if (cellFillIndex < brk.valueFillIndex)
+            {
+                /* Full value region */
+                vramTile = dyn->vramTileFullValue[segId];
+            }
+            else if (cellFillIndex > brk.valueFillIndex && cellFillIndex < brk.trailFillIndex)
+            {
+                /* Full trail region */
+                vramTile = dyn->vramTileFullTrail[segId];
+            }
+            else if (cellFillIndex > brk.trailFillIndex)
+            {
+                /* Empty region */
+                vramTile = dyn->vramTileEmpty[segId];
+            }
+            else if (cellFillIndex == brk.valueFillIndex && cellFillIndex == brk.trailFillIndex)
+            {
+                /* Both value and trail partial in same cell */
+                u8 valuePxInTile, trailPxInTile;
+                compute_fill_for_cell(layout, cellIndex, valuePixels, trailPixelsRendered,
+                                      &valuePxInTile, &trailPxInTile);
+
+                stripToUse = bodyStrip;
+                fillStripIndex = s_fillTileStripsIndexByValueTrail[valuePxInTile][trailPxInTile];
+                vramTile = dyn->vramTilePartialValue;  /* Reuse PartialValue for "both" case */
+
+                if (dyn->loadedSegmentPartialValue != segId ||
+                    dyn->loadedFillIdxPartialValue != fillStripIndex)
+                {
+                    needsUpload = 1;
+                    dyn->loadedSegmentPartialValue = segId;
+                    dyn->loadedFillIdxPartialValue = fillStripIndex;
+                }
+            }
+            else if (cellFillIndex == brk.valueFillIndex)
+            {
+                /* Value partial cell (trail is full=8) */
+                u8 valuePxInTile, trailPxInTile;
+                compute_fill_for_cell(layout, cellIndex, valuePixels, trailPixelsRendered,
+                                      &valuePxInTile, &trailPxInTile);
+
+                stripToUse = bodyStrip;
+                fillStripIndex = s_fillTileStripsIndexByValueTrail[valuePxInTile][8];
+                vramTile = dyn->vramTilePartialValue;
+
+                if (dyn->loadedSegmentPartialValue != segId ||
+                    dyn->loadedFillIdxPartialValue != fillStripIndex)
+                {
+                    needsUpload = 1;
+                    dyn->loadedSegmentPartialValue = segId;
+                    dyn->loadedFillIdxPartialValue = fillStripIndex;
+                }
+            }
+            else  /* cellFillIndex == brk.trailFillIndex */
+            {
+                /* Trail partial cell (value=0) */
+                u8 valuePxInTile, trailPxInTile;
+                compute_fill_for_cell(layout, cellIndex, valuePixels, trailPixelsRendered,
+                                      &valuePxInTile, &trailPxInTile);
+
+                stripToUse = bodyStrip;
+                fillStripIndex = s_fillTileStripsIndexByValueTrail[0][trailPxInTile];
+                vramTile = dyn->vramTilePartialTrail;
+
+                if (dyn->loadedSegmentPartialTrail != segId ||
+                    dyn->loadedFillIdxPartialTrail != fillStripIndex)
+                {
+                    needsUpload = 1;
+                    dyn->loadedSegmentPartialTrail = segId;
+                    dyn->loadedFillIdxPartialTrail = fillStripIndex;
+                }
+            }
+        }
+
+        /* Upload partial tile if needed */
+        if (needsUpload && stripToUse)
+            upload_fill_tile(stripToUse, fillStripIndex, vramTile, DMA);
+
+        /* Update tilemap only if tile changed (change detection optimization) */
+        if (dyn->cellCurrentTileIndex[cellIndex] != vramTile)
+        {
+            const u16 attr = attrBase | vramTile;
+            VDP_setTileMapXY(WINDOW, attr,
+                             layout->tilemapPosByCell[cellIndex].x,
+                             layout->tilemapPosByCell[cellIndex].y);
+            dyn->cellCurrentTileIndex[cellIndex] = vramTile;
         }
     }
-
-    /* Safety clamps */
-    if (logic->valuePixels > logic->maxFillPixels) logic->valuePixels = logic->maxFillPixels;
-    if (logic->trailPixels > logic->maxFillPixels) logic->trailPixels = logic->maxFillPixels;
-    if (logic->trailPixels < logic->valuePixels)   logic->trailPixels = logic->valuePixels;
 }
+
 
 /* =============================================================================
-   GaugeRenderer internals
+   GaugePart initialization (internal)
    ============================================================================= */
 
-static inline void bind_cell_rom(GaugeStreamCell *cell, const GaugeRom *rom, u8 segmentId, u8 lane)
+/**
+ * Initialize a GaugePart with all parameters.
+ */
+static void GaugePart_initInternal(GaugePart *part,
+                                   const Gauge *gauge,
+                                   const GaugeLayout *layout,
+                                   u16 originX, u16 originY,
+                                   u16 vramBase,
+                                   GaugeVramMode vramMode)
 {
-    if (!rom) { cell->romFillStrip45 = NULL; return; }
-    if (segmentId >= rom->segmentCount) { cell->romFillStrip45 = NULL; return; }
-    cell->romFillStrip45 = rom->fillTileStrips[segmentId][lane];
-}
+    part->originX = originX;
+    part->originY = originY;
+    part->vramBase = vramBase;
+    part->vramMode = vramMode;
 
-static inline void upload_cell_if_needed(GaugeStreamCell *cell, u8 wantedFillIdx)
-{
-    if (!cell->romFillStrip45) return;
-    if (cell->loadedFillIdx == wantedFillIdx) return;
+    /* Copy layout (includes visual properties) */
+    part->layout = *layout;
+    if (part->layout.length == 0) part->layout.length = 1;
+    if (part->layout.length > GAUGE_MAX_LENGTH) part->layout.length = GAUGE_MAX_LENGTH;
 
-    /* Each tile = 8 u32, so offset = idx * 8 */
-    const u32 *src = cell->romFillStrip45 + (((u16)wantedFillIdx) << 3);
-    VDP_loadTileData(src, cell->vramTileIndex, 1, DMA_QUEUE);
-    cell->loadedFillIdx = wantedFillIdx;
-}
-
-static inline void compute_tile_xy(GaugeOrientation orient,
-                                  u16 originX, u16 originY,
-                                  u8 lane, u8 cell,
-                                  u16 *outX, u16 *outY)
-{
-    /* No multiplication; only additions. */
-    if (orient == GAUGE_ORIENT_HORIZONTAL)
+    /* Initialize based on VRAM mode */
+    if (part->vramMode == GAUGE_VRAM_DYNAMIC)
     {
-        *outX = (u16)(originX + cell);
-        *outY = (u16)(originY + lane);
+        /* Dynamic mode initialization */
+        init_dynamic_vram(&part->dyn, &part->layout, part->vramBase, gauge->logic.trailEnabled);
+        preload_dynamic_standard_tiles(&part->dyn, &part->layout, gauge->logic.trailEnabled);
+        init_dynamic_tilemap(part);
     }
     else
     {
-        *outX = (u16)(originX + lane);
-        *outY = (u16)(originY + cell);
+        /* Fixed mode */
+        write_tilemap_fixed_init(part);
     }
 }
 
-static void write_window_tilemap_once(GaugeRenderer *r)
-{
-    r->lane0CellCount = r->layout.lane0CellCount;
-    for (u8 i = 0; i < r->lane0CellCount; i++)
-    {
-        const u8 cellIndex = r->layout.lane0CellList[i];
-        const u16 vramTile = (u16)(r->vramLane0Base + i);
-        const u16 attr = TILE_ATTR_FULL(r->paletteLine, r->priority, r->vflip, r->hflip, vramTile);
 
-        u16 x, y;
-        compute_tile_xy(r->orientation, r->originX, r->originY, GAUGE_LANE_0, cellIndex, &x, &y);
-
-        VDP_setTileMapXY(WINDOW, attr, x, y);
-
-        r->lane0Cells[i].vramTileIndex = vramTile;
-        r->lane0Cells[i].loadedFillIdx = 0xFF;
-        r->lane0Cells[i].cellIndex = cellIndex;
-    }
-
-    r->lane1CellCount = r->layout.lane1CellCount;
-    for (u8 i = 0; i < r->lane1CellCount; i++)
-    {
-        const u8 cellIndex = r->layout.lane1CellList[i];
-        const u16 vramTile = (u16)(r->vramLane1Base + i);
-        const u16 attr = TILE_ATTR_FULL(r->paletteLine, r->priority, r->vflip, r->hflip, vramTile);
-
-        u16 x, y;
-        compute_tile_xy(r->orientation, r->originX, r->originY, GAUGE_LANE_1, cellIndex, &x, &y);
-
-        VDP_setTileMapXY(WINDOW, attr, x, y);
-
-        r->lane1Cells[i].vramTileIndex = vramTile;
-        r->lane1Cells[i].loadedFillIdx = 0xFF;
-        r->lane1Cells[i].cellIndex = cellIndex;
-    }
-}
 
 /* =============================================================================
-   GaugeRenderer public API
+   Gauge public API
    ============================================================================= */
 
-void GaugeRenderer_bindRom(GaugeRenderer *renderer, const GaugeRom *rom)
+/**
+ * Generate value-to-pixels LUT when maxValue != maxFillPixels.
+ * Formula: lut[v] = (v * maxFillPixels + maxValue/2) / maxValue
+ * The +maxValue/2 provides rounding instead of truncation.
+ */
+static u16* generate_value_to_pixels_lut(u16 maxValue, u16 maxFillPixels)
 {
-    renderer->rom = rom;
+    /* Allocate (maxValue + 1) entries */
+    u16 *lut = MEM_alloc((maxValue + 1) * sizeof(u16));
+    if (!lut) return NULL;
 
-    /* Lane 0 */
-    for (u8 i = 0; i < renderer->lane0CellCount; i++)
+    const u16 halfMax = maxValue >> 1;
+    for (u16 v = 0; v <= maxValue; v++)
     {
-        const u8 cellIndex = renderer->lane0Cells[i].cellIndex;
-        const u8 seg = renderer->layout.segmentIdByCell[cellIndex];
-        bind_cell_rom(&renderer->lane0Cells[i], rom, seg, GAUGE_LANE_0);
+        const u32 numerator = (u32)v * (u32)maxFillPixels + halfMax;
+        lut[v] = (u16)(numerator / maxValue);
     }
 
-    /* Lane 1 */
-    for (u8 i = 0; i < renderer->lane1CellCount; i++)
+    return lut;
+}
+
+void Gauge_init(Gauge *gauge,
+                u16 maxValue,
+                u16 maxFillPixels,
+                u16 initialValue,
+                GaugePart *parts,
+                u16 vramBase,
+                GaugeVramMode vramMode)
+{
+    /* Auto-generate LUT when maxValue != maxFillPixels */
+    const u16 *lut = (maxValue != maxFillPixels)
+                     ? generate_value_to_pixels_lut(maxValue, maxFillPixels)
+                     : NULL;
+
+    /* Initialize embedded logic with generated LUT (or NULL for 1:1 mapping)
+     * Trail disabled by default - use Gauge_setTrailAnim() to enable */
+    GaugeLogic_init(&gauge->logic, maxValue, maxFillPixels, lut,
+                    0, initialValue);  /* trailEnabled=0 by default */
+
+    /* Store gaugePart array reference */
+    gauge->parts = parts;
+    gauge->partCount = 0;
+
+    /* VRAM allocation state */
+    gauge->vramBase = vramBase;
+    gauge->vramNextOffset = 0;
+    gauge->vramMode = vramMode;
+}
+
+void Gauge_setValueAnim(Gauge *gauge, u8 enabled, u8 shift)
+{
+    GaugeLogic *logic = &gauge->logic;
+    logic->valueAnimEnabled = enabled ? 1 : 0;
+    logic->valueAnimShift = (shift == 0) ? GAUGE_DEFAULT_VALUE_ANIM_SHIFT : shift;
+}
+
+void Gauge_setTrailAnim(Gauge *gauge, u8 enabled, u8 shift, u8 blinkShift)
+{
+    GaugeLogic *logic = &gauge->logic;
+    logic->trailEnabled = enabled ? 1 : 0;
+    logic->trailAnimShift = (shift == 0) ? GAUGE_DEFAULT_TRAIL_ANIM_SHIFT : shift;
+    logic->blinkShift = (blinkShift == 0) ? GAUGE_DEFAULT_BLINK_SHIFT : blinkShift;
+
+    /* If disabling trail, reset trail state to match value */
+    if (!logic->trailEnabled)
     {
-        const u8 cellIndex = renderer->lane1Cells[i].cellIndex;
-        const u8 seg = renderer->layout.segmentIdByCell[cellIndex];
-        bind_cell_rom(&renderer->lane1Cells[i], rom, seg, GAUGE_LANE_1);
+        logic->trailPixels = logic->valuePixels;
+        logic->holdFramesRemaining = 0;
+        logic->blinkFramesRemaining = 0;
     }
 }
 
-void GaugeRenderer_init(GaugeRenderer *renderer,
-                        GaugeOrientation orientation,
-                        const GaugeRom *rom,
-                        const GaugeLayout *layout,
-                        u16 originX, u16 originY,
-                        u16 vramLane0Base, u16 vramLane1Base,
-                        u8 paletteLine, u8 priority, u8 vflip, u8 hflip)
+void Gauge_addPart(Gauge *gauge,
+                   GaugePart *part,
+                   const GaugeLayout *layout,
+                   u16 originX,
+                   u16 originY)
 {
-    renderer->orientation = orientation;
+    /* Compute VRAM size for this layout */
+    const u16 vramSize = Gauge_getVramSize(layout, gauge->vramMode, gauge->logic.trailEnabled);
 
-    renderer->originX = originX;
-    renderer->originY = originY;
+    /* Allocate VRAM from gauge's pool */
+    const u16 vramBase = (u16)(gauge->vramBase + gauge->vramNextOffset);
+    gauge->vramNextOffset = (u16)(gauge->vramNextOffset + vramSize);
 
-    renderer->paletteLine = paletteLine;
-    renderer->priority = priority ? 1 : 0;
-    renderer->vflip = vflip ? 1 : 0;
-    renderer->hflip = hflip ? 1 : 0;
+    /* Initialize part */
+    GaugePart_initInternal(part, gauge, layout, originX, originY, vramBase, gauge->vramMode);
 
-    renderer->vramLane0Base = vramLane0Base;
-    renderer->vramLane1Base = vramLane1Base;
+    /* Force next update to render (new part needs initial draw) */
+    gauge->logic.lastValuePixels = CACHE_INVALID_U16;
 
-    /* Copy layout + clamp lengthTiles */
-    renderer->layout = *layout;
-    if (renderer->layout.lengthTiles == 0) renderer->layout.lengthTiles = 1;
-    if (renderer->layout.lengthTiles > GAUGE_MAX_CELLS) renderer->layout.lengthTiles = GAUGE_MAX_CELLS;
-
-    /* Build lane lists from ROM (mask + non-null pointer) */
-    GaugeLayout_buildLaneListsFromRom(&renderer->layout, rom);
-
-    /* Write tilemap only where needed */
-    write_window_tilemap_once(renderer);
-
-    /* Bind ROM strips */
-    GaugeRenderer_bindRom(renderer, rom);
-
-    /* Init renderer cache to force first update */
-    renderer->lastValuePixels = 0xFFFF;
-    renderer->lastTrailPixelsRendered = 0xFFFF;
-    renderer->lastBlinkOn = 0xFF;
+    gauge->partCount++;
 }
 
-void GaugeRenderer_queueDma(GaugeRenderer *renderer,
-                            const GaugeLogic *logic,
-                            u16 frameCounter)
+void Gauge_addPartEx(Gauge *gauge,
+                     GaugePart *part,
+                     const GaugeLayout *layout,
+                     u16 originX,
+                     u16 originY,
+                     u16 vramBase,
+                     GaugeVramMode vramMode)
 {
-    /* Blink: when blink is OFF, hide trail by rendering trailPixelsRendered=valuePixels */
-    u8 blinkOn = 1;
-    if (logic->blinkFramesRemaining)
-        blinkOn = (u8)(((frameCounter >> logic->blinkShift) & 1) == 0);
+    /* Initialize part with custom VRAM settings */
+    GaugePart_initInternal(part, gauge, layout, originX, originY, vramBase, vramMode);
 
+    /* Force next update to render */
+    gauge->logic.lastValuePixels = CACHE_INVALID_U16;
+
+    gauge->partCount++;
+}
+
+/**
+ * Gauge_update -- Update gauge: tick logic + render all parts.
+ * Call once per frame in the game loop.
+ *
+ * Execution flow:
+ * 1. GaugeLogic_tick() — advance value/trail animations
+ * 2. Compute render state (valuePixels, trailPixelsRendered, blinkOn)
+ * 3. Change detection: compare against lastValuePixels, lastTrailPixelsRendered,
+ *    lastBlinkOn, and check if value animation is still converging
+ * 4. If nothing changed → early return (zero CPU cost after initial comparison)
+ * 5. If changed → render all parts via process_fixed_mode/process_dynamic_mode
+ *
+ * The change detection cache (lastValuePixels, lastTrailPixelsRendered, lastBlinkOn)
+ * is initialized to CACHE_INVALID_U16/U8 to force the first render.
+ * Adding a new part also invalidates the cache (Gauge_addPart sets lastValuePixels
+ * to CACHE_INVALID_U16).
+ *
+ * When trail is disabled, trailPixelsRendered == valuePixels naturally
+ * (enforced by GaugeLogic_tick), so the blink/trail paths are no-ops.
+ *
+ * Cost: ~20 cycles (early return) to ~2000+ cycles (full render with DMA)
+ */
+void Gauge_update(Gauge *gauge)
+{
+    GaugeLogic *logic = &gauge->logic;
+
+    /* Tick logic state machine */
+    GaugeLogic_tick(logic);
+    
+    /* --- Compute current render state --- */
     const u16 valuePixels = logic->valuePixels;
 
+    /* Compute trail with blink effect */
     u16 trailPixels = logic->trailPixels;
-    if (trailPixels < valuePixels) trailPixels = valuePixels;
+    if (trailPixels < valuePixels)
+        trailPixels = valuePixels;
 
+    /* Compute blink state from internal timer */
+    u8 blinkOn = 1;
+    if (logic->trailEnabled && logic->blinkFramesRemaining > 0)
+    {
+        blinkOn = (u8)(((logic->blinkTimer >> logic->blinkShift) & 1) == 0);
+    }
+
+    /* Apply blink to trail.
+     * When trail is disabled, trailPixels == valuePixels (enforced by GaugeLogic_tick),
+     * and blinkOn == 1 (no blink frames), so trailPixelsRendered == valuePixels naturally. */
     const u16 trailPixelsRendered = blinkOn ? trailPixels : valuePixels;
 
-    if (renderer->lastValuePixels == valuePixels &&
-        renderer->lastTrailPixelsRendered == trailPixelsRendered &&
-        renderer->lastBlinkOn == blinkOn)
+    /* --- Early return if nothing changed --- */
+    if (logic->lastValuePixels == valuePixels &&
+        logic->lastTrailPixelsRendered == trailPixelsRendered &&
+        logic->lastBlinkOn == blinkOn &&
+        logic->valueTargetPixels == valuePixels)
+    {
         return;
-    renderer->lastValuePixels = valuePixels;
-    renderer->lastTrailPixelsRendered = trailPixelsRendered;
-    renderer->lastBlinkOn = blinkOn;
-
-    /* Lane 0 cells */
-    for (u8 i = 0; i < renderer->lane0CellCount; i++)
-    {
-        GaugeStreamCell *cell = &renderer->lane0Cells[i];
-        const u8 axisCell = cell->cellIndex;
-
-        const u8 fillIndex = renderer->layout.fillIndexByCell[axisCell];
-
-        const u8 valuePxInTile = clamp_px_0_8((s16)valuePixels - (s16)(fillIndex << 3));
-        u8 trailPxInTile       = clamp_px_0_8((s16)trailPixelsRendered - (s16)(fillIndex << 3));
-        if (trailPxInTile < valuePxInTile) trailPxInTile = valuePxInTile;
-
-        const u8 wantedIdx = s_fillIdxByValueTrail[valuePxInTile][trailPxInTile];
-        upload_cell_if_needed(cell, wantedIdx);
     }
 
-    /* Lane 1 cells */
-    for (u8 i = 0; i < renderer->lane1CellCount; i++)
+    /* Update render cache */
+    logic->lastValuePixels = valuePixels;
+    logic->lastTrailPixelsRendered = trailPixelsRendered;
+    logic->lastBlinkOn = blinkOn;
+
+    /* --- Render all parts (countdown: 68000 dbra optimization) --- */
+    u8 i = gauge->partCount;
+    while (i--)
     {
-        GaugeStreamCell *cell = &renderer->lane1Cells[i];
-        const u8 axisCell = cell->cellIndex;
+        GaugePart *part = &gauge->parts[i];
 
-        const u8 fillIndex = renderer->layout.fillIndexByCell[axisCell];
-
-        const u8 valuePxInTile = clamp_px_0_8((s16)valuePixels - (s16)(fillIndex << 3));
-        u8 trailPxInTile       = clamp_px_0_8((s16)trailPixelsRendered - (s16)(fillIndex << 3));
-        if (trailPxInTile < valuePxInTile) trailPxInTile = valuePxInTile;
-
-        const u8 wantedIdx = s_fillIdxByValueTrail[valuePxInTile][trailPxInTile];
-        upload_cell_if_needed(cell, wantedIdx);
+        if (part->vramMode == GAUGE_VRAM_DYNAMIC)
+        {
+            process_dynamic_mode(part, valuePixels, trailPixelsRendered);
+        }
+        else
+        {
+            process_fixed_mode(part, valuePixels, trailPixelsRendered);
+        }
     }
+}
+
+void Gauge_setValue(Gauge *gauge, u16 newValue)
+{
+    GaugeLogic *logic = &gauge->logic;
+
+    logic->currentValue = (newValue > logic->maxValue) ? logic->maxValue : newValue;
+    logic->valueTargetPixels = value_to_pixels(logic, logic->currentValue);
+
+    if (logic->valueTargetPixels > logic->maxFillPixels)
+        logic->valueTargetPixels = logic->maxFillPixels;
+
+    logic->valuePixels = logic->valueTargetPixels;
+    logic->trailPixels = logic->valuePixels;
+    logic->holdFramesRemaining = 0;
+    logic->blinkFramesRemaining = 0;
+    logic->blinkTimer = 0;
+}
+
+void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
+{
+    GaugeLogic *logic = &gauge->logic;
+
+    /* Update value */
+    logic->currentValue = (logic->currentValue > amount) ? (logic->currentValue - amount) : 0;
+    logic->valueTargetPixels = value_to_pixels(logic, logic->currentValue);
+
+    if (logic->valueTargetPixels > logic->maxFillPixels)
+        logic->valueTargetPixels = logic->maxFillPixels;
+
+    /* Instant value change if animation disabled */
+    if (!logic->valueAnimEnabled)
+        logic->valuePixels = logic->valueTargetPixels;
+
+    /* Handle trail */
+    if (!logic->trailEnabled)
+    {
+        logic->trailPixels = logic->valuePixels;
+        logic->holdFramesRemaining = 0;
+        logic->blinkFramesRemaining = 0;
+        return;
+    }
+
+    /* Trail stays at previous position (damage effect) */
+    const u16 previousDisplayedValuePixels = logic->valuePixels;
+    if (logic->trailPixels < previousDisplayedValuePixels)
+        logic->trailPixels = previousDisplayedValuePixels;
+
+    /* Start hold/blink sequence */
+    logic->holdFramesRemaining = holdFrames;
+    logic->blinkFramesRemaining = blinkFrames;
+    logic->blinkTimer = 0;
+}
+
+void Gauge_increase(Gauge *gauge, u16 amount)
+{
+    GaugeLogic *logic = &gauge->logic;
+
+    /* Update value (with overflow protection) */
+    if (logic->currentValue + amount > logic->maxValue)
+        logic->currentValue = logic->maxValue;
+    else
+        logic->currentValue = (u16)(logic->currentValue + amount);
+
+    logic->valueTargetPixels = value_to_pixels(logic, logic->currentValue);
+
+    if (logic->valueTargetPixels > logic->maxFillPixels)
+        logic->valueTargetPixels = logic->maxFillPixels;
+
+    /* Instant value change if animation disabled */
+    if (!logic->valueAnimEnabled)
+        logic->valuePixels = logic->valueTargetPixels;
+
+    /* Trail follows value immediately on heal */
+    logic->trailPixels = logic->valuePixels;
+    logic->holdFramesRemaining = 0;
+    logic->blinkFramesRemaining = 0;
+    logic->blinkTimer = 0;
+}
+
+
+/* =============================================================================
+   Utility functions
+   ============================================================================= */
+
+u16 Gauge_getVramSize(const GaugeLayout *layout,
+                      GaugeVramMode vramMode,
+                      u8 trailEnabled)
+{
+    if (vramMode == GAUGE_VRAM_FIXED)
+    {
+        /* Fixed: one VRAM tile per cell with valid tileset */
+        u16 count = 0;
+        for (u8 i = 0; i < layout->length; i++)
+        {
+            const u8 segId = layout->segmentIdByCell[i];
+            if (layout->tilesetBySegment[segId])
+                count++;
+        }
+        return count;
+    }
+
+    /* Dynamic: count unique segments used + partial tiles */
+    u8 segmentUsed[GAUGE_MAX_SEGMENTS] = {0};
+    u8 segmentCount = 0;
+    u8 hasEndTileset = 0;
+
+    for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
+    {
+        const u8 segId = layout->segmentIdByCell[cellIndex];
+        if (layout->tilesetBySegment[segId] && !segmentUsed[segId])
+        {
+            segmentUsed[segId] = 1;
+            segmentCount++;
+        }
+    }
+
+    for (u8 segId = 0; segId < GAUGE_MAX_SEGMENTS; segId++)
+    {
+        if (segmentUsed[segId] && layout->tilesetEndBySegment[segId])
+            hasEndTileset = 1;
+    }
+
+    /* Layout per segment:
+     * - 1 empty tile (0,0)
+     * - 1 full value tile (8,8)
+     * - 1 full trail tile (0,8) - only if trail enabled
+     *
+     * Partial tiles (scalars - 1 per GaugePart):
+     * - 1 partial value tile (also used for "both" case)
+     * - 1 partial trail tile (only if trail enabled)
+     * - 1 partial END tile (only if any segment has END)
+     * - 1 partial trail second-break tile (only if trail enabled + END)
+     */
+    u16 tilesPerSegment = trailEnabled ? 3 : 2;  /* empty + full value + (full trail if trail) */
+    u16 partialTiles = 1;                        /* partial value */
+    if (trailEnabled) partialTiles++;
+    if (hasEndTileset) partialTiles++;
+    if (trailEnabled && hasEndTileset) partialTiles++;
+
+    return (u16)(segmentCount * tilesPerSegment + partialTiles);
 }

@@ -4,350 +4,713 @@
 #include <genesis.h>
 
 /* =============================================================================
-   gauge.h / gauge.c — Generic 2-level HUD gauge (SGDK / Mega Drive)
-   -----------------------------------------------------------------------------
-   What this module does
-   ---------------------
-   Renders a configurable gauge on the WINDOW plane with ROM->VRAM tile streaming
-   (DMA_QUEUE). 
-   
-   The gauge is composed of Segments'Style.  
-   
-   The gauge supports two fill levels:
-     - value : primary fill (the "real" gauge value)
-     - trail : secondary delayed fill (typical "damage bar" effect)
+   gauge.h / gauge.c â€” Single-lane HUD gauge for SGDK / Mega Drive
+   =============================================================================
 
-   Life bar analogy (for understanding)
-   ------------------------------------
-   - value = current HP (often drawn in yellow or green)
-   - trail = delayed HP (often drawn in red) that blinks briefly after damage
+   SIMPLIFIED GAUGE MODULE
+   -----------------------
+   This module provides a pixel-perfect gauge rendering system optimized for
+   16-bit hardware with minimal CPU/VRAM overhead.
 
-   For instance, when you get "Damage" :
-     value decreases immediately, trail stays higher for a moment, blinks, then
-     shrinks toward value.
-   
-   and when you "Heal" you would have the following behavior : 
-     value increases, trail is reset to value (no blinking, no red part).
+   KEY CONCEPTS:
+   - NO lane concept: 1 gauge = 1 row/column of tiles
+   - Shared GaugeLogic via Gauge container (multiple parts sync perfectly)
+   - Only 2 main objects: Gauge (high-level) and GaugeLayout (configuration)
+   - Fill offset support for extended/segmented gauges
 
-   
-   Pixel-perfect fill with 8x8 tiles
-   ---------------------------------
-   The gauge is made of "cells" along its main axis. Each cell corresponds to
-   one 8x8 tile pattern and represents 8 pixels of fill resolution.
-   For each cell:
-     valuePxInTile : 0..8
-     trailPxInTile : 0..8 (must be >= valuePxInTile)
+   ARCHITECTURE:
+   - GaugeLayout: Geometry + visual appearance (orientation, palette, flip)
+   - GaugeLogic:  Value state machine (value, trail, animation timers)
+   - GaugePart: VRAM streaming engine (internal, managed by Gauge)
+   - Gauge: High-level container (1 logic + N parts)
 
-   (valuePxInTile, trailPxInTile) has 45 valid combinations:
-     value=0 -> trail=0..8 : 9
-     value=1 -> trail=1..8 : 8
-     ...
-     value=8 -> trail=8    : 1
-     total = 45
+   TYPICAL USAGE:
+   ```c
+   static Gauge myGauge;
+   static GaugePart myParts[2];
+   static GaugeLayout myLayout;
 
-   Therefore each segment style provides a ROM strip of 45 tiles for each lane.
+   // 1. Initialize layout with visual properties
+   GaugeLayout_init(&myLayout, 8, GAUGE_FILL_FORWARD, tilesets, segments,
+                    GAUGE_ORIENT_HORIZONTAL, PAL0, 1, 0, 0);
 
-   Lanes (thickness)
-   -----------------
-   A gauge can be 1-tile or 2-tiles thick, and we call Lane each "line of tile".
-   - lane 0 = primary lane
-   - lane 1 = secondary lane
-   In horizontal orientation, lanes are stacked vertically (lane1 is below lane0).
-   In vertical orientation, lanes are side-by-side (lane1 is to the right of lane0).
+   // 2. Initialize gauge (auto-allocates VRAM for parts)
+   Gauge_init(&myGauge, 100, 64, 1, 100, myRenderers, VRAM_BASE, GAUGE_VRAM_DYNAMIC);
 
-   Orientation
-   -----------
-   - Horizontal: cells advance along X, lanes along Y
-   - Vertical  : cells advance along Y, lanes along X
+   // 3. Add parts (VRAM auto-allocated sequentially)
+   Gauge_addPart(&myGauge, &myRenderers[0], &myLayout, 2, 5);
+   Gauge_addPart(&myGauge, &myRenderers[1], &myLayout, 2, 6);
 
-   
-   Some reminders
-   ------------------
-   - This module uses VDP_loadTileData(..., DMA_QUEUE) during the frame.
-   - One tile can reference only ONE palette line, so value/trail/empty 
-     pixels must all use colors from the same palette line.
+   // 4. Game loop
+   while(1) {
+       Gauge_update(&myGauge);  // Tick logic + render all
+       SYS_doVBlankProcess();
+   }
 
+   // 5. Change value
+   Gauge_decrease(&myGauge, 10, 20, 60);  // Damage with trail effect
+   Gauge_increase(&myGauge, 5);           // Heal
+   ```
+
+   2-LANE SIMULATION:
+   To simulate 2-tile thickness, use 2 parts sharing the same Gauge logic,
+   positioned at adjacent tiles (Y+1 for horizontal, X+1 for vertical).
 
    ============================================================================= */
-
-/* ------------------------------
+/* -----------------------------------------------------------------------------
    Compile-time limits
-   ------------------------------ */
-#define GAUGE_MAX_SEGMENTS     8
-#define GAUGE_MAX_CELLS       16  /* max number of cells along the axis */
+   ----------------------------------------------------------------------------- */
+#define GAUGE_MAX_SEGMENTS    12   /* Maximum different tile styles per layout */
+#define GAUGE_MAX_LENGTH      16   /* Maximum tiles per gauge */
 
-/* Fill tile strip properties */
-#define GAUGE_FILL_TILE_COUNT  45  /* number of tiles per segment per lane */
-#define GAUGE_TILE_U32_COUNT    8  /* SGDK TileSet tile size in u32 words (8*4 = 32 bytes) */
+/* Tile properties */
+#define GAUGE_PIXELS_PER_TILE  8   /* Pixels per tile (8x8) */
+#define GAUGE_FILL_TILE_COUNT 45   /* Tiles in a 45-tile fill strip */
+#define GAUGE_TILE_U32_COUNT   8   /* 32-bit words per tile (8x8 @ 4bpp = 32 bytes) */
 
-/* ------------------------------
-   Orientation and fill direction
-   ------------------------------ */
+/* Default animation values */
+#define GAUGE_DEFAULT_VALUE_ANIM_SHIFT  4  /* step = diff/16 + 1 */
+#define GAUGE_DEFAULT_TRAIL_ANIM_SHIFT  4  /* step = diff/16 + 1 */
+#define GAUGE_DEFAULT_BLINK_SHIFT       3  /* ~7.5 Hz @ 60fps */
+
+/* Fill pixel range */
+#define GAUGE_FILL_PX_MIN  0
+#define GAUGE_FILL_PX_MAX  8
+
+/* -----------------------------------------------------------------------------
+   Enumerations
+   ----------------------------------------------------------------------------- */
+
+/**
+ * Gauge orientation on screen.
+ * HORIZONTAL: fills left-to-right (or right-to-left if reversed)
+ * VERTICAL: fills top-to-bottom (or bottom-to-top if reversed)
+ */
 typedef enum
 {
     GAUGE_ORIENT_HORIZONTAL = 0,
     GAUGE_ORIENT_VERTICAL   = 1
 } GaugeOrientation;
 
-/* Optional helper enum (you can ignore and call the functions directly). */
+/**
+ * Fill direction determines which end fills first.
+ * FORWARD: cell 0 fills first (left/top)
+ * REVERSE: last cell fills first (right/bottom)
+ */
 typedef enum
 {
-    GAUGE_FILL_FORWARD = 0, /* cell 0 -> cell N-1 */
-    GAUGE_FILL_REVERSE = 1  /* cell N-1 -> cell 0 */
+    GAUGE_FILL_FORWARD = 0,
+    GAUGE_FILL_REVERSE = 1
 } GaugeFillDirection;
 
-/* ------------------------------
-   Lanes
-   ------------------------------ */
-#define GAUGE_LANE_0 0
-#define GAUGE_LANE_1 1
-
-#define GAUGE_LANE_MASK_0 (1 << GAUGE_LANE_0)
-#define GAUGE_LANE_MASK_1 (1 << GAUGE_LANE_1)
-
-
-/* =============================================================================
-   SECTION A — ROM ASSETS ORDERING (45 tiles per segment per lane)
-   -----------------------------------------------------------------------------
-   For each segmentId and lane used, provide a ROM strip of EXACTLY 45 tiles,
-   ordered as:
-
-     for valuePxInTile = 0..8:
-       for trailPxInTile = valuePxInTile..8:
-         append tile(valuePxInTile, trailPxInTile)
-
-   Visual mnemonic for a HORIZONTAL gauge (8 pixels wide):
-     V = primary pixels (value)
-     T = trailing pixels (trail-only)
-     . = empty/background
-
-     value=3, trail=6 -> "VVVTTT.."
-
-   For a VERTICAL gauge, the ordering is IDENTICAL, but your tiles must represent
-   vertical fill (e.g., pixels from bottom to top, depending on your art).
-   You cannot rotate tiles 90° on Mega Drive BG, so vertical gauges need dedicated
-   vertical tile strips.
-
-   Full idx table (0..44) is identical to the one shown in previous versions.
-   ============================================================================= */
-
-
-/* =============================================================================
-   GaugeRom — ROM pointers for segment styles and lanes
-   -----------------------------------------------------------------------------
-   - segmentLaneMask[segmentId] tells which lanes exist for that segment.
-     A segment can be:
-       - lane0-only
-       - lane1-only
-       - lane0 + lane1
-
-   - fillTileStrips[segmentId][lane] points to a ROM strip of 45 tiles for that
-     segment+lane. Pointer can be NULL if lane does not exist.
-
-   IMPORTANT SAFETY (UI ownership)
-   -------------------------------
-   The renderer writes WINDOW tilemap ONLY for cells/lane where BOTH are true:
-     - segmentLaneMask says the lane exists
-     - fillTileStrips pointer is not NULL
-   So if a segment is lane0-only at some cell, the renderer will NOT modify lane1
-   tilemap at that position (no accidental overwrite of other UI elements).
-   ============================================================================= */
-
-typedef struct
+/**
+ * VRAM allocation mode for rendering.
+ * FIXED:   One VRAM tile per gauge cell. More VRAM, less CPU.
+ *          Best for: mirrors, static gauges, when VRAM is plentiful.
+ * DYNAMIC: Shared VRAM tiles, remapped per frame. Less VRAM, more CPU.
+ *          Best for: P1 gauges, when VRAM is limited.
+ */
+typedef enum
 {
-    const u32 *fillTileStrips[GAUGE_MAX_SEGMENTS][2]; /* [segmentId][lane] -> 45 tiles strip or NULL */
-    u8 segmentLaneMask[GAUGE_MAX_SEGMENTS];           /* bit0=lane0, bit1=lane1 */
-    u8 segmentCount;                                  /* valid IDs: 0..segmentCount-1 */
-} GaugeRom;
+    GAUGE_VRAM_FIXED   = 0,
+    GAUGE_VRAM_DYNAMIC = 1
+} GaugeVramMode;
 
 
 /* =============================================================================
-   GaugeLayout — gauge geometry along the axis
-   -----------------------------------------------------------------------------
-   lengthTiles:
-     Number of cells along the gauge axis (each cell = one 8x8 tile).
-     This is the gauge length along its main axis (horizontal or vertical).
+   Forward declarations (needed for circular references)
+   ============================================================================= */
+typedef struct Gauge Gauge;
 
-     maxFillPixels must be lengthTiles * 8.
+
+/* =============================================================================
+   GaugeLayout â€” Geometry + visual configuration
+   =============================================================================
+
+   Contains everything needed to describe a gauge's appearance:
+   - Tile geometry (length, segments, fill direction)
+   - Visual properties (orientation, palette, flip flags, priority)
+   - Asset references (tilesets)
+
+   FIELDS:
+   -------
+   length:
+     Number of cells along the gauge axis (1..GAUGE_MAX_LENGTH).
+     Each cell = one 8x8 tile = 8 pixels of fill resolution.
 
    segmentIdByCell[cell]:
-     Which segment style is used for that axis cell.
+     Which segment style (tileset) to use for each cell.
+     Allows different tile graphics within one gauge.
 
    fillIndexByCell[cell]:
-     Which 8px block index this cell represents for pixel-perfect computation:
-       valuePxInTile = clamp(valuePixels - fillIndex*8, 0..8)
+     Index for pixel-perfect fill computation:
+       valuePxInTile = clamp(valuePixels - fillOffset - fillIndex*8, 0..8)
+     Set automatically by GaugeLayout_setFillForward/Reverse().
 
-     You typically set it using:
-       - GaugeLayout_setFillForward()  : fillIndex[cell] = cell
-       - GaugeLayout_setFillReverse()  : fillIndex[cell] = lengthTiles-1-cell
+   fillOffset:
+     Pixel offset for this layout's fill computation (default 0).
+     Allows rendering a "window" into a larger virtual gauge.
+     Example: offset=64 means this gauge starts rendering at pixel 64.
 
-   lane lists:
-     Derived from GaugeRom (mask + non-null pointer), used by renderer to:
-       - write tilemap only where needed
-       - stream only existing lane cells
+   tilesetBySegment[segmentId]:
+     Pointer to 45-tile ROM strip for segment BODY (interior).
+     NULL if segment not used.
+
+   tilesetEndBySegment[segmentId]:
+     Optional 45-tile ROM strip for segment END (termination).
+     If NULL, segment uses BODY only (break ignored).
+
+   tilesetBreakBySegment[segmentId]:
+     Optional 45-tile ROM strip for segment BREAK (transition before end).
+     If NULL but END exists, BREAK falls back to BODY.
+
+   tilesetTrailBySegment[segmentId]:
+     Optional 64-tile ROM strip for TRAIL (trail-specific shapes).
+     If NULL, trail rendering falls back to BODY rules.
+
+   orientation:
+     GAUGE_ORIENT_HORIZONTAL or GAUGE_ORIENT_VERTICAL.
+
+   paletteLine:
+     Palette line (0-3) for tile rendering.
+
+   priority:
+     Tile priority (0=behind sprites, 1=in front of sprites).
+
+   vflip, hflip:
+     Vertical/horizontal flip flags for tile rendering.
+     Used for mirrored gauges (P2 side).
+
    ============================================================================= */
-
 typedef struct
-{
-    u8 lengthTiles; /* 1..GAUGE_MAX_CELLS */
+{ 
+    /* --- Geometry --- */
+    u8 length;                                   /* Number of cells (1..16) */
 
-    u8 segmentIdByCell[GAUGE_MAX_CELLS];
-    u8 fillIndexByCell[GAUGE_MAX_CELLS];
+    u8 segmentIdByCell[GAUGE_MAX_LENGTH];        /* Segment style per cell */
+    u8 fillIndexByCell[GAUGE_MAX_LENGTH];        /* Fill order per cell */
+    u8 cellIndexByFillIndex[GAUGE_MAX_LENGTH];   /* Inverse LUT: cell index for a given fill index (O(1) lookup) */
 
-    u8 lane0CellList[GAUGE_MAX_CELLS];
-    u8 lane1CellList[GAUGE_MAX_CELLS];
-    u8 lane0CellCount;
-    u8 lane1CellCount;
+    u16 fillOffset;                              /* Pixel offset for fill calc */
+
+    /* --- Tilemap positions --- */
+    Vect2D_u16 tilemapPosByCell[GAUGE_MAX_LENGTH]; /* Tilemap X,Y coordinates per cell */
+ 
+    /* --- Tilesets --- */
+    const u32 *tilesetBySegment[GAUGE_MAX_SEGMENTS];     /* BODY: 45-tile strips */
+    const u32 *tilesetEndBySegment[GAUGE_MAX_SEGMENTS];  /* END: optional 45-tile strips */
+    const u32 *tilesetBreakBySegment[GAUGE_MAX_SEGMENTS];/* BREAK: optional 45-tile strips */
+    const u32 *tilesetTrailBySegment[GAUGE_MAX_SEGMENTS];/* TRAIL: optional 64-tile strips */
+
+    /* --- Visual properties (all u8 for compact packing) --- */
+    u8 orientation;                              /* GAUGE_ORIENT_HORIZONTAL=0 or GAUGE_ORIENT_VERTICAL=1 */
+    u8 paletteLine;                              /* Palette line (0-3) */
+    u8 priority;                                 /* Tile priority (0-1) */
+    u8 vflip;                                    /* Vertical flip */
+    u8 hflip;                                    /* Horizontal flip */
 
 } GaugeLayout;
 
+
+/* -----------------------------------------------------------------------------
+   GaugeLayout API
+   ----------------------------------------------------------------------------- */
+
+/**
+ * Initialize layout with complete configuration.
+ *
+ * @param layout        Layout to initialize
+ * @param length        Number of cells (1..GAUGE_MAX_LENGTH)
+ * @param fillDir       GAUGE_FILL_FORWARD or GAUGE_FILL_REVERSE
+ * @param tilesets      Array of GAUGE_MAX_SEGMENTS tileset pointers (45-tile strips)
+ *                      Can be NULL, tiles will be set from this array
+ * @param segmentIdByCell Array of length elements specifying segment ID per cell
+ *                      Can be NULL, all cells will use segment 0
+ * @param orientation   GAUGE_ORIENT_HORIZONTAL or GAUGE_ORIENT_VERTICAL
+ * @param paletteLine   Palette line (0-3, typically PAL0-PAL3)
+ * @param priority      Tile priority (0 or 1)
+ * @param vflip         Vertical flip (0 or 1)
+ * @param hflip         Horizontal flip (0 or 1)
+ */
+void GaugeLayout_init(GaugeLayout *layout,
+                      u8 length,
+                      GaugeFillDirection fillDir,
+                      const u32 * const *tilesets,
+                      const u8 *segmentIdByCell,
+                      GaugeOrientation orientation,
+                      u8 paletteLine,
+                      u8 priority,
+                      u8 vflip,
+                      u8 hflip);
+
+/**
+ * Initialize layout with BODY + optional END/BREAK tilesets.
+ *
+ * Fallback rules:
+ * - If END tileset is NULL for a segment, BODY is used everywhere (BREAK ignored).
+ * - If END exists but BREAK is NULL, BREAK uses BODY.
+ *
+ * @param layout        Layout to initialize
+ * @param length        Number of cells (1..GAUGE_MAX_LENGTH)
+ * @param fillDir       GAUGE_FILL_FORWARD or GAUGE_FILL_REVERSE
+ * @param bodyTilesets  Array of GAUGE_MAX_SEGMENTS BODY tileset pointers (45-tile strips)
+ * @param endTilesets   Array of GAUGE_MAX_SEGMENTS END tileset pointers (optional, can be NULL)
+ * @param breakTilesets Array of GAUGE_MAX_SEGMENTS BREAK tileset pointers (optional, can be NULL)
+ * @param trailTilesets Array of GAUGE_MAX_SEGMENTS TRAIL tileset pointers (optional, can be NULL)
+ * @param segmentIdByCell Array of length elements specifying segment ID per cell
+ * @param orientation   GAUGE_ORIENT_HORIZONTAL or GAUGE_ORIENT_VERTICAL
+ * @param paletteLine   Palette line (0-3, typically PAL0-PAL3)
+ * @param priority      Tile priority (0 or 1)
+ * @param vflip         Vertical flip (0 or 1)
+ * @param hflip         Horizontal flip (0 or 1)
+ */
+void GaugeLayout_initEx(GaugeLayout *layout,
+                        u8 length,
+                        GaugeFillDirection fillDir,
+                        const u32 * const *bodyTilesets,
+                        const u32 * const *endTilesets,
+                        const u32 * const *breakTilesets,
+                        const u32 * const *trailTilesets,
+                        const u8 *segmentIdByCell,
+                        GaugeOrientation orientation,
+                        u8 paletteLine,
+                        u8 priority,
+                        u8 vflip,
+                        u8 hflip);
+
+/**
+ * Set fill direction to forward (cell 0 fills first).
+ * Use for gauges that fill from left or top.
+ */
 void GaugeLayout_setFillForward(GaugeLayout *layout);
+
+/**
+ * Set fill direction to reverse (last cell fills first).
+ * Use for gauges that fill from right or bottom.
+ */
 void GaugeLayout_setFillReverse(GaugeLayout *layout);
 
-void GaugeLayout_buildLaneListsFromRom(GaugeLayout *layout, const GaugeRom *rom);
-
-/* Mirror along axis:
-   - reverse segmentIdByCell order
-   - set fillReverse (common for mirrored player HUD)
-   - rebuild lane lists
-*/
-void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src, const GaugeRom *rom);
+/**
+ * Create mirrored layout for P2/opponent side.
+ * - Reverses segment order
+ * - Reverses fill direction
+ * - Sets appropriate flip flags based on orientation
+ *
+ * @param dst   Destination layout (will be initialized)
+ * @param src   Source layout to mirror
+ */
+void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src);
 
 
 /* =============================================================================
-   GaugeLogic — generic value/trail behavior
-   -----------------------------------------------------------------------------
-   Life bar examples are included for understanding.
+   GaugeLogic â€” Value/trail state machine
+   =============================================================================
 
-   If maxValue != maxFillPixels, you typically provide a LUT (valueToPixelsLUT)
-   so that value maps to a pixel width exactly.
+   Manages the gauge value and trail animation. Embedded in Gauge struct.
+   All timing is frame-based (60fps on NTSC, 50fps on PAL).
 
-   On heal:
-     - applyIncrease(): value increases, trail resets to value (no blink).
+   VALUE BEHAVIOR:
+   ---------------
+   On damage (Gauge_decrease):
+     - value decreases immediately (or animates if valueAnimEnabled)
+     - trail holds at previous width for holdFrames
+     - trail blinks for blinkFrames
+     - trail shrinks toward value
 
-   On damage:
-     - applyDecrease(): value decreases, trail jumps to previous displayed width,
-       holds for holdFrames, blinks for blinkFrames, then shrinks toward value.
+   On heal (Gauge_increase):
+     - value increases (or animates if valueAnimEnabled)
+     - trail resets to value (no blink/hold)
+
+   ANIMATION PARAMETERS:
+   ---------------------
+   valueAnimEnabled: 0=instant value changes, 1=animated value transition
+   valueAnimShift:   Speed divider for value animation (higher=slower)
+                     step = (distance >> valueAnimShift) + 1
+                     Recommended: 3-6, default: GAUGE_DEFAULT_VALUE_ANIM_SHIFT (4)
+   trailAnimShift:   Speed divider for trail shrink (higher=slower)
+                     Recommended: 3-6, default: GAUGE_DEFAULT_TRAIL_ANIM_SHIFT (4)
+   blinkShift:       Speed divider for blink rate (higher=slower)
+                     frequency = blinkTimer >> blinkShift
+                     Recommended: 2-4, default: GAUGE_DEFAULT_BLINK_SHIFT (3 = ~7.5Hz @ 60fps)
+
    ============================================================================= */
-
 typedef struct
 {
-    u16 maxValue;
-    u16 currentValue;
+    /* --- 16-bit / pointer fields first (word-aligned on 68000) --- */
 
-    u16 maxFillPixels;           /* MUST be layout.lengthTiles * 8 */
-    const u16 *valueToPixelsLUT; /* optional: [0..maxValue], NULL => 1:1 mapping */
+    u16 maxValue;                   /* Maximum gauge value */
+    u16 currentValue;               /* Current logical value (0..maxValue) */
+    u16 maxFillPixels;              /* Maximum fill width in pixels */
+    const u16 *valueToPixelsLUT;    /* Optional LUT for non-linear mapping (NULL = auto) */
 
-    u16 valueTargetPixels;
-    u16 valuePixels;
+    u16 valueTargetPixels;          /* Target pixel value (for animation) */
+    u16 valuePixels;                /* Current displayed pixel value */
+    u16 trailPixels;                /* Current trail pixel position */
+    u16 blinkTimer;                 /* Internal blink phase counter */
 
-    u16 trailPixels;
+    /* Render cache (for change detection) */
+    u16 lastValuePixels;            /* Last rendered value pixels */
+    u16 lastTrailPixelsRendered;    /* Last rendered trail pixels */
 
-    u8 holdFramesRemaining;
-    u8 blinkFramesRemaining;
+    /* --- 8-bit fields (packed, no padding) --- */
 
-    u8 valueAnimEnabled;
-    u8 valueAnimShift;
-    u8 trailAnimShift;
-    u8 blinkShift;
+    u8 holdFramesRemaining;         /* Frames until trail starts shrinking */
+    u8 blinkFramesRemaining;        /* Frames of blinking remaining */
+    u8 valueAnimEnabled;            /* 0=instant, 1=animated value changes */
+    u8 valueAnimShift;              /* Value animation speed (higher=slower) */
+    u8 trailAnimShift;              /* Trail shrink speed (higher=slower) */
+    u8 blinkShift;                  /* Blink frequency (higher=slower) */
+    u8 trailEnabled;                /* Enable trail effect (0=no trail) */
+    u8 lastBlinkOn;                 /* Last blink state */
 
 } GaugeLogic;
 
+
+/* =============================================================================
+   Internal structures (used by GaugePart, exposed for sizeof)
+   ============================================================================= */
+
+/**
+ * Per-cell streaming data for fixed VRAM mode.
+ * Each cell has its own VRAM tile that gets updated via DMA.
+ *
+ * With segment terminations:
+ * - bodyFillStrip45: main interior strip
+ * - endFillStrip45:  termination strip (NULL if segment has no end)
+ * - breakFillStrip45: transition strip (used only if end exists)
+ */
+typedef struct
+{
+    const u32 *bodyFillStrip45;     /* BODY strip (always set when cell is valid) */
+    const u32 *endFillStrip45;      /* END strip (NULL if not supported) */
+    const u32 *breakFillStrip45;    /* BREAK strip (NULL if not supported) */
+    const u32 *trailFillStrip64;    /* TRAIL strip (NULL if not supported) */
+    const u32 *loadedFillStrip45;   /* Last strip uploaded (for cache) */
+    u16 vramTileIndex;              /* VRAM tile index for this cell */
+    u8 loadedFillIdx;               /* Last fill index uploaded (0xFF=none) */
+    u8 cellIndex;                   /* Index in layout (for fill calculation) */
+} GaugeStreamCell;
+
+
+/**
+ * Dynamic VRAM mode data.
+ * Simplified tile streaming with per-segment standard tiles.
+ * Partial tiles are scalars (1 per GaugePart) to avoid conflicts between parts.
+ */
+typedef struct
+{
+    /* --- Standard tiles per segment --- */
+    u16 vramTileEmpty[GAUGE_MAX_SEGMENTS];       /* Empty tile per segment (0,0) */
+    u16 vramTileFullValue[GAUGE_MAX_SEGMENTS];   /* Full value tile per segment (8,8) */
+    u16 vramTileFullTrail[GAUGE_MAX_SEGMENTS];   /* Full trail tile per segment (0,8) */
+
+    /* --- Partial tiles (streamed on demand, scalars per GaugePart) --- */
+    u16 vramTilePartialValue;       /* Partial value tile - also used for "both" case */
+    u16 vramTilePartialTrail;       /* Partial trail tile (value=0, trail=1-7 px) */
+    u16 vramTilePartialEnd;         /* End cap tile (value/trail frontier) */
+    u16 vramTilePartialTrailSecond; /* Second trail-break tile (before END) */
+
+    /* --- Cache for loaded partial tiles --- */
+    u8 loadedSegmentPartialValue;   /* Which segment's partial value is loaded */
+    u8 loadedFillIdxPartialValue;   /* Loaded fill index for partial value */
+    u8 loadedSegmentPartialTrail;   /* Which segment's partial trail is loaded */
+    u8 loadedFillIdxPartialTrail;   /* Loaded fill index for partial trail */
+    u8 loadedSegmentPartialEnd;     /* Which segment's END tile is loaded */
+    u8 loadedFillIdxPartialEnd;     /* Loaded fill index for END */
+    u8 loadedSegmentPartialTrailSecond; /* Which segment's second trail break is loaded */
+    u8 loadedFillIdxPartialTrailSecond; /* Loaded fill index for second trail break */
+
+    /* --- Tilemap cache (for change detection) --- */
+    u16 cellCurrentTileIndex[GAUGE_MAX_LENGTH];  /* Currently displayed VRAM tile per cell */
+
+    /* --- Cell validity (pre-computed for CPU optimization) ---
+     * Avoids checking tilesetBySegment[segId] != NULL in render loop.
+     * Trade-off: 16 bytes SRAM vs 2 memory accesses + 1 branch per cell per frame.
+     */
+    u8 cellValid[GAUGE_MAX_LENGTH];              /* 1 if cell has valid tileset, 0 otherwise */
+
+} GaugeDynamic;
+
+
+/* =============================================================================
+   GaugePart â€” VRAM streaming engine (internal)
+   =============================================================================
+
+   Renders a gauge on the WINDOW plane using ROM->VRAM tile streaming.
+   Managed internally by Gauge; users typically don't interact directly.
+   One part = one section of a gauge (e.g., 2-lane effect = 2 parts).
+
+   FEATURES:
+   - Copies GaugeLayout at init (includes visual properties)
+   - Supports dynamic or fixed VRAM allocation
+   - Optimized tile streaming with change detection
+
+   ============================================================================= */
+typedef struct
+{
+    /* --- Position --- */
+    u16 originX;                    /* Tilemap X origin */
+    u16 originY;                    /* Tilemap Y origin */
+
+    /* --- VRAM --- */
+    GaugeVramMode vramMode;         /* Fixed or dynamic mode */
+    u16 vramBase;                   /* Base VRAM tile index */
+
+    /* --- Layout copy (includes visual properties) --- */
+    GaugeLayout layout;
+
+    /* --- Fixed mode data --- */
+    GaugeStreamCell cells[GAUGE_MAX_LENGTH];    /* Per-cell streaming data */
+    u8 cellCount;                               /* Active cell count */
+
+    /* --- Dynamic mode data --- */
+    GaugeDynamic dyn;
+
+} GaugePart;
+
+
+/* =============================================================================
+   Gauge â€” High-level gauge container
+   =============================================================================
+
+   Encapsulates one GaugeLogic and multiple GaugePart instances.
+   This is the main object users interact with.
+
+   USAGE PATTERN:
+   1. Declare parts array: GaugePart parts[N];
+   2. Initialize gauge: Gauge_init(&gauge, ...);
+   3. Add parts: Gauge_addPart(&gauge, ...);
+   4. Game loop: Gauge_update(&gauge);
+   5. Change value: Gauge_decrease/increase(&gauge, ...);
+
+   MULTIPLE PARTS:
+   Multiple parts can share the same logic for perfect synchronization.
+   Use cases:
+   - 2-lane gauge (2 parts at adjacent positions)
+   - P1 + P2 mirrored gauges
+   - Extended gauge (multiple segments with different fillOffset)
+
+   ============================================================================= */
+struct Gauge
+{
+    /* --- Logic (value state machine) --- */
+    GaugeLogic logic;
+
+    /* --- Parts (rendering units) --- */
+    GaugePart *parts;           /* Array of parts (user-allocated) */
+    u8 partCount;               /* Number of active parts */
+
+    /* --- VRAM allocation --- */
+    u16 vramBase;                   /* Base VRAM tile index */
+    u16 vramNextOffset;             /* Offset for next part allocation */
+    GaugeVramMode vramMode;         /* Default VRAM mode for parts */
+};
+
+
+/* -----------------------------------------------------------------------------
+   Gauge API
+   ----------------------------------------------------------------------------- */
+
+/**
+ * Initialize gauge with embedded logic.
+ * Trail and value animation are disabled by default.
+ * Use Gauge_setTrailAnim() and Gauge_setValueAnim() to configure animations.
+ *
+ * @param gauge         Gauge to initialize
+ * @param maxValue      Maximum value (e.g., 100 for percentage)
+ * @param maxFillPixels Maximum fill width in pixels (usually length*8)
+ * @param initialValue  Starting value (will be clamped to maxValue)
+ * @param parts         Pointer to user-allocated array of GaugePart
+ * @param vramBase      Base VRAM tile index for allocation
+ * @param vramMode      Default VRAM mode (GAUGE_VRAM_FIXED or GAUGE_VRAM_DYNAMIC)
+ */
+void Gauge_init(Gauge *gauge,
+                u16 maxValue,
+                u16 maxFillPixels,
+                u16 initialValue,
+                GaugePart *parts,
+                u16 vramBase,
+                GaugeVramMode vramMode);
+
+/**
+ * Configure value animation.
+ *
+ * @param gauge    Gauge to configure
+ * @param enabled  Enable animated value changes (0=instant, 1=animated)
+ * @param shift    Animation speed divider (3-6 recommended, 0=use default 4)
+ */
+void Gauge_setValueAnim(Gauge *gauge, u8 enabled, u8 shift);
+
+/**
+ * Configure trail animation.
+ *
+ * @param gauge      Gauge to configure
+ * @param enabled    Enable trail effect (0=no trail, 1=trail with hold/blink/shrink)
+ * @param shift      Trail shrink speed divider (3-6 recommended, 0=use default 4)
+ * @param blinkShift Blink frequency divider (2-4 recommended, 0=use default 3)
+ */
+void Gauge_setTrailAnim(Gauge *gauge, u8 enabled, u8 shift, u8 blinkShift);
+
+/**
+ * Add a part to the gauge (simplified).
+ * VRAM is allocated automatically from gauge's vramBase.
+ *
+ * @param gauge     Parent gauge
+ * @param part      Part to add (must be in gauge's parts array)
+ * @param layout    Layout configuration (copied, includes visual properties)
+ * @param originX   Tilemap X position
+ * @param originY   Tilemap Y position
+ */
+void Gauge_addPart(Gauge *gauge,
+                   GaugePart *part,
+                   const GaugeLayout *layout,
+                   u16 originX,
+                   u16 originY);
+
+/**
+ * Add a part with custom VRAM configuration.
+ * Use when you need specific VRAM placement or different VRAM mode.
+ *
+ * @param gauge     Parent gauge
+ * @param part      Part to add
+ * @param layout    Layout configuration (copied)
+ * @param originX   Tilemap X position
+ * @param originY   Tilemap Y position
+ * @param vramBase  Custom VRAM base tile index
+ * @param vramMode  Custom VRAM mode (overrides gauge default)
+ */
+void Gauge_addPartEx(Gauge *gauge,
+                     GaugePart *part,
+                     const GaugeLayout *layout,
+                     u16 originX,
+                     u16 originY,
+                     u16 vramBase,
+                     GaugeVramMode vramMode);
+
+/**
+ * Update gauge: tick logic + render all parts.
+ * Call once per frame.
+ *
+ * Performs:
+ * - Value animation (if enabled)
+ * - Trail animation (hold, blink, shrink)
+ * - Tile streaming for all parts
+ * - Early return optimization if nothing changed
+ */
+void Gauge_update(Gauge *gauge);
+
+/**
+ * Set gauge value directly (instant, no trail effect).
+ *
+ * @param gauge     Gauge to modify
+ * @param newValue  New value (clamped to maxValue)
+ */
+void Gauge_setValue(Gauge *gauge, u16 newValue);
+
+/**
+ * Decrease gauge value (damage).
+ * Trail holds then blinks before shrinking toward new value.
+ *
+ * @param gauge       Gauge to modify
+ * @param amount      Amount to decrease
+ * @param holdFrames  Frames to hold trail before blinking
+ * @param blinkFrames Frames to blink before shrinking
+ */
+void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
+
+/**
+ * Increase gauge value (heal).
+ * Trail immediately follows value (no blink/hold).
+ *
+ * @param gauge   Gauge to modify
+ * @param amount  Amount to increase
+ */
+void Gauge_increase(Gauge *gauge, u16 amount);
+
+/**
+ * Get current gauge value.
+ */
+static inline u16 Gauge_getValue(const Gauge *gauge)
+{
+    return gauge->logic.currentValue;
+}
+
+/**
+ * Get maximum gauge value.
+ */
+static inline u16 Gauge_getMaxValue(const Gauge *gauge)
+{
+    return gauge->logic.maxValue;
+}
+
+/**
+ * Check if gauge is empty (value == 0).
+ */
+static inline u8 Gauge_isEmpty(const Gauge *gauge)
+{
+    return gauge->logic.currentValue == 0;
+}
+
+/**
+ * Check if gauge is full (value == maxValue).
+ */
+static inline u8 Gauge_isFull(const Gauge *gauge)
+{
+    return gauge->logic.currentValue == gauge->logic.maxValue;
+}
+
+
+/* -----------------------------------------------------------------------------
+   Utility functions
+   ----------------------------------------------------------------------------- */
+
+/**
+ * Compute VRAM tiles needed for a layout (for manual allocation).
+ *
+ * @param layout      Layout configuration
+ * @param vramMode    VRAM mode
+ * @param trailEnabled Whether trail effect is enabled
+ * @return Number of VRAM tiles needed
+ */
+u16 Gauge_getVramSize(const GaugeLayout *layout,
+                      GaugeVramMode vramMode,
+                      u8 trailEnabled);
+
+
+/* -----------------------------------------------------------------------------
+   Low-level API (for advanced usage)
+   ----------------------------------------------------------------------------- */
+
+/**
+ * Initialize GaugeLogic directly.
+ * Use when you need manual control over logic separate from Gauge container.
+ */
 void GaugeLogic_init(GaugeLogic *logic,
                      u16 maxValue,
                      u16 maxFillPixels,
-                     const u16 *valueToPixelsLUT);
+                     const u16 *valueToPixelsLUT,
+                     u8 trailEnabled,
+                     u16 initialValue);
 
-void GaugeLogic_setAnimation(GaugeLogic *logic,
+/**
+ * Initialize GaugeLogic with custom animation.
+ */
+void GaugeLogic_initWithAnim(GaugeLogic *logic,
+                             u16 maxValue,
+                             u16 maxFillPixels,
+                             const u16 *valueToPixelsLUT,
+                             u8 trailEnabled,
+                             u16 initialValue,
                              u8 valueAnimEnabled,
                              u8 valueAnimShift,
                              u8 trailAnimShift,
                              u8 blinkShift);
 
-void GaugeLogic_setValue(GaugeLogic *logic, u16 newValue);
-
-void GaugeLogic_applyDecrease(GaugeLogic *logic,
-                              u16 amount,
-                              u8 holdFrames,
-                              u8 blinkFrames);
-
-void GaugeLogic_applyIncrease(GaugeLogic *logic, u16 amount);
-
+/**
+ * Tick logic state machine.
+ * Called automatically by Gauge_update().
+ */
 void GaugeLogic_tick(GaugeLogic *logic);
 
-
-/* =============================================================================
-   GaugeRenderer — WINDOW tilemap + ROM->VRAM streaming
-   -----------------------------------------------------------------------------
-   Renderer configuration:
-     - orientation (horizontal / vertical)
-     - origin tile (originX, originY) on WINDOW plane
-     - vram base indices for each lane (dedicated to this gauge)
-
-   Slot allocation:
-     lane0 uses compact slots: vramLane0Base + [0..lane0CellCount-1]
-     lane1 uses compact slots: vramLane1Base + [0..lane1CellCount-1]
-
-   Tilemap ownership:
-     Only writes tilemap for cells/lane that exist (mask + pointer).
-     No "empty tile" is written for absent lanes, so the module does not overwrite
-     other HUD elements occupying those positions.
-
-   Runtime:
-     GaugeRenderer_queueDma() computes wanted idx 0..44 per lane cell and uploads
-     only if idx changed (DMA_QUEUE).
-   ============================================================================= */
-
-typedef struct
-{
-    u16 vramTileIndex;
-    const u32 *romFillStrip45; /* pointer to 45-tile strip in ROM */
-    u8 loadedFillIdx;          /* last uploaded idx, 0xFF unknown */
-    u8 cellIndex;              /* axis cell index 0..lengthTiles-1 */
-} GaugeStreamCell;
-
-typedef struct
-{
-    GaugeOrientation orientation;
-
-    u16 originX;
-    u16 originY; /* origin on WINDOW plane */
-
-    u8 paletteLine;
-    u8 priority;
-    u8 vflip;
-    u8 hflip;
-
-    GaugeLayout layout;     /* copied */
-    const GaugeRom *rom;    /* referenced */
-
-    u16 vramLane0Base;
-    u16 vramLane1Base;
-
-    GaugeStreamCell lane0Cells[GAUGE_MAX_CELLS];
-    GaugeStreamCell lane1Cells[GAUGE_MAX_CELLS];
-    u8 lane0CellCount;
-    u8 lane1CellCount;
-
-    /* Optional micro-optimization: skip per-cell loops if nothing changed. */
-    u16 lastValuePixels;
-    u16 lastTrailPixelsRendered;
-    u8 lastBlinkOn;
-
-} GaugeRenderer;
-
-void GaugeRenderer_init(GaugeRenderer *renderer,
-                        GaugeOrientation orientation,
-                        const GaugeRom *rom,
-                        const GaugeLayout *layout,
-                        u16 originX, u16 originY,
-                        u16 vramLane0Base, u16 vramLane1Base,
-                        u8 paletteLine, u8 priority, u8 vflip, u8 hflip);
-
-void GaugeRenderer_bindRom(GaugeRenderer *renderer, const GaugeRom *rom);
-
-void GaugeRenderer_queueDma(GaugeRenderer *renderer,
-                            const GaugeLogic *logic,
-                            u16 frameCounter);
 
 #endif /* GAUGE_H */

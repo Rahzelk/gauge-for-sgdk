@@ -4,5 +4,6 @@
     "\\res",
     "res",
     "inc"
-]
+],
+"CodeGPT.apiKey": "OpenAI"
 }
