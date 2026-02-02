@@ -169,9 +169,52 @@ typedef struct Gauge Gauge;
      If NULL, trail rendering falls back to BODY rules.
 
    tilesetBridgeBySegment[segmentId]:
-     Optional 45-tile ROM strip for BRIDGE (segment transition).
-     Used only when a segment ends before the gauge END is reached.
-     If NULL, the last tile of the segment becomes a forced BREAK (index 44).
+     Optional 45-tile ROM strip for BRIDGE (segment transition tile).
+     Placed at the last cell of a segment before a different segment begins.
+     The bridge tile mirrors the fill state of the NEXT cell to ensure a
+     seamless visual transition between segments.
+
+     Example with 2 segments (A=zone, B=zone):
+       Cell:    [A][A][A][D][B][B][B][E]
+                          ^
+                     Bridge (D) shows what the next B cell would show
+
+     If NULL, the last cell of the segment uses a forced BREAK instead
+     (fully filled with BREAK tileset, index 44).
+
+   tilesetCapStartBySegment[segmentId]:
+     Optional 45-tile ROM strip for CAP START (fixed border at gauge start).
+     Applied to cell 0 in fill order. This cell always uses a cap tileset
+     instead of the normal body, but the fill index varies with gauge state.
+
+     Cap start has 3 visual variants depending on gauge state:
+       State     | Tileset used            | Meaning
+       ----------|-------------------------|------------------------------------
+       END here  | capStartStrip           | Value/trail edge is in this cell
+       TRAIL zone| capStartTrailStrip      | Trail is visible in this cell
+       Other     | capStartBreakStrip      | Cell is full or value hasn't arrived
+
+     Example:  [CS][F][F][B][V][T][T][E]
+                 ^
+            Cap Start cell (always rendered with cap tileset)
+
+   tilesetCapEndBySegment[segmentId]:
+     Optional 45-tile ROM strip for CAP END (fixed border at gauge end).
+     Applied to the last cell in fill order. Always rendered using this
+     tileset regardless of fill state.
+
+   tilesetCapStartBreakBySegment[segmentId]:
+     Optional 45-tile ROM strip for CAP START in break/full state.
+     Used when the value edge has not yet reached the cap start cell,
+     or when the cell is fully filled. Falls back to capStartStrip if NULL.
+
+   tilesetCapStartTrailBySegment[segmentId]:
+     Optional 45-tile ROM strip for CAP START in trail zone.
+     Used when the trail break or full trail zone covers the cap start cell.
+
+   capEndBySegment[segmentId]:
+     1 to enable CAP END for the segment used by the last cell.
+     When enabled, the last cell always uses tilesetCapEndBySegment.
 
    orientation:
      GAUGE_ORIENT_HORIZONTAL or GAUGE_ORIENT_VERTICAL.
@@ -207,11 +250,30 @@ typedef struct
     const u32 *tilesetBreakBySegment[GAUGE_MAX_SEGMENTS];/* BREAK: optional 45-tile strips */
     const u32 *tilesetTrailBySegment[GAUGE_MAX_SEGMENTS];/* TRAIL: optional 64-tile strips */
     const u32 *tilesetBridgeBySegment[GAUGE_MAX_SEGMENTS];/* BRIDGE: optional 45-tile strips */
+    const u32 *tilesetCapStartBySegment[GAUGE_MAX_SEGMENTS];/* CAP START: optional 45-tile strips */
+    const u32 *tilesetCapEndBySegment[GAUGE_MAX_SEGMENTS];/* CAP END: optional 45-tile strips */
+    const u32 *tilesetCapStartBreakBySegment[GAUGE_MAX_SEGMENTS];/* CAP START BREAK: optional 45-tile strips */
+    const u32 *tilesetCapStartTrailBySegment[GAUGE_MAX_SEGMENTS];/* CAP START TRAIL: optional 45-tile strips */
+    u8 capEndBySegment[GAUGE_MAX_SEGMENTS];             /* CAP END: 1 if enabled for segment */
 
-    /* --- Segment boundary LUTs (by fillIndex) --- */
+    /* --- Segment boundary LUTs (by fillIndex) ---
+     *
+     * These LUTs are auto-computed by build_bridge_luts() when fill direction
+     * is set. They identify where segment transitions happen.
+     *
+     * Example with 3 segments (A, B, C) and bridges between A-B and B-C:
+     *   fillIndex:            0  1  2  3  4  5  6  7
+     *   segment:              A  A  A  A  B  B  B  C
+     *   bridgeEndByFillIndex: 0  0  0  1  0  0  1  0
+     *                                  ^           ^
+     *                            bridge cells (last of segment with bridge tileset)
+     *   bridgeBreakByFillIndex:0  0  1  0  0  1  0  0
+     *                               ^        ^
+     *                         forced BREAK cells (one before bridge)
+     */
     u8 bridgeEndByFillIndex[GAUGE_MAX_LENGTH];     /* 1 if fillIndex is last cell of a segment with bridge */
-    u8 bridgeBreakByFillIndex[GAUGE_MAX_LENGTH];   /* 1 if fillIndex is forced BREAK before a segment end */
-    u8 bridgeBreakBoundaryByFillIndex[GAUGE_MAX_LENGTH]; /* boundary fillIndex for forced BREAK */
+    u8 bridgeBreakByFillIndex[GAUGE_MAX_LENGTH];   /* 1 if fillIndex is forced BREAK before a bridge */
+    u8 bridgeBreakBoundaryByFillIndex[GAUGE_MAX_LENGTH]; /* fillIndex of the bridge cell this BREAK aligns to */
 
     /* --- Visual properties (all u8 for compact packing) --- */
     u8 orientation;                              /* GAUGE_ORIENT_HORIZONTAL=0 or GAUGE_ORIENT_VERTICAL=1 */
@@ -314,6 +376,26 @@ void GaugeLayout_setFillReverse(GaugeLayout *layout);
  */
 void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src);
 
+/**
+ * Configure optional start/end cap tilesets for a layout.
+ * Call AFTER GaugeLayout_init/initEx. Each parameter is an array of
+ * GAUGE_MAX_SEGMENTS pointers; pass NULL for the entire array to skip,
+ * or set individual entries to NULL to disable caps for that segment.
+ *
+ * @param layout                Layout to configure (must be initialized)
+ * @param capStartTilesets      45-tile strips for cap start (cell 0 in fill order)
+ * @param capEndTilesets        45-tile strips for cap end (last cell in fill order)
+ * @param capStartBreakTilesets 45-tile strips for cap start in break/full state
+ * @param capStartTrailTilesets 45-tile strips for cap start in trail zone
+ * @param capEndBySegment       Array of flags: 1=enable cap end for segment, 0=disabled
+ */
+void GaugeLayout_setCaps(GaugeLayout *layout,
+                         const u32 * const *capStartTilesets,
+                         const u32 * const *capEndTilesets,
+                         const u32 * const *capStartBreakTilesets,
+                         const u32 * const *capStartTrailTilesets,
+                         const u8 *capEndBySegment);
+
 
 /* =============================================================================
    GaugeLogic â€” Value/trail state machine
@@ -387,10 +469,12 @@ typedef struct
  * Per-cell streaming data for fixed VRAM mode.
  * Each cell has its own VRAM tile that gets updated via DMA.
  *
- * With segment terminations:
- * - bodyFillStrip45: main interior strip
- * - endFillStrip45:  termination strip (NULL if segment has no end)
- * - breakFillStrip45: transition strip (used only if end exists)
+ * Strip pointers (pre-cached at init to avoid per-frame segment lookups):
+ * - bodyFillStrip45:   main interior strip (45 tiles, always set)
+ * - endFillStrip45:    termination strip (NULL if segment has no end tileset)
+ * - breakFillStrip45:  transition strip (NULL if no end, else falls back to body)
+ * - trailFillStrip64:  trail strip (64 tiles, NULL if no trail tileset)
+ * - bridgeFillStrip45: bridge strip (NULL if no bridge tileset for this segment)
  */
 typedef struct
 {
@@ -408,8 +492,18 @@ typedef struct
 
 /**
  * Dynamic VRAM mode data.
- * Simplified tile streaming with per-segment standard tiles.
- * Partial tiles are scalars (1 per GaugePart) to avoid conflicts between parts.
+ *
+ * In dynamic mode, VRAM is shared across cells. Pre-loaded "standard" tiles
+ * (empty, full value, full trail) exist per segment and never change.
+ * "Partial" tiles are streamed on demand when a cell needs a unique fill
+ * (e.g., the value/trail edge cell). Only 1 partial tile per type per
+ * GaugePart, so only one cell at a time can show each partial type.
+ *
+ * Additional dedicated VRAM tiles exist for bridges and caps, since these
+ * use different tilesets and can't share the standard segment tiles.
+ *
+ * Change detection caches (loadedFillIdx*, loadedSegment*) avoid redundant
+ * DMA transfers when the same tile content is already in VRAM.
  */
 typedef struct
 {
@@ -418,6 +512,8 @@ typedef struct
     u16 vramTileFullValue[GAUGE_MAX_SEGMENTS];   /* Full value tile per segment (8,8) */
     u16 vramTileFullTrail[GAUGE_MAX_SEGMENTS];   /* Full trail tile per segment (0,8) */
     u16 vramTileBridge[GAUGE_MAX_SEGMENTS];      /* Bridge tile per segment (dynamic) */
+    u16 vramTileCapStart;                        /* Cap start tile (per part) */
+    u16 vramTileCapEnd;                          /* Cap end tile (per part) */
 
     /* --- Partial tiles (streamed on demand, scalars per GaugePart) --- */
     u16 vramTilePartialValue;       /* Partial value tile - also used for "both" case */
@@ -435,6 +531,10 @@ typedef struct
     u8 loadedSegmentPartialTrailSecond; /* Which segment's second trail break is loaded */
     u8 loadedFillIdxPartialTrailSecond; /* Loaded fill index for second trail break */
     u8 loadedFillIdxBridge[GAUGE_MAX_SEGMENTS]; /* Loaded fill index for bridge tile */
+    u8 loadedFillIdxCapStart;           /* Loaded fill index for cap start tile */
+    u8 loadedFillIdxCapEnd;             /* Loaded fill index for cap end tile */
+    u8 loadedCapStartUsesBreak;         /* 1 if cap start break strip is loaded */
+    u8 loadedCapStartUsesTrail;         /* 1 if cap start trail strip is loaded */
 
     /* --- Tilemap cache (for change detection) --- */
     u16 cellCurrentTileIndex[GAUGE_MAX_LENGTH];  /* Currently displayed VRAM tile per cell */

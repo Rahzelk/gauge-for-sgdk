@@ -41,6 +41,14 @@ TILESET gauge_ciel_strip_h_segment_end "gauge_fill_strip_horizontal-terminaison_
 TILESET gauge_ciel_strip_h_segment_trail "gauge_fill_strip_horizontal_trail-ciel.png" NONE NONE 
 TILESET gauge_ciel_strip_h_segment_bridge "gauge_fill_ciel_to_blue_bridge.png" NONE NONE 
 
+TILESET gauge_cap_strip_h_segment_cap "gauge_fill_cap.png" NONE NONE 
+TILESET gauge_cap_strip_h_segment_cap_end "gauge_fill_strip_horizontal-terminaison-cap.png" NONE NONE 
+TILESET gauge_cap_strip_h_segment_cap_trail "gauge_fill_strip_horizontal-trail-cap-start.png" NONE NONE 
+TILESET gauge_cap_strip_h_segment_cap_break "gauge_fill_strip_horizontal-break-cap-start.png" NONE NONE 
+TILESET gauge_cap_strip_h_segment_body "gauge_fill_strip_horizontal-break-cap.png" NONE NONE 
+TILESET gauge_cap_strip_h_segment_end "gauge_fill_strip_horizontal-terminaison_trail-cap.png" NONE NONE 
+TILESET gauge_cap_strip_h_segment_trail "gauge_fill_strip_horizontal_trail-cap.png" NONE NONE 
+
 TILESET gauge_b1_strip_h_segment1 "gauge_fill_strip_horizontal_b1.png" NONE NONE 
 TILESET gauge_b1_strip_v_segment1 "gauge_fill_strip_vertical_b1.png" NONE NONE 
 TILESET gauge_b2_strip_h_segment1 "gauge_fill_strip_horizontal_b2.png" NONE NONE 
