@@ -30,11 +30,6 @@
 #define FILL_IDX_TO_OFFSET(idx)       (((u16)(idx)) << 3)
 
 
-/* -----------------------------------------------------------------------------
-   Debug logging removed (no active debug code paths).
-   ----------------------------------------------------------------------------- */
-
-
 
 /* =============================================================================
    Tile index lookup table
@@ -983,6 +978,7 @@ void GaugeLogic_initWithAnim(GaugeLogic *logic,
     logic->lastValuePixels = CACHE_INVALID_U16;
     logic->lastTrailPixelsRendered = CACHE_INVALID_U16;
     logic->lastBlinkOn = CACHE_INVALID_U8;
+    logic->needUpdate = 1;
 
     /* If trail disabled, ensure consistent state */
     if (!logic->trailEnabled)
@@ -1953,7 +1949,7 @@ static void process_dynamic_mode(GaugePart *part,
         const u8 cellIsValueBreak = (brk.valueBreakFillIndex != CACHE_INVALID_U8 &&
                                      cellFillIndex == brk.valueBreakFillIndex);
 
-        u16 vramTile;
+        u16 vramTile = 0;
         u8 needsUpload = 0;
         u8 fillStripIndex = 0;
         const u32 *stripToUse = NULL;
@@ -2277,6 +2273,8 @@ void Gauge_addPart(Gauge *gauge,
                    u16 originX,
                    u16 originY)
 {
+    if (gauge->partCount >= GAUGE_MAX_PARTS) return;
+
     /* Compute VRAM size for this layout */
     const u16 vramSize = Gauge_getVramSize(layout, gauge->vramMode, gauge->logic.trailEnabled);
 
@@ -2289,6 +2287,7 @@ void Gauge_addPart(Gauge *gauge,
 
     /* Force next update to render (new part needs initial draw) */
     gauge->logic.lastValuePixels = CACHE_INVALID_U16;
+    gauge->logic.needUpdate = 1;
 
     gauge->partCount++;
 }
@@ -2301,11 +2300,14 @@ void Gauge_addPartEx(Gauge *gauge,
                      u16 vramBase,
                      GaugeVramMode vramMode)
 {
+    if (gauge->partCount >= GAUGE_MAX_PARTS) return;
+
     /* Initialize part with custom VRAM settings */
     GaugePart_initInternal(part, gauge, layout, originX, originY, vramBase, vramMode);
 
     /* Force next update to render */
     gauge->logic.lastValuePixels = CACHE_INVALID_U16;
+    gauge->logic.needUpdate = 1;
 
     gauge->partCount++;
 }
@@ -2335,6 +2337,10 @@ void Gauge_addPartEx(Gauge *gauge,
 void Gauge_update(Gauge *gauge)
 {
     GaugeLogic *logic = &gauge->logic;
+
+    /* Skip entirely when gauge is idle (no animations, no pending render).
+     * Cost: ~8 cycles (load byte + branch) vs ~70-90 cycles for the full path. */
+    if (!logic->needUpdate) return;
 
     /* Tick logic state machine */
     GaugeLogic_tick(logic);
@@ -2373,6 +2379,17 @@ void Gauge_update(Gauge *gauge)
     logic->lastTrailPixelsRendered = trailPixelsRendered;
     logic->lastBlinkOn = blinkOn;
 
+    /* Detect fully idle state: value at target, trail caught up, no timers active.
+     * We still render this frame (the final converged state), then next call to
+     * Gauge_update will return immediately via the needUpdate check above. */
+    if (valuePixels == logic->valueTargetPixels &&
+        trailPixels == valuePixels &&
+        logic->holdFramesRemaining == 0 &&
+        logic->blinkFramesRemaining == 0)
+    {
+        logic->needUpdate = 0;
+    }
+
     /* --- Render all parts (countdown: 68000 dbra optimization) --- */
     u8 i = gauge->partCount;
     while (i--)
@@ -2393,6 +2410,7 @@ void Gauge_update(Gauge *gauge)
 void Gauge_setValue(Gauge *gauge, u16 newValue)
 {
     GaugeLogic *logic = &gauge->logic;
+    logic->needUpdate = 1;
 
     logic->currentValue = (newValue > logic->maxValue) ? logic->maxValue : newValue;
     logic->valueTargetPixels = value_to_pixels(logic, logic->currentValue);
@@ -2410,6 +2428,7 @@ void Gauge_setValue(Gauge *gauge, u16 newValue)
 void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
 {
     GaugeLogic *logic = &gauge->logic;
+    logic->needUpdate = 1;
 
     /* Update value */
     logic->currentValue = (logic->currentValue > amount) ? (logic->currentValue - amount) : 0;
@@ -2445,6 +2464,7 @@ void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
 void Gauge_increase(Gauge *gauge, u16 amount)
 {
     GaugeLogic *logic = &gauge->logic;
+    logic->needUpdate = 1;
 
     /* Update value (with overflow protection) */
     if (logic->currentValue + amount > logic->maxValue)

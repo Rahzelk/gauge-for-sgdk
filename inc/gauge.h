@@ -62,6 +62,7 @@
    ----------------------------------------------------------------------------- */
 #define GAUGE_MAX_SEGMENTS    12   /* Maximum different tile styles per layout */
 #define GAUGE_MAX_LENGTH      16   /* Maximum tiles per gauge */
+#define GAUGE_MAX_PARTS        8   /* Maximum parts per gauge (safety guard) */
 
 /* Tile properties */
 #define GAUGE_PIXELS_PER_TILE  8   /* Pixels per tile (8x8) */
@@ -232,14 +233,13 @@ typedef struct Gauge Gauge;
    ============================================================================= */
 typedef struct
 { 
-    /* --- Geometry --- */
+    /* --- Geometry (u16 first for 68000 word alignment) --- */
+    u16 fillOffset;                              /* Pixel offset for fill calc */
     u8 length;                                   /* Number of cells (1..16) */
 
     u8 segmentIdByCell[GAUGE_MAX_LENGTH];        /* Segment style per cell */
     u8 fillIndexByCell[GAUGE_MAX_LENGTH];        /* Fill order per cell */
     u8 cellIndexByFillIndex[GAUGE_MAX_LENGTH];   /* Inverse LUT: cell index for a given fill index (O(1) lookup) */
-
-    u16 fillOffset;                              /* Pixel offset for fill calc */
 
     /* --- Tilemap positions --- */
     Vect2D_u16 tilemapPosByCell[GAUGE_MAX_LENGTH]; /* Tilemap X,Y coordinates per cell */
@@ -457,6 +457,7 @@ typedef struct
     u8 blinkShift;                  /* Blink frequency (higher=slower) */
     u8 trailEnabled;                /* Enable trail effect (0=no trail) */
     u8 lastBlinkOn;                 /* Last blink state */
+    u8 needUpdate;                  /* 1 = animations running or pending render, 0 = fully idle (Gauge_update skips) */
 
 } GaugeLogic;
 
