@@ -49,7 +49,7 @@
 
    // 5. Change value
    Gauge_decrease(&myGauge, 10, 20, 60);  // Damage with trail effect
-   Gauge_increase(&myGauge, 5);           // Heal
+   Gauge_increase(&myGauge, 5, 20, 60);   // Heal with gain trail
    ```
 
    2-LANE SIMULATION:
@@ -116,6 +116,19 @@ typedef enum
     GAUGE_VRAM_FIXED   = 0,
     GAUGE_VRAM_DYNAMIC = 1
 } GaugeVramMode;
+
+/**
+ * Trail mode (current active trail behavior).
+ * NONE   : no trail effect active
+ * DAMAGE : classic damage trail (value decreases, trail shrinks)
+ * GAIN   : gain trail (value increases, trail leads then value catches up)
+ */
+typedef enum
+{
+    GAUGE_TRAIL_NONE   = 0,
+    GAUGE_TRAIL_DAMAGE = 1,
+    GAUGE_TRAIL_GAIN   = 2
+} GaugeTrailMode;
 
 
 /* =============================================================================
@@ -256,6 +269,20 @@ typedef struct
     const u32 *tilesetCapStartTrailBySegment[GAUGE_MAX_SEGMENTS];/* CAP START TRAIL: optional 45-tile strips */
     u8 capEndBySegment[GAUGE_MAX_SEGMENTS];             /* CAP END: 1 if enabled for segment */
 
+    /* --- Gain trail tilesets (optional, per segment) ---
+     * Used when trailMode == GAUGE_TRAIL_GAIN (increase).
+     * NULL entries fall back to the normal tilesets.
+     */
+    const u32 *gainTilesetBySegment[GAUGE_MAX_SEGMENTS];     /* BODY: 45-tile strips */
+    const u32 *gainTilesetEndBySegment[GAUGE_MAX_SEGMENTS];  /* END: 45-tile strips */
+    const u32 *gainTilesetBreakBySegment[GAUGE_MAX_SEGMENTS];/* BREAK: 45-tile strips */
+    const u32 *gainTilesetTrailBySegment[GAUGE_MAX_SEGMENTS];/* TRAIL: 64-tile strips */
+    const u32 *gainTilesetBridgeBySegment[GAUGE_MAX_SEGMENTS];/* BRIDGE: 45-tile strips */
+    const u32 *gainTilesetCapStartBySegment[GAUGE_MAX_SEGMENTS];     /* CAP START: 45-tile strips */
+    const u32 *gainTilesetCapEndBySegment[GAUGE_MAX_SEGMENTS];       /* CAP END: 45-tile strips */
+    const u32 *gainTilesetCapStartBreakBySegment[GAUGE_MAX_SEGMENTS];/* CAP START BREAK: 45-tile strips */
+    const u32 *gainTilesetCapStartTrailBySegment[GAUGE_MAX_SEGMENTS];/* CAP START TRAIL: 45-tile strips */
+
     /* --- Blink-off tilesets (optional, per segment) ---
      * Used only during trail blink OFF frames (blinkFramesRemaining > 0).
      * If a blink-off tileset is NULL, rendering falls back to normal behavior
@@ -270,6 +297,21 @@ typedef struct
     const u32 *blinkOffTilesetCapEndBySegment[GAUGE_MAX_SEGMENTS];       /* CAP END: 45-tile strips */
     const u32 *blinkOffTilesetCapStartBreakBySegment[GAUGE_MAX_SEGMENTS];/* CAP START BREAK: 45-tile strips */
     const u32 *blinkOffTilesetCapStartTrailBySegment[GAUGE_MAX_SEGMENTS];/* CAP START TRAIL: 45-tile strips */
+
+    /* --- Gain blink-off tilesets (optional, per segment) ---
+     * Used only during gain trail blink OFF frames.
+     * If a gain blink-off tileset is NULL, rendering falls back to normal behavior
+     * for that visual element (i.e., trail hidden).
+     */
+    const u32 *gainBlinkOffTilesetBySegment[GAUGE_MAX_SEGMENTS];      /* BODY: 45-tile strips */
+    const u32 *gainBlinkOffTilesetEndBySegment[GAUGE_MAX_SEGMENTS];   /* END: 45-tile strips */
+    const u32 *gainBlinkOffTilesetBreakBySegment[GAUGE_MAX_SEGMENTS]; /* BREAK: 45-tile strips */
+    const u32 *gainBlinkOffTilesetTrailBySegment[GAUGE_MAX_SEGMENTS]; /* TRAIL: 64-tile strips */
+    const u32 *gainBlinkOffTilesetBridgeBySegment[GAUGE_MAX_SEGMENTS];/* BRIDGE: 45-tile strips */
+    const u32 *gainBlinkOffTilesetCapStartBySegment[GAUGE_MAX_SEGMENTS];     /* CAP START: 45-tile strips */
+    const u32 *gainBlinkOffTilesetCapEndBySegment[GAUGE_MAX_SEGMENTS];       /* CAP END: 45-tile strips */
+    const u32 *gainBlinkOffTilesetCapStartBreakBySegment[GAUGE_MAX_SEGMENTS];/* CAP START BREAK: 45-tile strips */
+    const u32 *gainBlinkOffTilesetCapStartTrailBySegment[GAUGE_MAX_SEGMENTS];/* CAP START TRAIL: 45-tile strips */
 
     /* --- Segment boundary LUTs (by fillIndex) ---
      *
@@ -412,6 +454,32 @@ void GaugeLayout_setCaps(GaugeLayout *layout,
                          const u8 *capEndBySegment);
 
 /**
+ * Configure optional gain trail tilesets (used when trailMode == GAUGE_TRAIL_GAIN).
+ * Pass NULL for any array to fall back to normal tilesets for that element.
+ *
+ * @param layout                   Layout to configure (must be initialized)
+ * @param gainBodyTilesets         BODY gain strips (45 tiles)
+ * @param gainEndTilesets          END gain strips (45 tiles)
+ * @param gainBreakTilesets        BREAK gain strips (45 tiles)
+ * @param gainTrailTilesets        TRAIL gain strips (64 tiles)
+ * @param gainBridgeTilesets       BRIDGE gain strips (45 tiles)
+ * @param gainCapStartTilesets     CAP START gain strips (45 tiles)
+ * @param gainCapEndTilesets       CAP END gain strips (45 tiles)
+ * @param gainCapStartBreakTilesets CAP START BREAK gain strips (45 tiles)
+ * @param gainCapStartTrailTilesets CAP START TRAIL gain strips (45 tiles)
+ */
+void GaugeLayout_setGainTrail(GaugeLayout *layout,
+                              const u32 * const *gainBodyTilesets,
+                              const u32 * const *gainEndTilesets,
+                              const u32 * const *gainBreakTilesets,
+                              const u32 * const *gainTrailTilesets,
+                              const u32 * const *gainBridgeTilesets,
+                              const u32 * const *gainCapStartTilesets,
+                              const u32 * const *gainCapEndTilesets,
+                              const u32 * const *gainCapStartBreakTilesets,
+                              const u32 * const *gainCapStartTrailTilesets);
+
+/**
  * Configure optional blink-off tilesets (used during trail blink OFF frames).
  * Pass NULL for any array to disable blink-off for that element.
  *
@@ -440,6 +508,31 @@ void GaugeLayout_setBlinkOff(GaugeLayout *layout,
                              const u32 * const *blinkOffCapStartBreakTilesets,
                              const u32 * const *blinkOffCapStartTrailTilesets);
 
+/**
+ * Configure optional gain blink-off tilesets (used during gain trail blink OFF frames).
+ * Pass NULL for any array to disable gain blink-off for that element.
+ *
+ * @param layout                   Layout to configure (must be initialized)
+ * @param gainBlinkOffBodyTilesets     BODY gain blink-off strips (45 tiles)
+ * @param gainBlinkOffEndTilesets      END gain blink-off strips (45 tiles)
+ * @param gainBlinkOffBreakTilesets    BREAK gain blink-off strips (45 tiles)
+ * @param gainBlinkOffTrailTilesets    TRAIL gain blink-off strips (64 tiles)
+ * @param gainBlinkOffBridgeTilesets   BRIDGE gain blink-off strips (45 tiles)
+ * @param gainBlinkOffCapStartTilesets CAP START gain blink-off strips (45 tiles)
+ * @param gainBlinkOffCapEndTilesets   CAP END gain blink-off strips (45 tiles)
+ * @param gainBlinkOffCapStartBreakTilesets CAP START BREAK gain blink-off strips (45 tiles)
+ * @param gainBlinkOffCapStartTrailTilesets CAP START TRAIL gain blink-off strips (45 tiles)
+ */
+void GaugeLayout_setGainBlinkOff(GaugeLayout *layout,
+                                 const u32 * const *gainBlinkOffBodyTilesets,
+                                 const u32 * const *gainBlinkOffEndTilesets,
+                                 const u32 * const *gainBlinkOffBreakTilesets,
+                                 const u32 * const *gainBlinkOffTrailTilesets,
+                                 const u32 * const *gainBlinkOffBridgeTilesets,
+                                 const u32 * const *gainBlinkOffCapStartTilesets,
+                                 const u32 * const *gainBlinkOffCapEndTilesets,
+                                 const u32 * const *gainBlinkOffCapStartBreakTilesets,
+                                 const u32 * const *gainBlinkOffCapStartTrailTilesets);
 
 /* =============================================================================
    GaugeLogic â€” Value/trail state machine
@@ -458,7 +551,8 @@ void GaugeLayout_setBlinkOff(GaugeLayout *layout,
 
    On heal (Gauge_increase):
      - value increases (or animates if valueAnimEnabled)
-     - trail resets to value (no blink/hold)
+     - if valueAnimEnabled + trailEnabled: gain trail (hold/blink then value catches up)
+     - otherwise trail resets to value (no blink/hold)
 
    ANIMATION PARAMETERS:
    ---------------------
@@ -500,7 +594,9 @@ typedef struct
     u8 trailAnimShift;              /* Trail shrink speed (higher=slower) */
     u8 blinkShift;                  /* Blink frequency (higher=slower) */
     u8 trailEnabled;                /* Enable trail effect (0=no trail) */
+    u8 trailMode;                   /* GAUGE_TRAIL_NONE / DAMAGE / GAIN */
     u8 lastBlinkOn;                 /* Last blink state */
+    u8 lastTrailMode;               /* Last trail mode (for render cache) */
     u8 needUpdate;                  /* 1 = animations running or pending render, 0 = fully idle (Gauge_update skips) */
 
 } GaugeLogic;
@@ -781,12 +877,14 @@ void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
  
 /**
  * Increase gauge value (heal).
- * Trail immediately follows value (no blink/hold).
+ * When valueAnim is enabled, can trigger a gain trail (lead blink then catch-up).
  *
  * @param gauge   Gauge to modify
  * @param amount  Amount to increase
+ * @param holdFrames  Frames to hold gain trail before blinking
+ * @param blinkFrames Frames to blink gain trail before value catches up
  */
-void Gauge_increase(Gauge *gauge, u16 amount);
+void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
 
 /**
  * Get current gauge value.
@@ -828,14 +926,16 @@ static inline u8 Gauge_isFull(const Gauge *gauge)
 /**
  * Compute VRAM tiles needed for a layout (for manual allocation).
  *
+ * The size is derived from the current gauge configuration:
+ * - gauge->vramMode
+ * - gauge->logic.trailEnabled
+ *
+ * @param gauge       Gauge configuration source (must be initialized)
  * @param layout      Layout configuration
- * @param vramMode    VRAM mode
- * @param trailEnabled Whether trail effect is enabled
  * @return Number of VRAM tiles needed
  */
-u16 Gauge_getVramSize(const GaugeLayout *layout,
-                      GaugeVramMode vramMode,
-                      u8 trailEnabled);
+u16 Gauge_getVramSize(const Gauge *gauge,
+                      const GaugeLayout *layout);
 
 
 /* -----------------------------------------------------------------------------

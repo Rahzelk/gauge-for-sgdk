@@ -24,12 +24,12 @@
 
 TILESET gauge_h_straight_yellow_strip "gauge_h_straight_yellow_strip.png" NONE NONE 
 TILESET gauge_v_straight_yellow_strip "gauge_v_straight_yellow_strip.png"   NONE NONE 
+TILESET gauge_h_straight_small_blue_strip "gauge_h_straight_small_blue_strip.png" NONE NONE 
 
 TILESET gauge_h_bevel_yellow_strip_trail "gauge_h_bevel_yellow_strip_trail.png" NONE NONE 
 TILESET gauge_h_bevel_yellow_strip_end "gauge_h_bevel_yellow_strip_end.png" NONE NONE 
 TILESET gauge_h_bevel_yellow_strip_break "gauge_h_bevel_yellow_strip_break.png"     NONE NONE 
 
-TILESET gauge_h_straight_small_blue_strip "gauge_h_straight_small_blue_strip.png" NONE NONE 
 TILESET gauge_h_bevel_blue_strip_break "gauge_h_bevel_blue_strip_break.png" NONE NONE 
 TILESET gauge_h_bevel_blue_strip_end "gauge_h_bevel_blue_strip_end.png" NONE NONE 
 TILESET gauge_h_bevel_blue_strip_trail "gauge_h_bevel_blue_strip_trail.png" NONE NONE 
@@ -39,7 +39,23 @@ TILESET gauge_h_bevel_lightblue_strip_break "gauge_h_bevel_lightblue_strip_break
 TILESET gauge_h_bevel_lightblue_strip_end "gauge_h_bevel_lightblue_strip_end.png" NONE NONE 
 TILESET gauge_h_bevel_lightblue_strip_trail "gauge_h_bevel_lightblue_strip_trail.png" NONE NONE 
 TILESET gauge_h_bevel_lightblue_to_blue_strip_bridge "gauge_h_bevel_lightblue_to_blue_strip_bridge.png" NONE NONE 
+
+TILESET gauge_h_bevel_yellow_gain_strip_trail "gauge_h_bevel_yellow_gain_strip_trail.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_gain_strip_end "gauge_h_bevel_yellow_gain_strip_end.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_gain_strip_break "gauge_h_bevel_yellow_gain_strip_break.png"     NONE NONE 
+
+TILESET gauge_h_bevel_blue_gain_strip_break "gauge_h_bevel_blue_gain_strip_break.png" NONE NONE 
+TILESET gauge_h_bevel_blue_gain_strip_end "gauge_h_bevel_blue_gain_strip_end.png" NONE NONE 
+TILESET gauge_h_bevel_blue_gain_strip_trail "gauge_h_bevel_blue_gain_strip_trail.png" NONE NONE 
+TILESET gauge_h_bevel_blue_to_yellow_gain_strip_bridge "gauge_h_bevel_blue_to_yellow_gain_strip_bridge.png" NONE NONE 
+
+TILESET gauge_h_bevel_lightblue_gain_strip_break "gauge_h_bevel_lightblue_gain_strip_break.png" NONE NONE 
+TILESET gauge_h_bevel_lightblue_gain_strip_end "gauge_h_bevel_lightblue_gain_strip_end.png" NONE NONE 
+TILESET gauge_h_bevel_lightblue_gain_strip_trail "gauge_h_bevel_lightblue_gain_strip_trail.png" NONE NONE 
+TILESET gauge_h_bevel_lightblue_gain_to_blue_strip_bridge "gauge_h_bevel_lightblue_to_blue_gain_strip_bridge.png" NONE NONE 
  
+
+
 TILESET gauge_h_bevel_yellow_with_border_cap_start_strip_end "gauge_h_bevel_yellow_with_border_cap_start_strip_end.png" NONE NONE 
 TILESET gauge_h_bevel_yellow_with_border_cap_end_strip_end "gauge_h_bevel_yellow_with_border_cap_end_strip_end.png" NONE NONE 
 TILESET gauge_h_bevel_yellow_with_border_cap_start_strip_trail "gauge_h_bevel_yellow_with_border_cap_start_strip_trail.png" NONE NONE 

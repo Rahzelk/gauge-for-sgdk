@@ -34,7 +34,7 @@
 
    6. MODIFY VALUES
       - Gauge_setValue(gauge, value) : instant change, no animation
-      - Gauge_increase(gauge, amount) : heal effect (smooth if valueAnim enabled)
+      - Gauge_increase(gauge, amount, holdFrames, blinkFrames) : gain trail if valueAnim enabled
       - Gauge_decrease(gauge, amount, holdFrames, blinkFrames) : damage with trail
 
    VRAM MODES:
@@ -329,7 +329,7 @@ static void initExample1(u16 *nextVram)
                   EX1_X, EX1_Y);
 
     /* Step 8: Log VRAM usage */
-    vramSize = Gauge_getVramSize(&s_layoutEx1, GAUGE_VRAM_DYNAMIC, 1);
+    vramSize = Gauge_getVramSize(&g_gaugeEx1, &s_layoutEx1);
     logVramUsage("Sample 1", vramBase, vramSize);
     *nextVram = (u16)(vramBase + vramSize);
 
@@ -361,7 +361,7 @@ static void initExample1(u16 *nextVram)
                   &s_layoutEx1Mirror,
                   EX1_MIRROR_X, EX1_MIRROR_Y);
 
-    vramSize = Gauge_getVramSize(&s_layoutEx1Mirror, GAUGE_VRAM_DYNAMIC, 1);
+    vramSize = Gauge_getVramSize(&g_gaugeEx1Mirror, &s_layoutEx1Mirror);
     logVramUsage("Sample 1 Mirrored", vramBase, vramSize);
     *nextVram = (u16)(vramBase + vramSize);
 
@@ -436,7 +436,7 @@ static void initExample2(u16 *nextVram)
                   EX2_X, EX2_Y);
 
     /* Step 6: Log VRAM */
-    vramSize = Gauge_getVramSize(&s_layoutEx2, GAUGE_VRAM_DYNAMIC, 1);
+    vramSize = Gauge_getVramSize(&g_gaugeEx2, &s_layoutEx2);
     logVramUsage("Sample 2 (Cap+Border)", vramBase, vramSize);
     *nextVram = (u16)(vramBase + vramSize);
 
@@ -485,7 +485,36 @@ static void initExample3(u16 *nextVram)
         NULL,                                      /* Segment 2: no bridge */
         NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL
     };
-
+    const u32 *ex3GainEndTilesets[GAUGE_MAX_SEGMENTS] = {
+        gauge_h_bevel_lightblue_gain_strip_end.tiles,      /* Segment 0: ciel gain end */
+        gauge_h_bevel_blue_gain_strip_end.tiles,           /* Segment 1: blue gain end */
+        gauge_h_bevel_yellow_gain_strip_end.tiles,         /* Segment 2: yellow gain end */
+        NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL
+    };
+    const u32 *ex3GainBreakTilesets[GAUGE_MAX_SEGMENTS] = {
+        gauge_h_bevel_lightblue_gain_strip_break.tiles,    /* Segment 0: ciel gain break */
+        gauge_h_bevel_blue_gain_strip_break.tiles,         /* Segment 1: blue gain break */
+        gauge_h_bevel_yellow_gain_strip_break.tiles,       /* Segment 2: yellow gain break */
+        NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL
+    };
+    const u32 *ex3GainTrailTilesets[GAUGE_MAX_SEGMENTS] = {
+        gauge_h_bevel_lightblue_gain_strip_trail.tiles,    /* Segment 0: ciel gain trail */
+        gauge_h_bevel_blue_gain_strip_trail.tiles,         /* Segment 1: blue gain trail */
+        gauge_h_bevel_yellow_gain_strip_trail.tiles,       /* Segment 2: yellow gain trail */
+        NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL
+    };
+    const u32 *ex3GainBridgeTilesets[GAUGE_MAX_SEGMENTS] = {
+        gauge_h_bevel_lightblue_gain_to_blue_strip_bridge.tiles, /* Segment 0: ciel->blue gain bridge */
+        gauge_h_bevel_blue_to_yellow_gain_strip_bridge.tiles,    /* Segment 1: blue->yellow gain bridge */
+        NULL,                                                    /* Segment 2: no bridge */
+        NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL
+    };
+    const u32 *ex3GainBodyTilesets[GAUGE_MAX_SEGMENTS] = {
+        gauge_h_bevel_lightblue_gain_strip_break.tiles,    /* Segment 0: ciel gain break */
+        gauge_h_bevel_blue_gain_strip_break.tiles,         /* Segment 1: blue gain break */
+        gauge_h_bevel_yellow_gain_strip_break.tiles,       /* Segment 2: yellow gain break */
+        NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL
+    };
     /* Step 2: Define segments (5 ciel + 5 blue + 6 yellow) */
     const u8 ex3Segments[EX3_LENGTH] = {
         0, 0, 0, 0, 0,
@@ -505,6 +534,14 @@ static void initExample3(u16 *nextVram)
                        ex3Segments,
                        GAUGE_ORIENT_HORIZONTAL,
                        PAL0, 1, 0, 0);
+
+    GaugeLayout_setGainTrail(&s_layoutEx3,
+                             ex3GainBodyTilesets,                 /* gain body: fallback to normal body */
+                             ex3GainEndTilesets,
+                             ex3GainBreakTilesets,
+                             ex3GainTrailTilesets,
+                             ex3GainBridgeTilesets,
+                             NULL, NULL, NULL, NULL);
 
     /* Step 4: Calculate dimensions */
     const u16 ex3MaxPixels = (u16)(EX3_LENGTH * GAUGE_PIXELS_PER_TILE);
@@ -529,7 +566,7 @@ static void initExample3(u16 *nextVram)
                   EX3_X, EX3_Y);
 
     /* Step 8: Log VRAM */
-    vramSize = Gauge_getVramSize(&s_layoutEx3, GAUGE_VRAM_DYNAMIC, 1);
+    vramSize = Gauge_getVramSize(&g_gaugeEx3, &s_layoutEx3);
     logVramUsage("Sample 3 (VRAM DYNAMIC)", vramBase, vramSize);
     *nextVram = (u16)(vramBase + vramSize);
 
@@ -603,7 +640,7 @@ static void initExample4(u16 *nextVram)
                   EX4_X, EX4_Y);
 
     /* Step 6: Log VRAM (FIXED mode uses more tiles) */
-    vramSize = Gauge_getVramSize(&s_layoutEx4, GAUGE_VRAM_FIXED, 1);
+    vramSize = Gauge_getVramSize(&g_gaugeEx4, &s_layoutEx4);
     logVramUsage("Sample 4 (VRAM FIXED)", vramBase, vramSize);
     *nextVram = (u16)(vramBase + vramSize);
 
@@ -703,7 +740,7 @@ static void initExample5(u16 *nextVram)
 
     /* Debug: log dynamic VRAM tiles to detect overlaps */
     logDynamicVramTiles("Sample 5 part1 dyn tiles", &g_partsEx5[0]);
-    vramSize = Gauge_getVramSize(&s_layoutEx5Part1, GAUGE_VRAM_DYNAMIC, 1);
+    vramSize = Gauge_getVramSize(&g_gaugeEx5, &s_layoutEx5Part1);
     logVramUsage("Sample 5 top part gauge", vramBase, vramSize);
     vramBase = (u16)(vramBase + vramSize);
 
@@ -716,7 +753,7 @@ static void initExample5(u16 *nextVram)
 
     /* Debug: log dynamic VRAM tiles to detect overlaps */
     logDynamicVramTiles("Sample 5 part2 dyn tiles", &g_partsEx5[1]);
-    vramSize = Gauge_getVramSize(&s_layoutEx5Part2, GAUGE_VRAM_DYNAMIC, 1);
+    vramSize = Gauge_getVramSize(&g_gaugeEx5, &s_layoutEx5Part2);
     logVramUsage("Sample 5 bottom part gauge", vramBase, vramSize);
     *nextVram = (u16)(vramBase + vramSize);
 
@@ -760,7 +797,7 @@ static void initExample5(u16 *nextVram)
                   &s_layoutEx5Blue,
                   EX5_BLUE_X, EX5_BLUE_Y);
 
-    vramSize = Gauge_getVramSize(&s_layoutEx5Blue, GAUGE_VRAM_DYNAMIC, 0);
+    vramSize = Gauge_getVramSize(&g_gaugeEx5Blue, &s_layoutEx5Blue);
     logVramUsage("Sample 5 mini-auto-incremental-blue gauge", vramBase, vramSize);
     *nextVram = (u16)(vramBase + vramSize);
 
@@ -966,7 +1003,7 @@ static void initExample6(u16 *nextVram)
                   EX6_X, EX6_Y);
 
     /* Step 7: Log VRAM */
-    vramSize = Gauge_getVramSize(&s_layoutEx6Mirror, GAUGE_VRAM_DYNAMIC, 1);
+    vramSize = Gauge_getVramSize(&g_gaugeEx6, &s_layoutEx6Mirror);
     logVramUsage("Sample 6 (Cap Start/End Mirror)", vramBase, vramSize);
     *nextVram = (u16)(vramBase + vramSize);
 
@@ -994,7 +1031,7 @@ static void handleInput(u16 pressed, u16 held)
     /* Button A: increase (on press) */
     if (pressed & BUTTON_A)
     {
-        Gauge_increase(getSelectedGauge(), 4);
+        Gauge_increase(getSelectedGauge(), 4, 40, 20);
         g_holdA = 0;
     }
 
@@ -1011,7 +1048,7 @@ static void handleInput(u16 pressed, u16 held)
         g_holdA++;
         if (g_holdA >= 12 && (g_frameCount & 3) == 0)
         {
-            Gauge_increase(getSelectedGauge(), 1);
+            Gauge_increase(getSelectedGauge(), 1, 0, 0);
         }
     }
     else
