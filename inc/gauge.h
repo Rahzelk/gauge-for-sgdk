@@ -256,6 +256,21 @@ typedef struct
     const u32 *tilesetCapStartTrailBySegment[GAUGE_MAX_SEGMENTS];/* CAP START TRAIL: optional 45-tile strips */
     u8 capEndBySegment[GAUGE_MAX_SEGMENTS];             /* CAP END: 1 if enabled for segment */
 
+    /* --- Blink-off tilesets (optional, per segment) ---
+     * Used only during trail blink OFF frames (blinkFramesRemaining > 0).
+     * If a blink-off tileset is NULL, rendering falls back to normal behavior
+     * for that visual element (i.e., trail hidden).
+     */
+    const u32 *blinkOffTilesetBySegment[GAUGE_MAX_SEGMENTS];      /* BODY: 45-tile strips */
+    const u32 *blinkOffTilesetEndBySegment[GAUGE_MAX_SEGMENTS];   /* END: 45-tile strips */
+    const u32 *blinkOffTilesetBreakBySegment[GAUGE_MAX_SEGMENTS]; /* BREAK: 45-tile strips */
+    const u32 *blinkOffTilesetTrailBySegment[GAUGE_MAX_SEGMENTS]; /* TRAIL: 64-tile strips */
+    const u32 *blinkOffTilesetBridgeBySegment[GAUGE_MAX_SEGMENTS];/* BRIDGE: 45-tile strips */
+    const u32 *blinkOffTilesetCapStartBySegment[GAUGE_MAX_SEGMENTS];     /* CAP START: 45-tile strips */
+    const u32 *blinkOffTilesetCapEndBySegment[GAUGE_MAX_SEGMENTS];       /* CAP END: 45-tile strips */
+    const u32 *blinkOffTilesetCapStartBreakBySegment[GAUGE_MAX_SEGMENTS];/* CAP START BREAK: 45-tile strips */
+    const u32 *blinkOffTilesetCapStartTrailBySegment[GAUGE_MAX_SEGMENTS];/* CAP START TRAIL: 45-tile strips */
+
     /* --- Segment boundary LUTs (by fillIndex) ---
      *
      * These LUTs are auto-computed by build_bridge_luts() when fill direction
@@ -395,6 +410,35 @@ void GaugeLayout_setCaps(GaugeLayout *layout,
                          const u32 * const *capStartBreakTilesets,
                          const u32 * const *capStartTrailTilesets,
                          const u8 *capEndBySegment);
+
+/**
+ * Configure optional blink-off tilesets (used during trail blink OFF frames).
+ * Pass NULL for any array to disable blink-off for that element.
+ *
+ * Blink-off is applied only to END/TRAIL/BREAK cells while blinkFramesRemaining > 0.
+ * Missing blink-off tilesets fall back to the normal rendering behavior.
+ *
+ * @param layout                   Layout to configure (must be initialized)
+ * @param blinkOffBodyTilesets     BODY blink-off strips (45 tiles)
+ * @param blinkOffEndTilesets      END blink-off strips (45 tiles)
+ * @param blinkOffBreakTilesets    BREAK blink-off strips (45 tiles)
+ * @param blinkOffTrailTilesets    TRAIL blink-off strips (64 tiles)
+ * @param blinkOffBridgeTilesets   BRIDGE blink-off strips (45 tiles)
+ * @param blinkOffCapStartTilesets CAP START blink-off strips (45 tiles)
+ * @param blinkOffCapEndTilesets   CAP END blink-off strips (45 tiles)
+ * @param blinkOffCapStartBreakTilesets CAP START BREAK blink-off strips (45 tiles)
+ * @param blinkOffCapStartTrailTilesets CAP START TRAIL blink-off strips (45 tiles)
+ */
+void GaugeLayout_setBlinkOff(GaugeLayout *layout,
+                             const u32 * const *blinkOffBodyTilesets,
+                             const u32 * const *blinkOffEndTilesets,
+                             const u32 * const *blinkOffBreakTilesets,
+                             const u32 * const *blinkOffTrailTilesets,
+                             const u32 * const *blinkOffBridgeTilesets,
+                             const u32 * const *blinkOffCapStartTilesets,
+                             const u32 * const *blinkOffCapEndTilesets,
+                             const u32 * const *blinkOffCapStartBreakTilesets,
+                             const u32 * const *blinkOffCapStartTrailTilesets);
 
 
 /* =============================================================================
@@ -734,7 +778,7 @@ void Gauge_setValue(Gauge *gauge, u16 newValue);
  * @param blinkFrames Frames to blink before shrinking
  */
 void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
-
+ 
 /**
  * Increase gauge value (heal).
  * Trail immediately follows value (no blink/hold).

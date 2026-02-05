@@ -65,7 +65,7 @@
 #define EX5_PART1_LEN   12      /* Sample 5 Part1: 12 tiles (3 segments) */
 #define EX5_PART2_LEN    4      /* Sample 5 Part2: 4 tiles yellow */
 #define EX5_BLUE_LEN     8      /* Sample 5 Blue: 8 tiles */
-#define EX6_LENGTH      12      /* Sample 6: cap start/end demo */
+#define EX6_LENGTH      14      /* Sample 6: cap start/end + blue segment demo */
 
 /* Screen positions (in tiles) */
 #define EX1_X           2
@@ -110,6 +110,7 @@ static GaugeLayout s_layoutEx5Part2;    /* Yellow 4 tiles */
 static GaugeLayout s_layoutEx5Blue;     /* Blue 8 tiles */
 static GaugeLayout s_layoutEx4;         /* Multi-segment vertical */
 static GaugeLayout s_layoutEx6;         /* Cap start/end demo */
+static GaugeLayout s_layoutEx6Mirror;   /* Cap start/end demo (mirror) */
 
 /* --- Gauges (manage value and logic) --- */
 static Gauge g_gaugeEx1;
@@ -321,7 +322,7 @@ static void initExample1(u16 *nextVram)
 
     /* Step 6: Enable trail animation for damage effect */
     Gauge_setTrailAnim(&g_gaugeEx1, 1, 0, 0);   /* enabled, default speeds */
-
+ 
     /* Step 7: Add the visual part at screen position */
     Gauge_addPart(&g_gaugeEx1, &g_partsEx1[0],
                   &s_layoutEx1,
@@ -781,12 +782,27 @@ static void initExample5(u16 *nextVram)
    - CAP END always uses its own tileset (cap_end) and follows the END LUT.
 
    Assets used:
-   - cap start:            gauge_h_bevel_yellow_with_border_cap_start_strip_end
-   - cap start break:      gauge_h_bevel_yellow_with_border_cap_start_strip_break
-   - cap start trail:      gauge_h_bevel_yellow_with_border_cap_start_strip_trail
-   - normal end:           gauge_h_bevel_yellow_with_border_strip_end
-   - cap end:              gauge_h_bevel_yellow_with_border_cap_end_strip_end
-   - body/trail:           gauge_h_bevel_yellow_with_border_strip_break / trail
+   - yellow cap start:     gauge_h_bevel_yellow_with_border_cap_start_strip_end
+   - yellow cap start break: gauge_h_bevel_yellow_with_border_cap_start_strip_break
+   - yellow cap start trail: gauge_h_bevel_yellow_with_border_cap_start_strip_trail
+   - yellow end:           gauge_h_bevel_yellow_with_border_strip_end
+   - yellow cap end:       gauge_h_bevel_yellow_with_border_cap_end_strip_end
+   - yellow body/trail:    gauge_h_bevel_yellow_with_border_strip_break / trail
+   - blue body/trail:      gauge_h_bevel_blue_with_border_strip_break / trail
+   - blue end:             gauge_h_bevel_blue_with_border_strip_end
+   - bridges:              gauge_h_bevel_yellow_to_blue_with_border_strip_bridge
+                           gauge_h_bevel_blue_to_yellow_with_border_strip_bridge
+   - yellow blink off cap start:  gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_end
+   - yellow blink off cap end:    gauge_h_bevel_yellow_with_border_cap_end_blink_off_strip_end
+   - yellow blink off cap start trail:  gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_trail
+   - yellow blink off cap start break:  gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_break
+   - yellow blink off end:        gauge_h_bevel_yellow_with_border_blink_off_strip_end
+   - yellow blink off break:      gauge_h_bevel_yellow_with_border_blink_off_strip_break
+   - yellow blink off trail:      gauge_h_bevel_yellow_with_border_blink_off_strip_trail
+   - blue blink off body/trail:   gauge_h_bevel_blue_with_border_blink_off_strip_break / trail
+   - blue blink off end:          gauge_h_bevel_blue_with_border_blink_off_strip_end
+   - blink off bridges:           gauge_h_bevel_yellow_to_blue_with_border_blink_off_strip_bridge
+                           gauge_h_bevel_blue_to_yellow_with_border_blink_off_strip_bridge
    ============================================================================= */
 
 static void initExample6Layout(void)
@@ -794,19 +810,28 @@ static void initExample6Layout(void)
     /* Step 1: Define tilesets (cap style) */
     const u32 *ex6BodyTilesets[GAUGE_MAX_SEGMENTS] = {
         gauge_h_bevel_yellow_with_border_strip_break.tiles,
-        NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
+        gauge_h_bevel_blue_with_border_strip_break.tiles,
+        NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
     const u32 *ex6EndTilesets[GAUGE_MAX_SEGMENTS] = {
         gauge_h_bevel_yellow_with_border_strip_end.tiles,
-        NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
+        gauge_h_bevel_blue_with_border_strip_end.tiles,
+        NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
     const u32 *ex6BreakTilesets[GAUGE_MAX_SEGMENTS] = {
         gauge_h_bevel_yellow_with_border_strip_break.tiles,
-        NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
+        gauge_h_bevel_blue_with_border_strip_break.tiles,
+        NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
     const u32 *ex6TrailTilesets[GAUGE_MAX_SEGMENTS] = {
         gauge_h_bevel_yellow_with_border_strip_trail.tiles,
-        NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
+        gauge_h_bevel_blue_with_border_strip_trail.tiles,
+        NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
+    };
+    const u32 *ex6BridgeTilesets[GAUGE_MAX_SEGMENTS] = {
+        gauge_h_bevel_yellow_to_blue_with_border_strip_bridge.tiles,
+        gauge_h_bevel_blue_to_yellow_with_border_strip_bridge.tiles,
+        NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
     const u32 *ex6CapStartTilesets[GAUGE_MAX_SEGMENTS] = {
         gauge_h_bevel_yellow_with_border_cap_start_strip_end.tiles,
@@ -824,14 +849,56 @@ static void initExample6Layout(void)
         gauge_h_bevel_yellow_with_border_cap_start_strip_trail.tiles,
         NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
+    const u32 *ex6BlinkOffBodyTilesets[GAUGE_MAX_SEGMENTS] = {
+        gauge_h_bevel_yellow_with_border_blink_off_strip_break.tiles,
+        gauge_h_bevel_blue_with_border_blink_off_strip_break.tiles,
+        NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
+    };
+    const u32 *ex6BlinkOffEndTilesets[GAUGE_MAX_SEGMENTS] = {
+        gauge_h_bevel_yellow_with_border_blink_off_strip_end.tiles,
+        gauge_h_bevel_blue_with_border_blink_off_strip_end.tiles,
+        NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
+    };
+    const u32 *ex6BlinkOffBreakTilesets[GAUGE_MAX_SEGMENTS] = {
+        gauge_h_bevel_yellow_with_border_blink_off_strip_break.tiles,
+        gauge_h_bevel_blue_with_border_blink_off_strip_break.tiles,
+        NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
+    };
+    const u32 *ex6BlinkOffTrailTilesets[GAUGE_MAX_SEGMENTS] = {
+        gauge_h_bevel_yellow_with_border_blink_off_strip_trail.tiles,
+        gauge_h_bevel_blue_with_border_blink_off_strip_trail.tiles,
+        NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
+    };
+    const u32 *ex6BlinkOffBridgeTilesets[GAUGE_MAX_SEGMENTS] = {
+        gauge_h_bevel_yellow_to_blue_with_border_blink_off_strip_bridge.tiles,
+        gauge_h_bevel_blue_to_yellow_with_border_blink_off_strip_bridge.tiles,
+        NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
+    };
+    const u32 *ex6BlinkOffCapStartTilesets[GAUGE_MAX_SEGMENTS] = {
+        gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_end.tiles,
+        NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
+    };
+    const u32 *ex6BlinkOffCapEndTilesets[GAUGE_MAX_SEGMENTS] = {
+        gauge_h_bevel_yellow_with_border_cap_end_blink_off_strip_end.tiles,
+        NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
+    };
+    const u32 *ex6BlinkOffCapStartBreakTilesets[GAUGE_MAX_SEGMENTS] = {
+        gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_break.tiles,
+        NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
+    };
+    const u32 *ex6BlinkOffCapStartTrailTilesets[GAUGE_MAX_SEGMENTS] = {
+        gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_trail.tiles,
+        NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
+    };
     const u8 ex6CapEndBySegment[GAUGE_MAX_SEGMENTS] = {
         1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
     };
 
     /* Step 2: Define segments (all cap style) */
     const u8 ex6Segments[EX6_LENGTH] = {
-        0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0
+        0, 0, 0, 0,
+        1, 1, 1, 1, 1, 1,
+        0, 0, 0, 0
     };
 
     /* Step 3: Initialize layout */
@@ -842,7 +909,7 @@ static void initExample6Layout(void)
                        ex6EndTilesets,
                        ex6BreakTilesets,
                        ex6TrailTilesets,
-                       NULL,
+                       ex6BridgeTilesets,
                        ex6Segments,
                        GAUGE_ORIENT_HORIZONTAL,
                        PAL0, 1, 0, 0);
@@ -857,6 +924,19 @@ static void initExample6Layout(void)
                         ex6CapStartBreakTilesets,
                         ex6CapStartTrailTilesets,
                         ex6CapEndBySegment);
+
+    GaugeLayout_setBlinkOff(&s_layoutEx6,
+                            ex6BlinkOffBodyTilesets,
+                            ex6BlinkOffEndTilesets,
+                            ex6BlinkOffBreakTilesets,
+                            ex6BlinkOffTrailTilesets,
+                            ex6BlinkOffBridgeTilesets,
+                            ex6BlinkOffCapStartTilesets,
+                            ex6BlinkOffCapEndTilesets,
+                            ex6BlinkOffCapStartBreakTilesets,
+                            ex6BlinkOffCapStartTrailTilesets);
+
+    GaugeLayout_makeMirror(&s_layoutEx6Mirror, &s_layoutEx6);
 }
 
 static void initExample6(u16 *nextVram)
@@ -876,22 +956,22 @@ static void initExample6(u16 *nextVram)
                ex6MaxPixels,
                g_partsEx6,
                vramBase,
-               GAUGE_VRAM_FIXED);
+               GAUGE_VRAM_DYNAMIC);
 
     Gauge_setTrailAnim(&g_gaugeEx6, 1, 0, 0);
 
     /* Step 6: Add part */
     Gauge_addPart(&g_gaugeEx6, &g_partsEx6[0],
-                  &s_layoutEx6,
+                  &s_layoutEx6Mirror,
                   EX6_X, EX6_Y);
 
     /* Step 7: Log VRAM */
-    vramSize = Gauge_getVramSize(&s_layoutEx6, GAUGE_VRAM_FIXED, 1);
-    logVramUsage("Sample 6 (Cap Start/End)", vramBase, vramSize);
+    vramSize = Gauge_getVramSize(&s_layoutEx6Mirror, GAUGE_VRAM_DYNAMIC, 1);
+    logVramUsage("Sample 6 (Cap Start/End Mirror)", vramBase, vramSize);
     *nextVram = (u16)(vramBase + vramSize);
 
     /* Draw label under gauge */
-    VDP_drawText("Sample 6", EX6_X, EX6_Y + 1);
+    VDP_drawText("Sample 6 Mirror", EX6_X, EX6_Y + 1);
     VDP_drawText("Cap Start/End", EX6_X, EX6_Y + 2);
 }
 
@@ -921,7 +1001,7 @@ static void handleInput(u16 pressed, u16 held)
     /* Button B: decrease with trail effect (on press) */
     if (pressed & BUTTON_B)
     {
-        Gauge_decrease(getSelectedGauge(), 4, 20, 190);
+        Gauge_decrease(getSelectedGauge(), 4, 20, 60);
         g_holdB = 0;
     }
 
