@@ -1868,7 +1868,7 @@ static void process_dynamic_mode(GaugePart *part,
                     if (dyn->loadedFillIdxBridge[segId] != bridgeIdx)
                     {
                         upload_fill_tile(layout->tilesetBridgeBySegment[segId],
-                                         bridgeIdx, vramTileBridge, DMA_QUEUE);
+                                         bridgeIdx, vramTileBridge, DMA);
                         dyn->loadedFillIdxBridge[segId] = bridgeIdx;
                     }
                     if (dyn->cellCurrentTileIndex[cellIndex] != vramTileBridge)

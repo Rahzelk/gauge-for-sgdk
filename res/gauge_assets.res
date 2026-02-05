@@ -9,7 +9,7 @@
 #      for trailPxInTile = valuePxInTile..8:
 #        append tile(valuePxInTile, trailPxInTile)
 #
-#  Visual mnemonic for a HORIZONTAL gauge (8 pixels wide):
+#  Visual mnemonic for a h_bevel gauge (8 pixels wide):
 #    V = primary pixels (value)
 #    T = trailing pixels (trail-only)
 #    . = empty/background
@@ -22,36 +22,44 @@
 #  vertical tile strips.
 #============================================================================= 
 
-TILESET gauge_yellow_strip_h_segment1 "gauge_fill_strip_horizontal.png" NONE NONE 
-TILESET gauge_yellow_strip_v_segment1 "gauge_fill_strip_vertical.png"   NONE NONE 
+TILESET gauge_h_straight_yellow_strip "gauge_h_straight_yellow_strip.png" NONE NONE 
+TILESET gauge_v_straight_yellow_strip "gauge_v_straight_yellow_strip.png"   NONE NONE 
 
-TILESET gauge_yellow_strip_h_segment_trail "gauge_fill_strip_horizontal_trail.png" NONE NONE 
-TILESET gauge_yellow_strip_h_segment_end "gauge_fill_strip_horizontal-terminaison_trail.png" NONE NONE 
-TILESET gauge_yellow_strip_h_segment_body "gauge_fill_strip_horizontal-frontier.png"     NONE NONE 
+TILESET gauge_h_bevel_yellow_strip_trail "gauge_h_bevel_yellow_strip_trail.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_strip_end "gauge_h_bevel_yellow_strip_end.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_strip_break "gauge_h_bevel_yellow_strip_break.png"     NONE NONE 
 
-TILESET gauge_blue_strip_h_segment1 "gauge_fill_strip_blue_horizontal.png" NONE NONE 
-TILESET gauge_blue_strip_v_segment1 "gauge_fill_strip_blue_vertical.png" NONE NONE 
-TILESET gauge_blue_strip_h_segment_body "gauge_fill_strip_horizontal-frontier-blue.png" NONE NONE 
-TILESET gauge_blue_strip_h_segment_end "gauge_fill_strip_horizontal-terminaison_trail-blue.png" NONE NONE 
-TILESET gauge_blue_strip_h_segment_trail "gauge_fill_strip_horizontal_trail-blue.png" NONE NONE 
-TILESET gauge_blue_strip_h_segment_bridge "gauge_fill_blue_to_yellow_bridge.png" NONE NONE 
+TILESET gauge_h_straight_small_blue_strip "gauge_h_straight_small_blue_strip.png" NONE NONE 
+TILESET gauge_h_bevel_blue_strip_break "gauge_h_bevel_blue_strip_break.png" NONE NONE 
+TILESET gauge_h_bevel_blue_strip_end "gauge_h_bevel_blue_strip_end.png" NONE NONE 
+TILESET gauge_h_bevel_blue_strip_trail "gauge_h_bevel_blue_strip_trail.png" NONE NONE 
+TILESET gauge_h_bevel_blue_to_yellow_strip_bridge "gauge_h_bevel_blue_to_yellow_strip_bridge.png" NONE NONE 
 
-TILESET gauge_ciel_strip_h_segment_body "gauge_fill_strip_horizontal-frontier-ciel.png" NONE NONE 
-TILESET gauge_ciel_strip_h_segment_end "gauge_fill_strip_horizontal-terminaison_trail-ciel.png" NONE NONE 
-TILESET gauge_ciel_strip_h_segment_trail "gauge_fill_strip_horizontal_trail-ciel.png" NONE NONE 
-TILESET gauge_ciel_strip_h_segment_bridge "gauge_fill_ciel_to_blue_bridge.png" NONE NONE 
+TILESET gauge_h_bevel_lightblue_strip_break "gauge_h_bevel_lightblue_strip_break.png" NONE NONE 
+TILESET gauge_h_bevel_lightblue_strip_end "gauge_h_bevel_lightblue_strip_end.png" NONE NONE 
+TILESET gauge_h_bevel_lightblue_strip_trail "gauge_h_bevel_lightblue_strip_trail.png" NONE NONE 
+TILESET gauge_h_bevel_lightblue_to_blue_strip_bridge "gauge_h_bevel_lightblue_to_blue_strip_bridge.png" NONE NONE 
 
-TILESET gauge_cap_strip_h_segment_cap "gauge_fill_cap.png" NONE NONE 
-TILESET gauge_cap_strip_h_segment_cap_end "gauge_fill_strip_horizontal-terminaison-cap.png" NONE NONE 
-TILESET gauge_cap_strip_h_segment_cap_trail "gauge_fill_strip_horizontal-trail-cap-start.png" NONE NONE 
-TILESET gauge_cap_strip_h_segment_cap_break "gauge_fill_strip_horizontal-break-cap-start.png" NONE NONE 
-TILESET gauge_cap_strip_h_segment_body "gauge_fill_strip_horizontal-break-cap.png" NONE NONE 
-TILESET gauge_cap_strip_h_segment_end "gauge_fill_strip_horizontal-terminaison_trail-cap.png" NONE NONE 
-TILESET gauge_cap_strip_h_segment_trail "gauge_fill_strip_horizontal_trail-cap.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_with_border_cap_start_strip_end "gauge_h_bevel_yellow_with_border_cap_start_strip_end.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_with_border_cap_end_strip_end "gauge_h_bevel_yellow_with_border_cap_end_strip_end.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_with_border_cap_start_strip_trail "gauge_h_bevel_yellow_with_border_cap_start_strip_trail.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_with_border_cap_start_strip_break "gauge_h_bevel_yellow_with_border_cap_start_strip_break.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_with_border_strip_break "gauge_h_bevel_yellow_with_border_strip_break.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_with_border_strip_end "gauge_h_bevel_yellow_with_border_strip_end.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_with_border_strip_trail "gauge_h_bevel_yellow_with_border_strip_trail.png" NONE NONE 
 
-TILESET gauge_b1_strip_h_segment1 "gauge_fill_strip_horizontal_b1.png" NONE NONE 
-TILESET gauge_b1_strip_v_segment1 "gauge_fill_strip_vertical_b1.png" NONE NONE 
-TILESET gauge_b2_strip_h_segment1 "gauge_fill_strip_horizontal_b2.png" NONE NONE 
-TILESET gauge_b2_strip_v_segment1 "gauge_fill_strip_vertical_b2.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_end "gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_end.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_with_border_cap_end_blink_off_strip_end "gauge_h_bevel_yellow_with_border_cap_end_blink_off_strip_end.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_trail "gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_trail.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_break "gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_break.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_with_border_blink_off_strip_break "gauge_h_bevel_yellow_with_border_blink_off_strip_break.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_with_border_blink_off_strip_end "gauge_h_bevel_yellow_with_border_blink_off_strip_end.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_with_border_blink_off_strip_trail "gauge_h_bevel_yellow_with_border_blink_off_strip_trail.png" NONE NONE 
 
-PALETTE gauge_palette "gauge_fill_strip_horizontal.png" NONE NONE 
+
+TILESET gauge_h_straight_blue_strip "gauge_h_straight_blue_strip.png" NONE NONE 
+TILESET gauge_v_straight_blue_strip "gauge_v_straight_blue_strip.png" NONE NONE 
+TILESET gauge_h_straight_lightblue_strip "gauge_h_straight_lightblue_strip.png" NONE NONE 
+TILESET gauge_v_straight_lightblue_strip "gauge_v_straight_lightblue_strip.png" NONE NONE 
+
+PALETTE gauge_palette "gauge_h_straight_yellow_strip.png" NONE NONE 

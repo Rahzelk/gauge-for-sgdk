@@ -101,8 +101,8 @@
    ============================================================================= */
 
 /* --- Layouts (define visual appearance) --- */
-static GaugeLayout s_layoutEx1;         /* Yellow 12 tiles horizontal */
-static GaugeLayout s_layoutEx1Mirror;   /* Yellow 12 tiles horizontal (mirror) */
+static GaugeLayout s_layoutEx1;         /* Yellow 12 tiles h_bevel */
+static GaugeLayout s_layoutEx1Mirror;   /* Yellow 12 tiles h_bevel (mirror) */
 static GaugeLayout s_layoutEx2;         /* Yellow 16 tiles cap+border */
 static GaugeLayout s_layoutEx3;         /* Multi-bridge (ciel -> blue -> yellow) */
 static GaugeLayout s_layoutEx5Part1;    /* Multi-segment: b1(3) + b2(5) + yellow(4) */
@@ -274,10 +274,10 @@ static void initExample1(u16 *nextVram)
        ------------------------------------------------------------------------- */
 
     /* Step 1: Define the tileset array
-       - Index 0 = horizontal yellow fill strip (45 tiles)
+       - Index 0 = h_bevel yellow fill strip (45 tiles)
        - Index 1 = NULL (unused segment slots) */
     const u32 *ex1Tilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_yellow_strip_h_segment1.tiles,    /* Segment 0: yellow */
+        gauge_h_straight_yellow_strip.tiles,    /* Segment 0: yellow */
         NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
 
@@ -290,7 +290,7 @@ static void initExample1(u16 *nextVram)
     /* Step 3: Initialize the layout
        - 12 tiles long
        - Fill direction: forward (left to right)
-       - Horizontal orientation
+       - h_bevel orientation
        - Palette 0, priority 1, no flip */
     GaugeLayout_init(&s_layoutEx1,
                      EX1_LENGTH,                 /* length in tiles */
@@ -340,7 +340,7 @@ static void initExample1(u16 *nextVram)
        ------------------------------------------------------------------------- */
 
     /* Use GaugeLayout_makeMirror to create a mirrored version of the layout
-       - Automatically sets hflip for horizontal gauges
+       - Automatically sets hflip for h_bevel gauges
        - Fill direction is reversed */
     GaugeLayout_makeMirror(&s_layoutEx1Mirror, &s_layoutEx1);
 
@@ -380,19 +380,19 @@ static void initExample2(u16 *nextVram)
 
     /* Step 1: Define BODY/BREAK/END/TRAIL tilesets (yellow) */
     const u32 *ex2BodyTilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_yellow_strip_h_segment_body.tiles,
+        gauge_h_bevel_yellow_strip_break.tiles,
         NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
     const u32 *ex2EndTilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_yellow_strip_h_segment_end.tiles,
+        gauge_h_bevel_yellow_strip_end.tiles,
         NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
     const u32 *ex2BreakTilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_yellow_strip_h_segment_body.tiles,
+        gauge_h_bevel_yellow_strip_break.tiles,
         NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
     const u32 *ex2TrailTilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_yellow_strip_h_segment_trail.tiles,
+        gauge_h_bevel_yellow_strip_trail.tiles,
         NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
 
@@ -455,32 +455,32 @@ static void initExample3(u16 *nextVram)
 
     /* Step 1: Define tilesets (ciel -> blue -> yellow) */
     const u32 *ex3BodyTilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_ciel_strip_h_segment_body.tiles,     /* Segment 0: ciel body */
-        gauge_blue_strip_h_segment_body.tiles,     /* Segment 1: blue body */
-        gauge_yellow_strip_h_segment_body.tiles,   /* Segment 2: yellow body */
+        gauge_h_bevel_lightblue_strip_break.tiles,     /* Segment 0: ciel body */
+        gauge_h_bevel_blue_strip_break.tiles,     /* Segment 1: blue body */
+        gauge_h_bevel_yellow_strip_break.tiles,   /* Segment 2: yellow body */
         NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL
     };
     const u32 *ex3EndTilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_ciel_strip_h_segment_end.tiles,      /* Segment 0: ciel end */
-        gauge_blue_strip_h_segment_end.tiles,      /* Segment 1: blue end */
-        gauge_yellow_strip_h_segment_end.tiles,    /* Segment 2: yellow end */
+        gauge_h_bevel_lightblue_strip_end.tiles,      /* Segment 0: ciel end */
+        gauge_h_bevel_blue_strip_end.tiles,      /* Segment 1: blue end */
+        gauge_h_bevel_yellow_strip_end.tiles,    /* Segment 2: yellow end */
         NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL
     };
     const u32 *ex3BreakTilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_ciel_strip_h_segment_body.tiles,     /* Segment 0: ciel break */
-        gauge_blue_strip_h_segment_body.tiles,     /* Segment 1: blue break */
-        gauge_yellow_strip_h_segment_body.tiles,   /* Segment 2: yellow break */
+        gauge_h_bevel_lightblue_strip_break.tiles,     /* Segment 0: ciel break */
+        gauge_h_bevel_blue_strip_break.tiles,     /* Segment 1: blue break */
+        gauge_h_bevel_yellow_strip_break.tiles,   /* Segment 2: yellow break */
         NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL
     };
     const u32 *ex3TrailTilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_ciel_strip_h_segment_trail.tiles,    /* Segment 0: ciel trail */
-        gauge_blue_strip_h_segment_trail.tiles,    /* Segment 1: blue trail */
-        gauge_yellow_strip_h_segment_trail.tiles,  /* Segment 2: yellow trail */
+        gauge_h_bevel_lightblue_strip_trail.tiles,    /* Segment 0: ciel trail */
+        gauge_h_bevel_blue_strip_trail.tiles,    /* Segment 1: blue trail */
+        gauge_h_bevel_yellow_strip_trail.tiles,  /* Segment 2: yellow trail */
         NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL
     };
     const u32 *ex3BridgeTilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_ciel_strip_h_segment_bridge.tiles,   /* Segment 0: ciel->blue bridge */
-        gauge_blue_strip_h_segment_bridge.tiles,   /* Segment 1: blue->yellow bridge */
+        gauge_h_bevel_lightblue_to_blue_strip_bridge.tiles,   /* Segment 0: ciel->blue bridge */
+        gauge_h_bevel_blue_to_yellow_strip_bridge.tiles,   /* Segment 1: blue->yellow bridge */
         NULL,                                      /* Segment 2: no bridge */
         NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL
     };
@@ -555,9 +555,9 @@ static void initExample4(u16 *nextVram)
 
     /* Step 1: Define tilesets (same 3 segments as Ex5, but vertical versions) */
     const u32 *ex4Tilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_b1_strip_v_segment1.tiles,        /* Segment 0: b1 vertical */
-        gauge_b2_strip_v_segment1.tiles,        /* Segment 1: b2 vertical */
-        gauge_yellow_strip_v_segment1.tiles,    /* Segment 2: yellow vertical */
+        gauge_v_straight_blue_strip.tiles,        /* Segment 0: b1 vertical */
+        gauge_v_straight_lightblue_strip.tiles,        /* Segment 1: b2 vertical */
+        gauge_v_straight_yellow_strip.tiles,    /* Segment 2: yellow vertical */
         NULL
     };
 
@@ -639,9 +639,9 @@ static void initExample5(u16 *nextVram)
        - Segment 1: b2 (blue variant 2)
        - Segment 2: yellow */
     const u32 *ex5Tilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_b2_strip_h_segment1.tiles,        /* Segment 0: b1 */
-        gauge_b1_strip_h_segment1.tiles,        /* Segment 1: b2 */
-        gauge_yellow_strip_h_segment1.tiles,    /* Segment 2: yellow */
+        gauge_h_straight_lightblue_strip.tiles,        /* Segment 0: b1 */
+        gauge_h_straight_blue_strip.tiles,        /* Segment 1: b2 */
+        gauge_h_straight_yellow_strip.tiles,    /* Segment 2: yellow */
         NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL
     };
 
@@ -666,7 +666,7 @@ static void initExample5(u16 *nextVram)
 
     /* Step 3: Define layout for Part2 (4 tiles yellow only) */
     const u32 *ex5Part2Tilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_yellow_strip_h_segment1.tiles,
+        gauge_h_straight_yellow_strip.tiles,
         NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
     const u8 ex5Part2Segments[EX5_PART2_LEN] = { 0, 0, 0, 0 };
@@ -729,7 +729,7 @@ static void initExample5(u16 *nextVram)
        - No trail animation */
 
     const u32 *blueTilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_blue_strip_h_segment1.tiles,
+        gauge_h_straight_small_blue_strip.tiles,
         NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
     const u8 blueSegments[EX5_BLUE_LEN] = { 0, 0, 0, 0, 0, 0, 0, 0 };
@@ -781,47 +781,47 @@ static void initExample5(u16 *nextVram)
    - CAP END always uses its own tileset (cap_end) and follows the END LUT.
 
    Assets used:
-   - cap start:            gauge_cap_strip_h_segment_cap
-   - cap start break:      gauge_cap_strip_h_segment_cap_break
-   - cap start trail:      gauge_cap_strip_h_segment_cap_trail
-   - normal end:           gauge_cap_strip_h_segment_end
-   - cap end:              gauge_cap_strip_h_segment_cap_end
-   - body/trail:           gauge_cap_strip_h_segment_body / trail
+   - cap start:            gauge_h_bevel_yellow_with_border_cap_start_strip_end
+   - cap start break:      gauge_h_bevel_yellow_with_border_cap_start_strip_break
+   - cap start trail:      gauge_h_bevel_yellow_with_border_cap_start_strip_trail
+   - normal end:           gauge_h_bevel_yellow_with_border_strip_end
+   - cap end:              gauge_h_bevel_yellow_with_border_cap_end_strip_end
+   - body/trail:           gauge_h_bevel_yellow_with_border_strip_break / trail
    ============================================================================= */
 
 static void initExample6Layout(void)
 {
     /* Step 1: Define tilesets (cap style) */
     const u32 *ex6BodyTilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_cap_strip_h_segment_body.tiles,
+        gauge_h_bevel_yellow_with_border_strip_break.tiles,
         NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
     const u32 *ex6EndTilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_cap_strip_h_segment_end.tiles,
+        gauge_h_bevel_yellow_with_border_strip_end.tiles,
         NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
     const u32 *ex6BreakTilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_cap_strip_h_segment_body.tiles,
+        gauge_h_bevel_yellow_with_border_strip_break.tiles,
         NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
     const u32 *ex6TrailTilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_cap_strip_h_segment_trail.tiles,
+        gauge_h_bevel_yellow_with_border_strip_trail.tiles,
         NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
     const u32 *ex6CapStartTilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_cap_strip_h_segment_cap.tiles,
+        gauge_h_bevel_yellow_with_border_cap_start_strip_end.tiles,
         NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
     const u32 *ex6CapEndTilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_cap_strip_h_segment_cap_end.tiles,
+        gauge_h_bevel_yellow_with_border_cap_end_strip_end.tiles,
         NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
     const u32 *ex6CapStartBreakTilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_cap_strip_h_segment_cap_break.tiles,
+        gauge_h_bevel_yellow_with_border_cap_start_strip_break.tiles,
         NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
     const u32 *ex6CapStartTrailTilesets[GAUGE_MAX_SEGMENTS] = {
-        gauge_cap_strip_h_segment_cap_trail.tiles,
+        gauge_h_bevel_yellow_with_border_cap_start_strip_trail.tiles,
         NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL, NULL,NULL, NULL
     };
     const u8 ex6CapEndBySegment[GAUGE_MAX_SEGMENTS] = {
@@ -1049,7 +1049,7 @@ int main(bool hardReset)
         handleInput(pressed, padState);
 
         /* Blue gauge auto-wrap demo */
-        tickBlueAutoWrap();
+        //tickBlueAutoWrap();
 
         /* Update all gauges (tick + render) */
         updateAllGauges();
