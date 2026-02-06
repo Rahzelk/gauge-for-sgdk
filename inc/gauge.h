@@ -392,6 +392,12 @@ typedef struct
     u8 vflip;                                    /* Vertical flip */
     u8 hflip;                                    /* Horizontal flip */
 
+    /* --- Cached flags (pre-computed at init, avoid runtime scans) --- */
+    u8 hasBlinkOff;                              /* 1 if any segment has blink-off tilesets (damage) */
+    u8 hasGainBlinkOff;                          /* 1 if any segment has gain blink-off tilesets */
+    u8 capStartEnabled;                          /* 1 if cap start tileset is configured */
+    u8 capEndEnabled;                            /* 1 if cap end tileset is configured */
+
 } GaugeLayout;
 
 
