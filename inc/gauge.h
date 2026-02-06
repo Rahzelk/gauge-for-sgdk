@@ -35,11 +35,19 @@
                     GAUGE_ORIENT_HORIZONTAL, PAL0, 1, 0, 0);
 
    // 2. Initialize gauge (auto-allocates VRAM for parts)
-   Gauge_init(&myGauge, 100, 64, 1, 100, myRenderers, VRAM_BASE, GAUGE_VRAM_DYNAMIC);
+   Gauge_init(&myGauge, &(GaugeInit){
+       .maxValue = 100,
+       .maxFillPixels = 64,
+       .initialValue = 100,
+       .parts = myParts,
+       .vramBase = VRAM_BASE,
+       .vramMode = GAUGE_VRAM_DYNAMIC,
+       .valueMode = GAUGE_VALUE_MODE_FILL
+   });
 
    // 3. Add parts (VRAM auto-allocated sequentially)
-   Gauge_addPart(&myGauge, &myRenderers[0], &myLayout, 2, 5);
-   Gauge_addPart(&myGauge, &myRenderers[1], &myLayout, 2, 6);
+   Gauge_addPart(&myGauge, &myParts[0], &myLayout, 2, 5);
+   Gauge_addPart(&myGauge, &myParts[1], &myLayout, 2, 6);
 
    // 4. Game loop
    while(1) {
@@ -118,6 +126,21 @@ typedef enum
 } GaugeVramMode;
 
 /**
+ * Gauge value mode.
+ * FILL: classic continuous gauge (pixel-level progression within each tile).
+ * PIP:  discrete gauge (1 gauge point = 1 full cell/segment).
+ *
+ * PIP usage guideline:
+ * - Configure compact strips via GaugeLayout_setPipStyles().
+ * - maxValue must match the layout pip count (validated on first Gauge_addPart).
+ */
+typedef enum
+{
+    GAUGE_VALUE_MODE_FILL = 0,
+    GAUGE_VALUE_MODE_PIP  = 1
+} GaugeValueMode;
+
+/**
  * Trail mode (current active trail behavior).
  * NONE   : no trail effect active
  * DAMAGE : classic damage trail (value decreases, trail shrinks)
@@ -135,6 +158,26 @@ typedef enum
    Forward declarations (needed for circular references)
    ============================================================================= */
 typedef struct Gauge Gauge;
+typedef struct GaugePart GaugePart;
+
+/**
+ * Per-gauge update handler (tick logic + render all parts).
+ * Selected once at init based on GaugeValueMode.
+ */
+typedef void GaugeTickAndRenderHandler(Gauge *gauge);
+
+/**
+ * Per-part render handler.
+ * Selected once when the part is added, based on value mode and VRAM mode.
+ */
+typedef void GaugePartRenderHandler(GaugePart *part,
+                                    u16 valuePixels,
+                                    u16 trailPixelsRendered,
+                                    u16 trailPixelsActual,
+                                    u8 blinkOffActive,
+                                    u8 blinkOnChanged,
+                                    u8 trailMode,
+                                    u8 trailModeChanged);
 
 
 /* =============================================================================
@@ -305,6 +348,23 @@ typedef struct
     const u32 *gainBlinkOffTilesetCapStartBreakBySegment[GAUGE_MAX_SEGMENTS];/* CAP START BREAK: 45-tile strips */
     const u32 *gainBlinkOffTilesetCapStartTrailBySegment[GAUGE_MAX_SEGMENTS];/* CAP START TRAIL: 45-tile strips */
 
+    /* --- PIP compact style (optional, per segment) ---
+     * Compact strip layout (width = pipWidthBySegment[segId]):
+     *   state 0: EMPTY     [0 .. width-1]
+     *   state 1: VALUE     [width .. 2*width-1]
+     *   state 2: LOSS      [2*width .. 3*width-1]
+     *   state 3: GAIN      [3*width .. 4*width-1]
+     *   state 4: BLINK_OFF [4*width .. 5*width-1]
+     */
+    const u32 *pipTilesetBySegment[GAUGE_MAX_SEGMENTS]; /* compact strip: 5*width tiles */
+    u8 pipWidthBySegment[GAUGE_MAX_SEGMENTS];           /* width in tiles per segment style */
+
+    /* --- PIP metadata (auto-built from fill order + pipWidthBySegment) --- */
+    u8 pipCount;                                   /* number of logical pips in this layout */
+    u8 pipIndexByFillIndex[GAUGE_MAX_LENGTH];      /* fillIndex -> pip index */
+    u8 pipLocalTileByFillIndex[GAUGE_MAX_LENGTH];  /* fillIndex -> local tile inside pip */
+    u8 pipWidthByPipIndex[GAUGE_MAX_LENGTH];       /* pip index -> width in tiles */
+
     /* --- Segment boundary LUTs (by fillIndex) ---
      *
      * These LUTs are auto-computed by build_bridge_luts() when fill direction
@@ -335,8 +395,65 @@ typedef struct
 
 
 /* -----------------------------------------------------------------------------
+   GaugeLayout init API (simplified initialization)
+   ----------------------------------------------------------------------------- */
+
+/**
+ * Set of tilesets for one visual context.
+ * NULL entries are allowed and follow normal fallback behavior.
+ */
+typedef struct
+{
+    const u32 *body;
+    const u32 *end;
+    const u32 *trail;
+    const u32 *bridge;
+    const u32 *capStart;
+    const u32 *capEnd;
+    const u32 *capStartBreak;
+    const u32 *capStartTrail;
+} GaugeSkinSet;
+
+/**
+ * Complete style for one segment across all contexts.
+ */
+typedef struct
+{
+    GaugeSkinSet base;
+    GaugeSkinSet gain;
+    GaugeSkinSet blinkOff;
+    GaugeSkinSet gainBlinkOff;
+    u8 capEndEnabled;
+} GaugeSegmentStyle;
+
+/**
+ * Full layout initialization config.
+ * This is the preferred API for new code: one call configures base/gain/blink
+ * assets and optional caps/bridges for all segments.
+ */
+typedef struct
+{
+    u8 length;
+    GaugeFillDirection fillDir;
+    GaugeOrientation orientation;
+    u8 paletteLine;
+    u8 priority;
+    u8 vflip;
+    u8 hflip;
+    const u8 *segmentIdByCell;               /* length entries, NULL => segment 0 everywhere */
+    const GaugeSegmentStyle *segmentStyles;  /* GAUGE_MAX_SEGMENTS entries, NULL => all styles disabled */
+} GaugeLayoutInit;
+
+
+/* -----------------------------------------------------------------------------
    GaugeLayout API
    ----------------------------------------------------------------------------- */
+
+/**
+ * Build a layout from an initialization config.
+ * This is a convenience wrapper around GaugeLayout_initEx + optional setters.
+ */
+void GaugeLayout_build(GaugeLayout *layout, const GaugeLayoutInit *init);
 
 /**
  * Initialize layout with complete configuration.
@@ -518,6 +635,18 @@ void GaugeLayout_setGainBlinkOff(GaugeLayout *layout,
                                  const u32 * const *gainBlinkOffCapStartBreakTilesets,
                                  const u32 * const *gainBlinkOffCapStartTrailTilesets);
 
+/**
+ * Configure compact PIP styles (used by GAUGE_VALUE_MODE_PIP renderer).
+ * Call after GaugeLayout_init/initEx.
+ *
+ * @param layout            Layout to configure
+ * @param pipTilesets       Array of GAUGE_MAX_SEGMENTS compact strips
+ * @param pipWidthBySegment Array of GAUGE_MAX_SEGMENTS widths in tiles (0 => default 1)
+ */
+void GaugeLayout_setPipStyles(GaugeLayout *layout,
+                              const u32 * const *pipTilesets,
+                              const u8 *pipWidthBySegment);
+
 /* =============================================================================
    GaugeLogic â€” Value/trail state machine
    =============================================================================
@@ -685,7 +814,7 @@ typedef struct
    - Optimized tile streaming with change detection
 
    ============================================================================= */
-typedef struct
+typedef struct GaugePart
 {
     /* --- Position --- */
     u16 originX;                    /* Tilemap X origin */
@@ -694,6 +823,7 @@ typedef struct
     /* --- VRAM --- */
     GaugeVramMode vramMode;         /* Fixed or dynamic mode */
     u16 vramBase;                   /* Base VRAM tile index */
+    GaugePartRenderHandler *renderHandler; /* Resolved renderer for this part */
 
     /* --- Layout copy (includes visual properties) --- */
     GaugeLayout layout;
@@ -717,7 +847,7 @@ typedef struct
 
    USAGE PATTERN:
    1. Declare parts array: GaugePart parts[N];
-   2. Initialize gauge: Gauge_init(&gauge, ...);
+   2. Initialize gauge: Gauge_init(&gauge, &gaugeInit);
    3. Add parts: Gauge_addPart(&gauge, ...);
    4. Game loop: Gauge_update(&gauge);
    5. Change value: Gauge_decrease/increase(&gauge, ...);
@@ -737,12 +867,14 @@ struct Gauge
 
     /* --- Parts (rendering units) --- */
     GaugePart *parts;           /* Array of parts (user-allocated) */
+    GaugeTickAndRenderHandler *tickAndRenderHandler; /* Resolved update path */
     u8 partCount;               /* Number of active parts */
 
     /* --- VRAM allocation --- */
     u16 vramBase;                   /* Base VRAM tile index */
     u16 vramNextOffset;             /* Offset for next part allocation */
     GaugeVramMode vramMode;         /* Default VRAM mode for parts */
+    GaugeValueMode valueMode;       /* Value quantization mode */
 };
 
 
@@ -751,25 +883,26 @@ struct Gauge
    ----------------------------------------------------------------------------- */
 
 /**
- * Initialize gauge with embedded logic.
+ * Gauge initialization config.
+ * Pass this to Gauge_init() to configure runtime mode and VRAM defaults.
+ */
+typedef struct
+{
+    u16 maxValue;            /* Maximum logical value */
+    u16 maxFillPixels;       /* Visual fill span in pixels */
+    u16 initialValue;        /* Initial value (clamped to maxValue) */
+    GaugePart *parts;        /* User-allocated part array */
+    u16 vramBase;            /* Base VRAM tile index */
+    GaugeVramMode vramMode;  /* Default VRAM mode for parts */
+    GaugeValueMode valueMode;/* GAUGE_VALUE_MODE_FILL or GAUGE_VALUE_MODE_PIP */
+} GaugeInit;
+
+/**
+ * Initialize gauge from GaugeInit configuration.
  * Trail and value animation are disabled by default.
  * Use Gauge_setTrailAnim() and Gauge_setValueAnim() to configure animations.
- *
- * @param gauge         Gauge to initialize
- * @param maxValue      Maximum value (e.g., 100 for percentage)
- * @param maxFillPixels Maximum fill width in pixels (usually length*8)
- * @param initialValue  Starting value (will be clamped to maxValue)
- * @param parts         Pointer to user-allocated array of GaugePart
- * @param vramBase      Base VRAM tile index for allocation
- * @param vramMode      Default VRAM mode (GAUGE_VRAM_FIXED or GAUGE_VRAM_DYNAMIC)
  */
-void Gauge_init(Gauge *gauge,
-                u16 maxValue,
-                u16 maxFillPixels,
-                u16 initialValue,
-                GaugePart *parts,
-                u16 vramBase,
-                GaugeVramMode vramMode);
+void Gauge_init(Gauge *gauge, const GaugeInit *init);
 
 /**
  * Configure value animation.
@@ -911,6 +1044,7 @@ static inline u8 Gauge_isFull(const Gauge *gauge)
  * The size is derived from the current gauge configuration:
  * - gauge->vramMode
  * - gauge->logic.trailEnabled
+ * - gauge->valueMode
  *
  * @param gauge       Gauge configuration source (must be initialized)
  * @param layout      Layout configuration

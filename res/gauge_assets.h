@@ -4,6 +4,7 @@
 #define _RES_GAUGE_ASSETS_H_
 
 extern const TileSet gauge_h_straight_yellow_strip;
+extern const TileSet gauge_h_pip_basic_strip;
 extern const TileSet gauge_v_straight_yellow_strip;
 extern const TileSet gauge_h_straight_small_blue_strip;
 extern const TileSet gauge_h_bevel_yellow_strip_trail;
