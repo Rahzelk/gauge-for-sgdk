@@ -406,17 +406,52 @@ static inline void compute_break_info(const GaugeLayout *layout,
     const u8 valueInLayout = (valuePixels >= layoutStart && valuePixels <= layoutEnd);
     const u8 trailInLayout = (trailPixelsRendered >= layoutStart && trailPixelsRendered <= layoutEnd);
 
-    /* END cap (E): placed on the visible trail break cell (T) */
-    out->endFillIndex = (trailInLayout && trailSegmentHasEnd) ? out->trailFillIndex : CACHE_INVALID_U8;
+    /* END cap (E):
+     * - Normal case: place END on trail edge when trail is visible.
+     * - Offset/window fallback:
+     *   keep one END inside the visible window even when trail edge is outside,
+     *   so partial gauges with END/BREAK assets remain visually stable.
+     *
+     * Priority order is important:
+     * 1) trail in layout      -> END on trail edge
+     * 2) trail right of view  -> END on last visible cell
+     * 3) trail left of view   -> END on first visible cell
+     * 4) value in layout      -> END on value edge
+     * 5) no END in this part
+     */
+    if (trailInLayout && trailSegmentHasEnd)
+    {
+        out->endFillIndex = out->trailFillIndex;
+    }
+    else if (trailPixelsRendered > layoutEnd && trailSegmentHasEnd)
+    {
+        out->endFillIndex = (u8)(layout->length - 1);
+    }
+    else if (trailPixelsRendered < layoutStart && trailSegmentHasEnd)
+    {
+        out->endFillIndex = 0;
+    }
+    else if (valueInLayout && valueSegmentHasEnd)
+    {
+        out->endFillIndex = out->valueFillIndex;
+    }
+    else
+    {
+        out->endFillIndex = CACHE_INVALID_U8;
+    }
 
     /* VALUE BREAK (B): one cell before value break */
     out->valueBreakFillIndex =
         (valueInLayout && valueSegmentHasEnd && out->valueFillIndex > 0)
         ? (u8)(out->valueFillIndex - 1) : CACHE_INVALID_U8;
 
-    /* TRAIL BREAK (T): active only when value and trail are not in the same cell */
+    /* TRAIL BREAK (T): active when the trail zone intersects this layout window
+     * and value/trail edges are not in the same cell. */
+    const u8 trailZoneIntersectsLayout =
+        (trailPixelsRendered > layoutStart) && (valuePixels < layoutEnd);
+
     out->trailBreakActive =
-        (trailInLayout && valueInLayout && valueSegmentHasEnd && valueSegmentHasTrail &&
+        (trailZoneIntersectsLayout && valueSegmentHasEnd && valueSegmentHasTrail &&
          (out->valueCellIndex != out->trailCellIndex));
     out->trailBreakFillIndex = out->trailBreakActive ? out->valueFillIndex : CACHE_INVALID_U8;
     out->trailBreakSecondActive =
@@ -431,7 +466,7 @@ static inline void compute_break_info(const GaugeLayout *layout,
     /* Precompute END (E) cell fill values */
     out->endValuePxInTile = 0;
     out->endTrailPxInTile = 0;
-    if (trailInLayout && out->endFillIndex != CACHE_INVALID_U8)
+    if (out->endFillIndex != CACHE_INVALID_U8)
     {
         compute_fill_for_fill_index(layout, out->endFillIndex,
                                     valuePixels, trailPixelsRendered,
@@ -991,6 +1026,14 @@ void GaugeLayout_setFillForward(GaugeLayout *layout)
 
     build_bridge_luts(layout);
     build_pip_luts(layout);
+}
+
+void GaugeLayout_setFillOffset(GaugeLayout *layout, u16 fillOffsetPixels)
+{
+    if (!layout)
+        return;
+
+    layout->fillOffset = fillOffsetPixels;
 }
 
 void GaugeLayout_setFillReverse(GaugeLayout *layout)

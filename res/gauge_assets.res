@@ -24,6 +24,7 @@
 
 TILESET gauge_h_straight_yellow_strip "gauge_h_straight_yellow_strip.png" NONE NONE 
 TILESET gauge_h_pip_basic_strip "gauge_h_pip_basic_strip.png" NONE NONE 
+TILESET gauge_h_pip_mini_bar_strip "gauge_h_pip_mini_bar_strip.png" NONE NONE 
 TILESET gauge_v_straight_yellow_strip "gauge_v_straight_yellow_strip.png"   NONE NONE 
 TILESET gauge_h_straight_small_blue_strip "gauge_h_straight_small_blue_strip.png" NONE NONE 
 

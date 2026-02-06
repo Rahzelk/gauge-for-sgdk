@@ -208,6 +208,7 @@ typedef void GaugePartRenderHandler(GaugePart *part,
      Pixel offset for this layout's fill computation (default 0).
      Allows rendering a "window" into a larger virtual gauge.
      Example: offset=64 means this gauge starts rendering at pixel 64.
+     Configure via GaugeLayout_setFillOffset().
 
    tilesetBySegment[segmentId]:
      Pointer to 45-tile ROM strip for segment BODY (interior).
@@ -516,6 +517,20 @@ void GaugeLayout_initEx(GaugeLayout *layout,
                         u8 priority,
                         u8 vflip,
                         u8 hflip);
+
+/**
+ * Set pixel fill offset for a layout window.
+ *
+ * This shifts where the layout starts sampling the gauge in pixels.
+ * Typical use: multi-part gauges where each part renders a different window.
+ *
+ * Bevel trigger formula (common setup):
+ *   fillOffset = triggerPx - (partLength * GAUGE_PIXELS_PER_TILE)
+ *
+ * @param layout            Layout to configure
+ * @param fillOffsetPixels  Window start in pixels
+ */
+void GaugeLayout_setFillOffset(GaugeLayout *layout, u16 fillOffsetPixels);
 
 /**
  * Set fill direction to forward (cell 0 fills first).
