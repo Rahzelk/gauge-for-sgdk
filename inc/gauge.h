@@ -174,10 +174,6 @@ typedef struct Gauge Gauge;
      Optional 45-tile ROM strip for segment END (termination).
      If NULL, segment uses BODY only (break ignored).
 
-   tilesetBreakBySegment[segmentId]:
-     Optional 45-tile ROM strip for segment BREAK (transition before end).
-     If NULL but END exists, BREAK falls back to BODY.
-
    tilesetTrailBySegment[segmentId]:
      Optional 64-tile ROM strip for TRAIL (trail-specific shapes).
      If NULL, trail rendering falls back to BODY rules.
@@ -194,7 +190,7 @@ typedef struct Gauge Gauge;
                      Bridge (D) shows what the next B cell would show
 
      If NULL, the last cell of the segment uses a forced BREAK instead
-     (fully filled with BREAK tileset, index 44).
+     (fully filled BODY tile, index 44).
 
    tilesetCapStartBySegment[segmentId]:
      Optional 45-tile ROM strip for CAP START (fixed border at gauge start).
@@ -260,7 +256,6 @@ typedef struct
     /* --- Tilesets --- */
     const u32 *tilesetBySegment[GAUGE_MAX_SEGMENTS];     /* BODY: 45-tile strips */
     const u32 *tilesetEndBySegment[GAUGE_MAX_SEGMENTS];  /* END: optional 45-tile strips */
-    const u32 *tilesetBreakBySegment[GAUGE_MAX_SEGMENTS];/* BREAK: optional 45-tile strips */
     const u32 *tilesetTrailBySegment[GAUGE_MAX_SEGMENTS];/* TRAIL: optional 64-tile strips */
     const u32 *tilesetBridgeBySegment[GAUGE_MAX_SEGMENTS];/* BRIDGE: optional 45-tile strips */
     const u32 *tilesetCapStartBySegment[GAUGE_MAX_SEGMENTS];/* CAP START: optional 45-tile strips */
@@ -275,7 +270,6 @@ typedef struct
      */
     const u32 *gainTilesetBySegment[GAUGE_MAX_SEGMENTS];     /* BODY: 45-tile strips */
     const u32 *gainTilesetEndBySegment[GAUGE_MAX_SEGMENTS];  /* END: 45-tile strips */
-    const u32 *gainTilesetBreakBySegment[GAUGE_MAX_SEGMENTS];/* BREAK: 45-tile strips */
     const u32 *gainTilesetTrailBySegment[GAUGE_MAX_SEGMENTS];/* TRAIL: 64-tile strips */
     const u32 *gainTilesetBridgeBySegment[GAUGE_MAX_SEGMENTS];/* BRIDGE: 45-tile strips */
     const u32 *gainTilesetCapStartBySegment[GAUGE_MAX_SEGMENTS];     /* CAP START: 45-tile strips */
@@ -290,7 +284,6 @@ typedef struct
      */
     const u32 *blinkOffTilesetBySegment[GAUGE_MAX_SEGMENTS];      /* BODY: 45-tile strips */
     const u32 *blinkOffTilesetEndBySegment[GAUGE_MAX_SEGMENTS];   /* END: 45-tile strips */
-    const u32 *blinkOffTilesetBreakBySegment[GAUGE_MAX_SEGMENTS]; /* BREAK: 45-tile strips */
     const u32 *blinkOffTilesetTrailBySegment[GAUGE_MAX_SEGMENTS]; /* TRAIL: 64-tile strips */
     const u32 *blinkOffTilesetBridgeBySegment[GAUGE_MAX_SEGMENTS];/* BRIDGE: 45-tile strips */
     const u32 *blinkOffTilesetCapStartBySegment[GAUGE_MAX_SEGMENTS];     /* CAP START: 45-tile strips */
@@ -305,7 +298,6 @@ typedef struct
      */
     const u32 *gainBlinkOffTilesetBySegment[GAUGE_MAX_SEGMENTS];      /* BODY: 45-tile strips */
     const u32 *gainBlinkOffTilesetEndBySegment[GAUGE_MAX_SEGMENTS];   /* END: 45-tile strips */
-    const u32 *gainBlinkOffTilesetBreakBySegment[GAUGE_MAX_SEGMENTS]; /* BREAK: 45-tile strips */
     const u32 *gainBlinkOffTilesetTrailBySegment[GAUGE_MAX_SEGMENTS]; /* TRAIL: 64-tile strips */
     const u32 *gainBlinkOffTilesetBridgeBySegment[GAUGE_MAX_SEGMENTS];/* BRIDGE: 45-tile strips */
     const u32 *gainBlinkOffTilesetCapStartBySegment[GAUGE_MAX_SEGMENTS];     /* CAP START: 45-tile strips */
@@ -374,18 +366,17 @@ void GaugeLayout_init(GaugeLayout *layout,
                       u8 hflip);
 
 /**
- * Initialize layout with BODY + optional END/BREAK tilesets.
+ * Initialize layout with BODY + optional END tilesets.
  *
  * Fallback rules:
- * - If END tileset is NULL for a segment, BODY is used everywhere (BREAK ignored).
- * - If END exists but BREAK is NULL, BREAK uses BODY.
+ * - If END tileset is NULL for a segment, BODY is used everywhere.
+ * - BREAK cells (logical transition) always use BODY tileset.
  *
  * @param layout        Layout to initialize
  * @param length        Number of cells (1..GAUGE_MAX_LENGTH)
  * @param fillDir       GAUGE_FILL_FORWARD or GAUGE_FILL_REVERSE
  * @param bodyTilesets  Array of GAUGE_MAX_SEGMENTS BODY tileset pointers (45-tile strips)
  * @param endTilesets   Array of GAUGE_MAX_SEGMENTS END tileset pointers (optional, can be NULL)
- * @param breakTilesets Array of GAUGE_MAX_SEGMENTS BREAK tileset pointers (optional, can be NULL)
  * @param trailTilesets Array of GAUGE_MAX_SEGMENTS TRAIL tileset pointers (optional, can be NULL)
  * @param bridgeTilesets Array of GAUGE_MAX_SEGMENTS BRIDGE tileset pointers (optional, can be NULL)
  * @param segmentIdByCell Array of length elements specifying segment ID per cell
@@ -400,7 +391,6 @@ void GaugeLayout_initEx(GaugeLayout *layout,
                         GaugeFillDirection fillDir,
                         const u32 * const *bodyTilesets,
                         const u32 * const *endTilesets,
-                        const u32 * const *breakTilesets,
                         const u32 * const *trailTilesets,
                         const u32 * const *bridgeTilesets,
                         const u8 *segmentIdByCell,
@@ -460,7 +450,6 @@ void GaugeLayout_setCaps(GaugeLayout *layout,
  * @param layout                   Layout to configure (must be initialized)
  * @param gainBodyTilesets         BODY gain strips (45 tiles)
  * @param gainEndTilesets          END gain strips (45 tiles)
- * @param gainBreakTilesets        BREAK gain strips (45 tiles)
  * @param gainTrailTilesets        TRAIL gain strips (64 tiles)
  * @param gainBridgeTilesets       BRIDGE gain strips (45 tiles)
  * @param gainCapStartTilesets     CAP START gain strips (45 tiles)
@@ -471,7 +460,6 @@ void GaugeLayout_setCaps(GaugeLayout *layout,
 void GaugeLayout_setGainTrail(GaugeLayout *layout,
                               const u32 * const *gainBodyTilesets,
                               const u32 * const *gainEndTilesets,
-                              const u32 * const *gainBreakTilesets,
                               const u32 * const *gainTrailTilesets,
                               const u32 * const *gainBridgeTilesets,
                               const u32 * const *gainCapStartTilesets,
@@ -489,7 +477,6 @@ void GaugeLayout_setGainTrail(GaugeLayout *layout,
  * @param layout                   Layout to configure (must be initialized)
  * @param blinkOffBodyTilesets     BODY blink-off strips (45 tiles)
  * @param blinkOffEndTilesets      END blink-off strips (45 tiles)
- * @param blinkOffBreakTilesets    BREAK blink-off strips (45 tiles)
  * @param blinkOffTrailTilesets    TRAIL blink-off strips (64 tiles)
  * @param blinkOffBridgeTilesets   BRIDGE blink-off strips (45 tiles)
  * @param blinkOffCapStartTilesets CAP START blink-off strips (45 tiles)
@@ -500,7 +487,6 @@ void GaugeLayout_setGainTrail(GaugeLayout *layout,
 void GaugeLayout_setBlinkOff(GaugeLayout *layout,
                              const u32 * const *blinkOffBodyTilesets,
                              const u32 * const *blinkOffEndTilesets,
-                             const u32 * const *blinkOffBreakTilesets,
                              const u32 * const *blinkOffTrailTilesets,
                              const u32 * const *blinkOffBridgeTilesets,
                              const u32 * const *blinkOffCapStartTilesets,
@@ -515,7 +501,6 @@ void GaugeLayout_setBlinkOff(GaugeLayout *layout,
  * @param layout                   Layout to configure (must be initialized)
  * @param gainBlinkOffBodyTilesets     BODY gain blink-off strips (45 tiles)
  * @param gainBlinkOffEndTilesets      END gain blink-off strips (45 tiles)
- * @param gainBlinkOffBreakTilesets    BREAK gain blink-off strips (45 tiles)
  * @param gainBlinkOffTrailTilesets    TRAIL gain blink-off strips (64 tiles)
  * @param gainBlinkOffBridgeTilesets   BRIDGE gain blink-off strips (45 tiles)
  * @param gainBlinkOffCapStartTilesets CAP START gain blink-off strips (45 tiles)
@@ -526,7 +511,6 @@ void GaugeLayout_setBlinkOff(GaugeLayout *layout,
 void GaugeLayout_setGainBlinkOff(GaugeLayout *layout,
                                  const u32 * const *gainBlinkOffBodyTilesets,
                                  const u32 * const *gainBlinkOffEndTilesets,
-                                 const u32 * const *gainBlinkOffBreakTilesets,
                                  const u32 * const *gainBlinkOffTrailTilesets,
                                  const u32 * const *gainBlinkOffBridgeTilesets,
                                  const u32 * const *gainBlinkOffCapStartTilesets,
@@ -613,7 +597,6 @@ typedef struct
  * Strip pointers (pre-cached at init to avoid per-frame segment lookups):
  * - bodyFillStrip45:   main interior strip (45 tiles, always set)
  * - endFillStrip45:    termination strip (NULL if segment has no end tileset)
- * - breakFillStrip45:  transition strip (NULL if no end, else falls back to body)
  * - trailFillStrip64:  trail strip (64 tiles, NULL if no trail tileset)
  * - bridgeFillStrip45: bridge strip (NULL if no bridge tileset for this segment)
  */
@@ -621,7 +604,6 @@ typedef struct
 {
     const u32 *bodyFillStrip45;     /* BODY strip (always set when cell is valid) */
     const u32 *endFillStrip45;      /* END strip (NULL if not supported) */
-    const u32 *breakFillStrip45;    /* BREAK strip (NULL if not supported) */
     const u32 *trailFillStrip64;    /* TRAIL strip (NULL if not supported) */
     const u32 *bridgeFillStrip45;   /* BRIDGE strip (NULL if not supported) */
     const u32 *loadedFillStrip45;   /* Last strip uploaded (for cache) */

@@ -742,7 +742,6 @@ static inline u8 layout_has_blink_off_mode(const GaugeLayout *layout, u8 trailMo
         {
             if (layout->gainBlinkOffTilesetBySegment[i] ||
                 layout->gainBlinkOffTilesetEndBySegment[i] ||
-                layout->gainBlinkOffTilesetBreakBySegment[i] ||
                 layout->gainBlinkOffTilesetTrailBySegment[i] ||
                 layout->gainBlinkOffTilesetBridgeBySegment[i] ||
                 layout->gainBlinkOffTilesetCapStartBySegment[i] ||
@@ -760,7 +759,6 @@ static inline u8 layout_has_blink_off_mode(const GaugeLayout *layout, u8 trailMo
     {
         if (layout->blinkOffTilesetBySegment[i] ||
             layout->blinkOffTilesetEndBySegment[i] ||
-            layout->blinkOffTilesetBreakBySegment[i] ||
             layout->blinkOffTilesetTrailBySegment[i] ||
             layout->blinkOffTilesetBridgeBySegment[i] ||
             layout->blinkOffTilesetCapStartBySegment[i] ||
@@ -872,7 +870,6 @@ void GaugeLayout_initEx(GaugeLayout *layout,
                         GaugeFillDirection fillDir,
                         const u32 * const *bodyTilesets,
                         const u32 * const *endTilesets,
-                        const u32 * const *breakTilesets,
                         const u32 * const *trailTilesets,
                         const u32 * const *bridgeTilesets,
                         const u8 *segmentIdByCell,
@@ -894,7 +891,6 @@ void GaugeLayout_initEx(GaugeLayout *layout,
     {
         layout->tilesetBySegment[i] = bodyTilesets ? bodyTilesets[i] : NULL;
         layout->tilesetEndBySegment[i] = endTilesets ? endTilesets[i] : NULL;
-        layout->tilesetBreakBySegment[i] = breakTilesets ? breakTilesets[i] : NULL;
         layout->tilesetTrailBySegment[i] = trailTilesets ? trailTilesets[i] : NULL;
         layout->tilesetBridgeBySegment[i] = bridgeTilesets ? bridgeTilesets[i] : NULL;
         layout->tilesetCapStartBySegment[i] = NULL;
@@ -905,7 +901,6 @@ void GaugeLayout_initEx(GaugeLayout *layout,
 
         layout->blinkOffTilesetBySegment[i] = NULL;
         layout->blinkOffTilesetEndBySegment[i] = NULL;
-        layout->blinkOffTilesetBreakBySegment[i] = NULL;
         layout->blinkOffTilesetTrailBySegment[i] = NULL;
         layout->blinkOffTilesetBridgeBySegment[i] = NULL;
         layout->blinkOffTilesetCapStartBySegment[i] = NULL;
@@ -915,7 +910,6 @@ void GaugeLayout_initEx(GaugeLayout *layout,
 
         layout->gainTilesetBySegment[i] = NULL;
         layout->gainTilesetEndBySegment[i] = NULL;
-        layout->gainTilesetBreakBySegment[i] = NULL;
         layout->gainTilesetTrailBySegment[i] = NULL;
         layout->gainTilesetBridgeBySegment[i] = NULL;
         layout->gainTilesetCapStartBySegment[i] = NULL;
@@ -925,7 +919,6 @@ void GaugeLayout_initEx(GaugeLayout *layout,
 
         layout->gainBlinkOffTilesetBySegment[i] = NULL;
         layout->gainBlinkOffTilesetEndBySegment[i] = NULL;
-        layout->gainBlinkOffTilesetBreakBySegment[i] = NULL;
         layout->gainBlinkOffTilesetTrailBySegment[i] = NULL;
         layout->gainBlinkOffTilesetBridgeBySegment[i] = NULL;
         layout->gainBlinkOffTilesetCapStartBySegment[i] = NULL;
@@ -971,7 +964,7 @@ void GaugeLayout_init(GaugeLayout *layout,
                       u8 vflip,
                       u8 hflip)
 {
-    GaugeLayout_initEx(layout, length, fillDir, tilesets, NULL, NULL,
+    GaugeLayout_initEx(layout, length, fillDir, tilesets, NULL,
                        NULL, NULL, segmentIdByCell, orientation, paletteLine,
                        priority, vflip, hflip);
 }
@@ -1016,7 +1009,6 @@ void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src)
     {
         dst->tilesetBySegment[i] = src->tilesetBySegment[i];
         dst->tilesetEndBySegment[i] = src->tilesetEndBySegment[i];
-        dst->tilesetBreakBySegment[i] = src->tilesetBreakBySegment[i];
         dst->tilesetTrailBySegment[i] = src->tilesetTrailBySegment[i];
         dst->tilesetBridgeBySegment[i] = src->tilesetBridgeBySegment[i];
         dst->tilesetCapStartBySegment[i] = src->tilesetCapStartBySegment[i];
@@ -1027,7 +1019,6 @@ void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src)
 
         dst->blinkOffTilesetBySegment[i] = src->blinkOffTilesetBySegment[i];
         dst->blinkOffTilesetEndBySegment[i] = src->blinkOffTilesetEndBySegment[i];
-        dst->blinkOffTilesetBreakBySegment[i] = src->blinkOffTilesetBreakBySegment[i];
         dst->blinkOffTilesetTrailBySegment[i] = src->blinkOffTilesetTrailBySegment[i];
         dst->blinkOffTilesetBridgeBySegment[i] = src->blinkOffTilesetBridgeBySegment[i];
         dst->blinkOffTilesetCapStartBySegment[i] = src->blinkOffTilesetCapStartBySegment[i];
@@ -1037,7 +1028,6 @@ void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src)
 
         dst->gainTilesetBySegment[i] = src->gainTilesetBySegment[i];
         dst->gainTilesetEndBySegment[i] = src->gainTilesetEndBySegment[i];
-        dst->gainTilesetBreakBySegment[i] = src->gainTilesetBreakBySegment[i];
         dst->gainTilesetTrailBySegment[i] = src->gainTilesetTrailBySegment[i];
         dst->gainTilesetBridgeBySegment[i] = src->gainTilesetBridgeBySegment[i];
         dst->gainTilesetCapStartBySegment[i] = src->gainTilesetCapStartBySegment[i];
@@ -1047,7 +1037,6 @@ void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src)
 
         dst->gainBlinkOffTilesetBySegment[i] = src->gainBlinkOffTilesetBySegment[i];
         dst->gainBlinkOffTilesetEndBySegment[i] = src->gainBlinkOffTilesetEndBySegment[i];
-        dst->gainBlinkOffTilesetBreakBySegment[i] = src->gainBlinkOffTilesetBreakBySegment[i];
         dst->gainBlinkOffTilesetTrailBySegment[i] = src->gainBlinkOffTilesetTrailBySegment[i];
         dst->gainBlinkOffTilesetBridgeBySegment[i] = src->gainBlinkOffTilesetBridgeBySegment[i];
         dst->gainBlinkOffTilesetCapStartBySegment[i] = src->gainBlinkOffTilesetCapStartBySegment[i];
@@ -1103,7 +1092,6 @@ void GaugeLayout_setCaps(GaugeLayout *layout,
 void GaugeLayout_setBlinkOff(GaugeLayout *layout,
                              const u32 * const *blinkOffBodyTilesets,
                              const u32 * const *blinkOffEndTilesets,
-                             const u32 * const *blinkOffBreakTilesets,
                              const u32 * const *blinkOffTrailTilesets,
                              const u32 * const *blinkOffBridgeTilesets,
                              const u32 * const *blinkOffCapStartTilesets,
@@ -1117,8 +1105,6 @@ void GaugeLayout_setBlinkOff(GaugeLayout *layout,
             blinkOffBodyTilesets ? blinkOffBodyTilesets[i] : NULL;
         layout->blinkOffTilesetEndBySegment[i] =
             blinkOffEndTilesets ? blinkOffEndTilesets[i] : NULL;
-        layout->blinkOffTilesetBreakBySegment[i] =
-            blinkOffBreakTilesets ? blinkOffBreakTilesets[i] : NULL;
         layout->blinkOffTilesetTrailBySegment[i] =
             blinkOffTrailTilesets ? blinkOffTrailTilesets[i] : NULL;
         layout->blinkOffTilesetBridgeBySegment[i] =
@@ -1605,7 +1591,6 @@ static void preload_dynamic_standard_tiles(GaugeDynamic *dyn, const GaugeLayout 
 void GaugeLayout_setGainTrail(GaugeLayout *layout,
                               const u32 * const *gainBodyTilesets,
                               const u32 * const *gainEndTilesets,
-                              const u32 * const *gainBreakTilesets,
                               const u32 * const *gainTrailTilesets,
                               const u32 * const *gainBridgeTilesets,
                               const u32 * const *gainCapStartTilesets,
@@ -1619,8 +1604,6 @@ void GaugeLayout_setGainTrail(GaugeLayout *layout,
             gainBodyTilesets ? gainBodyTilesets[i] : NULL;
         layout->gainTilesetEndBySegment[i] =
             gainEndTilesets ? gainEndTilesets[i] : NULL;
-        layout->gainTilesetBreakBySegment[i] =
-            gainBreakTilesets ? gainBreakTilesets[i] : NULL;
         layout->gainTilesetTrailBySegment[i] =
             gainTrailTilesets ? gainTrailTilesets[i] : NULL;
         layout->gainTilesetBridgeBySegment[i] =
@@ -1642,7 +1625,6 @@ void GaugeLayout_setGainTrail(GaugeLayout *layout,
 void GaugeLayout_setGainBlinkOff(GaugeLayout *layout,
                                  const u32 * const *gainBlinkOffBodyTilesets,
                                  const u32 * const *gainBlinkOffEndTilesets,
-                                 const u32 * const *gainBlinkOffBreakTilesets,
                                  const u32 * const *gainBlinkOffTrailTilesets,
                                  const u32 * const *gainBlinkOffBridgeTilesets,
                                  const u32 * const *gainBlinkOffCapStartTilesets,
@@ -1656,8 +1638,6 @@ void GaugeLayout_setGainBlinkOff(GaugeLayout *layout,
             gainBlinkOffBodyTilesets ? gainBlinkOffBodyTilesets[i] : NULL;
         layout->gainBlinkOffTilesetEndBySegment[i] =
             gainBlinkOffEndTilesets ? gainBlinkOffEndTilesets[i] : NULL;
-        layout->gainBlinkOffTilesetBreakBySegment[i] =
-            gainBlinkOffBreakTilesets ? gainBlinkOffBreakTilesets[i] : NULL;
         layout->gainBlinkOffTilesetTrailBySegment[i] =
             gainBlinkOffTrailTilesets ? gainBlinkOffTrailTilesets[i] : NULL;
         layout->gainBlinkOffTilesetBridgeBySegment[i] =
@@ -1840,27 +1820,12 @@ static void write_tilemap_fixed_init(GaugePart *part)
 
         /* Precompute per-cell strips to avoid segment lookups every frame */
         const u32 *endStrip = layout->tilesetEndBySegment[segId];
-        const u32 *breakStrip = layout->tilesetBreakBySegment[segId];
         const u32 *trailStrip = layout->tilesetTrailBySegment[segId];
         const u32 *bridgeStrip = layout->tilesetBridgeBySegment[segId];
-
-        /* Fallback rules:
-         * - No END => BODY only (ignore BREAK)
-         * - END exists + no BREAK => BREAK uses BODY
-         */
-        if (!endStrip)
-        {
-            breakStrip = NULL;
-        }
-        else if (!breakStrip)
-        {
-            breakStrip = bodyStrip;
-        }
 
         part->cells[part->cellCount].vramTileIndex = vramTile;
         part->cells[part->cellCount].bodyFillStrip45 = bodyStrip;
         part->cells[part->cellCount].endFillStrip45 = endStrip;
-        part->cells[part->cellCount].breakFillStrip45 = breakStrip;
         part->cells[part->cellCount].trailFillStrip64 = trailStrip;
         part->cells[part->cellCount].bridgeFillStrip45 = bridgeStrip;
         part->cells[part->cellCount].loadedFillStrip45 = NULL;
@@ -1943,19 +1908,12 @@ static void process_fixed_mode(GaugePart *part,
         const u32 *endStrip = select_base_strip(cell->endFillStrip45,
                                                 layout->gainTilesetEndBySegment[segId],
                                                 trailMode);
-        const u32 *breakStrip = select_base_strip(cell->breakFillStrip45,
-                                                  layout->gainTilesetBreakBySegment[segId],
-                                                  trailMode);
         const u32 *trailStrip = select_base_strip(cell->trailFillStrip64,
                                                   layout->gainTilesetTrailBySegment[segId],
                                                   trailMode);
         const u32 *bridgeStrip = select_base_strip(cell->bridgeFillStrip45,
                                                    layout->gainTilesetBridgeBySegment[segId],
                                                    trailMode);
-        const u32 *blinkOffBreakStrip = select_blink_strip(
-            layout->blinkOffTilesetBreakBySegment[segId],
-            layout->gainBlinkOffTilesetBreakBySegment[segId],
-            trailMode);
         const u32 *blinkOffBodyStrip = select_blink_strip(
             layout->blinkOffTilesetBySegment[segId],
             layout->gainBlinkOffTilesetBySegment[segId],
@@ -1972,18 +1930,6 @@ static void process_fixed_mode(GaugePart *part,
             layout->blinkOffTilesetBridgeBySegment[segId],
             layout->gainBlinkOffTilesetBridgeBySegment[segId],
             trailMode);
-
-        /* Fallback rules (mode-aware):
-         * - No END => BODY only (ignore BREAK)
-         * - END exists + no BREAK => BREAK uses BODY */
-        if (!endStrip)
-        {
-            breakStrip = NULL;
-        }
-        else if (!breakStrip)
-        {
-            breakStrip = bodyStrip;
-        }
 
         /* === Cap end (always uses its tileset) === */
         if (cellIndex == capEndCellIndex && capEndEnabled && segId == capEndSegId)
@@ -2131,11 +2077,11 @@ static void process_fixed_mode(GaugePart *part,
                 }
                 else
                 {
-                    /* No bridge tileset: fall back to break or body, fully filled */
-                    const u32 *fallbackStrip = breakStrip ? breakStrip : bodyStrip;
-                    if (blinkOffActive && blinkOffBreakStrip && bridgeInTrailZone)
+                    /* No bridge tileset: fall back to body, fully filled */
+                    const u32 *fallbackStrip = bodyStrip;
+                    if (blinkOffActive && blinkOffBodyStrip && bridgeInTrailZone)
                     {
-                        fallbackStrip = blinkOffBreakStrip;
+                        fallbackStrip = blinkOffBodyStrip;
                     }
                     upload_cell_if_needed(cell, fallbackStrip,
                                           s_fillTileStripsIndexByValueTrail[8][8]);
@@ -2150,11 +2096,11 @@ static void process_fixed_mode(GaugePart *part,
                 if (brkBridge.endFillIndex > boundaryFillIndex &&
                     brkBridge.valueFillIndex > boundaryFillIndex)
                 {
-                    const u32 *breakStripUse = breakStrip ? breakStrip : bodyStrip;
-                    if (blinkOffActive && blinkOffBreakStrip &&
+                    const u32 *breakStripUse = bodyStrip;
+                    if (blinkOffActive && blinkOffBodyStrip &&
                         is_cell_in_trail_zone(&brkBridge, cellFillIndex))
                     {
-                        breakStripUse = blinkOffBreakStrip;
+                        breakStripUse = blinkOffBodyStrip;
                     }
                     upload_cell_if_needed(cell, breakStripUse,
                                           s_fillTileStripsIndexByValueTrail[8][8]);
@@ -2330,25 +2276,13 @@ static void process_fixed_mode(GaugePart *part,
                 {
                     if (cellFillIndex == brkUse->endFillIndex)
                         stripToUse = endStrip;
-                    else if (cellFillIndex == brkUse->valueBreakFillIndex && breakStrip)
-                        stripToUse = breakStrip;
                 }
 
                 u8 valuePxInTile = 0;
                 u8 trailPxInTile = 0;
-
-                if (stripToUse == breakStrip)
-                {
-                    /* BREAK should track END evolution (same fill as break). */
-                    valuePxInTile = brkUse->endValuePxInTile;
-                    trailPxInTile = brkUse->endTrailPxInTile;
-                }
-                else
-                {
-                    compute_fill_for_cell(layout, cell->cellIndex,
-                                          valuePixels, trailPixelsUse,
-                                          &valuePxInTile, &trailPxInTile);
-                }
+                compute_fill_for_cell(layout, cell->cellIndex,
+                                      valuePixels, trailPixelsUse,
+                                      &valuePxInTile, &trailPxInTile);
 
                 desiredStripIndex = s_fillTileStripsIndexByValueTrail[valuePxInTile][trailPxInTile];
             }
