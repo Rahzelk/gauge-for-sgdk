@@ -302,8 +302,8 @@ static void initSample1(u16 *nextVram)
                      GAUGE_ORIENT_HORIZONTAL,    /* orientation */
                      PAL0,                       /* palette line */
                      1,                          /* priority (1=high) */
-                     0,                          /* vflip */
-                     0);                         /* hflip */
+                     0,                          /* verticalFlip */
+                     0);                         /* horizontalFlip */
 
     /* Step 4: Calculate pixel dimensions
        - maxValue = maxFillPixels for 1:1 mapping (no LUT needed) */
@@ -539,12 +539,12 @@ static void initSample5(u16 *nextVram)
     /* Step 3: Initialize layout from init config */
     const GaugeLayoutInit sample5LayoutInit = {
         .length = SAMPLE5_LENGTH,
-        .fillDir = GAUGE_FILL_FORWARD,
+        .fillDirection = GAUGE_FILL_FORWARD,
         .orientation = GAUGE_ORIENT_HORIZONTAL,
-        .paletteLine = PAL0,
+        .palette = PAL0,
         .priority = 1,
-        .vflip = 0,
-        .hflip = 0,
+        .verticalFlip = 0,
+        .horizontalFlip = 0,
         .segmentIdByCell = sample5Segments,
         .segmentStyles = sample5SegmentStyles
     };
@@ -738,12 +738,12 @@ static void initSample7(u16 *nextVram)
     };
     const GaugeLayoutInit sample7Part1LayoutInit = {
         .length = SAMPLE7_PART1_LEN,
-        .fillDir = GAUGE_FILL_FORWARD,
+        .fillDirection = GAUGE_FILL_FORWARD,
         .orientation = GAUGE_ORIENT_HORIZONTAL,
-        .paletteLine = PAL0,
+        .palette = PAL0,
         .priority = 1,
-        .vflip = 0,
-        .hflip = 0,
+        .verticalFlip = 0,
+        .horizontalFlip = 0,
         .segmentIdByCell = sample7Part1Segments,
         .segmentStyles = sample7SegmentStyles
     };

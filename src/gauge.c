@@ -4,15 +4,48 @@
    gauge.c ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Simplified single-lane HUD gauge implementation for SGDK
    =============================================================================
  
-   IMPLEMENTATION NOTES:
-   ---------------------
-   - Tile index LUT (s_fillTileStripsIndexByValueTrail) provides O(1) lookup
-   - Change detection avoids redundant rendering
+   TILE STRIP SYSTEM:
+   ------------------
+   Each segment has pre-rendered "strips" of tiles stored in ROM.
+   A 45-tile strip covers all fill combinations for one tile:
+     - 9 levels of value (0..8 px) x 9 levels of trail (0..8 px)
+     - Only valid combos where trail >= value (triangular matrix = 45 tiles)
+   A 64-tile strip is used for trail-specific edge rendering.
 
-   PERFORMANCE CHARACTERISTICS:
+   The LUT s_tileIndexByValueTrail[valuePx][trailPx] maps a (value, trail)
+   pixel pair to the correct tile index within a strip (O(1) lookup).
+
+   BREAK ZONE:
+   -----------
+   Most cells are trivially FULL (value=8, trail=8) or EMPTY (0,0).
+   The "break zone" is the small region where value/trail partially fill a tile.
+   Only break zone cells need per-pixel tile computation.
+
+   Cell types in the break zone (fill direction: left to right):
+
+     |FULL|FULL|VALUE_BREAK|TRAIL_FULL|TRAIL_BREAK|END|EMPTY|EMPTY|
+      <--- value --->|<--------- trail -------->|
+                     ^                          ^
+                value edge                 trail edge
+
+   VALUE_BREAK  : Cell where the value edge falls (0 < valuePx < 8)
+   TRAIL_FULL   : Cells fully covered by trail but no value (valuePx=0, trailPx=8)
+   TRAIL_BREAK  : Cell where the trail edge falls (0 < trailPx < 8)
+   TRAIL_BREAK2 : Second trail break (before END, when bridge forces split)
+   END          : Cell at the value/trail frontier (uses end tileset)
+
+   BLINK-OFF:
+   ----------
+   During trail blink OFF frames, the break zone is recomputed using the
+   "actual" trail (breakInfoActual) instead of the rendered trail (breakInfo).
+   Trail-zone tiles get replaced with blink-off tilesets for the visual effect.
+
+   PERFORMANCE:
+   ------------
    - GaugeLogic_tick: ~50-100 cycles (mostly conditionals)
-   - process_fixed_mode: ~200 cycles per cell (DMA dominant)
+   - process_fixed_mode: ~200 cycles/cell (DMA dominant), lazy strip eval
    - process_dynamic_mode: ~300-500 cycles total (tilemap writes dominant)
+   - Change detection avoids redundant DMA/tilemap writes
 
    ============================================================================= */
 
@@ -26,8 +59,8 @@
 #define CACHE_INVALID_U8     0xFF
 
 /* Helper macros */
-#define CALC_ANIM_STEP(diff, shift)   ((u16)(((diff) >> (shift)) + 1))
-#define FILL_IDX_TO_OFFSET(idx)       (((u16)(idx)) << 3)
+#define CALC_ANIM_STEP(diff, shift)   ((u16)(((diff) >> (shift)) + 1))  /* Animation step: distance/2^shift + 1 (always >= 1) */
+#define FILL_IDX_TO_OFFSET(idx)       (((u16)(idx)) << 3)              /* fillIndex * 8 = pixel offset (each cell = 8 px) */
 
 /* PIP compact strip state ordering */
 #define PIP_STATE_EMPTY      0
@@ -37,9 +70,9 @@
 #define PIP_STATE_BLINK_OFF  4
 
 /* Pre-computed strip indices for trivial cell states (avoid LUT indexing in hot path) */
-#define STRIP_INDEX_EMPTY       0   /* s_fillTileStripsIndexByValueTrail[0][0] : value=0, trail=0 */
-#define STRIP_INDEX_FULL_TRAIL  8   /* s_fillTileStripsIndexByValueTrail[0][8] : value=0, trail=8 */
-#define STRIP_INDEX_FULL       44   /* s_fillTileStripsIndexByValueTrail[8][8] : value=8, trail=8 */
+#define STRIP_INDEX_EMPTY       0   /* s_tileIndexByValueTrail[0][0] : value=0, trail=0 */
+#define STRIP_INDEX_FULL_TRAIL  8   /* s_tileIndexByValueTrail[0][8] : value=0, trail=8 */
+#define STRIP_INDEX_FULL       44   /* s_tileIndexByValueTrail[8][8] : value=8, trail=8 */
 
 
 /* =============================================================================
@@ -68,7 +101,7 @@
      +--------+
 
    ============================================================================= */
-static const u8 s_fillTileStripsIndexByValueTrail[9][9] =
+static const u8 s_tileIndexByValueTrail[9][9] =
 {
     /*          trail=0  1    2    3    4    5    6    7    8  */
     /* val=0 */ {   0,   1,   2,   3,   4,   5,   6,   7,   8 },
@@ -98,7 +131,7 @@ static const u8 s_fillTileStripsIndexByValueTrail[9][9] =
 
    Note: 0xFF entries (trail < value) are invalid and never accessed.
    ============================================================================= */
-static const u8 s_trailTileStripsIndexByValueTrail[9][9] =
+static const u8 s_trailTileIndexByValueTrail[9][9] =
 {
     /*          trail=0  1    2    3    4    5    6    7    8  */
     /* val=0 */ {   0,   1,   2,   3,   4,   5,   6,   7,   7 },
@@ -267,7 +300,17 @@ static inline u8 compute_fill_index_and_px(const GaugeLayout *layout,
 }
 
 /**
- * Compute tile position on WINDOW plane.
+ * Compute tile position on the WINDOW plane based on orientation.
+ *
+ * For horizontal gauges: X varies by cell, Y stays at origin.
+ * For vertical gauges:   Y varies by cell, X stays at origin.
+ *
+ * @param orient  GAUGE_ORIENT_HORIZONTAL or GAUGE_ORIENT_VERTICAL
+ * @param originX Tilemap X origin of the gauge
+ * @param originY Tilemap Y origin of the gauge
+ * @param cell    Cell index (0..length-1)
+ * @param outX    Output: tilemap X coordinate
+ * @param outY    Output: tilemap Y coordinate
  */
 static inline void compute_tile_xy(u8 orient,
                                    u16 originX, u16 originY,
@@ -381,7 +424,9 @@ static inline void compute_break_info(const GaugeLayout *layout,
                                       u8 trailMode,
                                       GaugeBreakInfo *out)
 {
-    /* Compute value/trail break positions (fillIndex + px inside that cell) */
+    /* === Step 1: Compute value and trail fill positions ===
+     * For each edge (value and trail), find which cell it falls in (fillIndex)
+     * and how many pixels into that cell it extends (pxInBreakCell). */
     out->valueFillIndex = compute_fill_index_and_px(layout, valuePixels, &out->valuePxInBreakCell);
     out->trailFillIndex = compute_fill_index_and_px(layout, trailPixelsRendered, &out->trailPxInBreakCell);
 
@@ -410,7 +455,8 @@ static inline void compute_break_info(const GaugeLayout *layout,
     const u8 valueInLayout = (valuePixels >= layoutStart && valuePixels <= layoutEnd);
     const u8 trailInLayout = (trailPixelsRendered >= layoutStart && trailPixelsRendered <= layoutEnd);
 
-    /* END cap (E):
+    /* === Step 2: Compute END cell position (transition tile) ===
+     * END cap (E):
      * - Normal case: place END on trail edge when trail is visible.
      * - Offset/window fallback:
      *   keep one END inside the visible window even when trail edge is outside,
@@ -444,12 +490,14 @@ static inline void compute_break_info(const GaugeLayout *layout,
         out->endFillIndex = CACHE_INVALID_U8;
     }
 
-    /* VALUE BREAK (B): one cell before value break */
+    /* === Step 3: Compute VALUE_BREAK position ===
+     * VALUE BREAK (B): one cell before value break */
     out->valueBreakFillIndex =
         (valueInLayout && valueSegmentHasEnd && out->valueFillIndex > 0)
         ? (u8)(out->valueFillIndex - 1) : CACHE_INVALID_U8;
 
-    /* TRAIL BREAK (T): active when the trail zone intersects this layout window
+    /* === Step 4: Compute TRAIL_BREAK positions (first and second) ===
+     * TRAIL BREAK (T): active when the trail zone intersects this layout window
      * and value/trail edges are not in the same cell. */
     const u8 trailZoneIntersectsLayout =
         (trailPixelsRendered > layoutStart) && (valuePixels < layoutEnd);
@@ -463,7 +511,8 @@ static inline void compute_break_info(const GaugeLayout *layout,
     out->trailBreakFillIndex2 = out->trailBreakSecondActive
         ? (u8)(out->trailFillIndex - 1) : CACHE_INVALID_U8;
 
-    /* Region rendering: active when both edges are visible and have END tilesets */
+    /* === Step 5: Check if region-based rendering is needed ===
+     * Region rendering: active when both edges are visible and have END tilesets */
     out->regionRenderActive = (valueInLayout && trailInLayout &&
                                valueSegmentHasEnd && trailSegmentHasEnd);
 
@@ -479,22 +528,28 @@ static inline void compute_break_info(const GaugeLayout *layout,
 }
 
 /**
- * Check if a cell (by fill index) is in the END/TRAIL/BREAK zone.
- * Used to decide whether blink-off should apply.
+ * Check if a cell (by fill index) is in the break zone (END/TRAIL/VALUE_BREAK).
+ *
+ * Returns 1 if the cell is any of: END, VALUE_BREAK, TRAIL_BREAK, TRAIL_BREAK2,
+ * or TRAIL_FULL. Used to decide whether blink-off tilesets should override.
+ *
+ * @param breakInfo     Pre-computed break zone info
+ * @param cellFillIndex Fill index of the cell to check
+ * @return 1 if cell is in break zone, 0 otherwise
  */
-static inline u8 is_cell_in_trail_zone(const GaugeBreakInfo *brk, u8 cellFillIndex)
+static inline u8 is_cell_in_trail_zone(const GaugeBreakInfo *breakInfo, u8 cellFillIndex)
 {
-    if (brk->endFillIndex != CACHE_INVALID_U8 && cellFillIndex == brk->endFillIndex)
+    if (breakInfo->endFillIndex != CACHE_INVALID_U8 && cellFillIndex == breakInfo->endFillIndex)
         return 1;
-    if (brk->valueBreakFillIndex != CACHE_INVALID_U8 && cellFillIndex == brk->valueBreakFillIndex)
+    if (breakInfo->valueBreakFillIndex != CACHE_INVALID_U8 && cellFillIndex == breakInfo->valueBreakFillIndex)
         return 1;
-    if (brk->trailBreakActive)
+    if (breakInfo->trailBreakActive)
     {
-        if (cellFillIndex == brk->trailBreakFillIndex)
+        if (cellFillIndex == breakInfo->trailBreakFillIndex)
             return 1;
-        if (brk->trailBreakSecondActive && cellFillIndex == brk->trailBreakFillIndex2)
+        if (breakInfo->trailBreakSecondActive && cellFillIndex == breakInfo->trailBreakFillIndex2)
             return 1;
-        if (cellFillIndex > brk->valueFillIndex && cellFillIndex < brk->trailFillIndex)
+        if (cellFillIndex > breakInfo->valueFillIndex && cellFillIndex < breakInfo->trailFillIndex)
             return 1;
     }
     return 0;
@@ -533,33 +588,45 @@ typedef struct
 } CapStartResult;
 
 /**
- * Classify cap start using explicit tileset strips.
- * Used for blink-off variants.
+ * Classify cap start cell and select the appropriate tileset strip + tile index.
+ *
+ * Applies the 4-priority rule (see CapStartResult block comment above):
+ * 1. Cell is END          -> capStartStrip + endIndex
+ * 2. Cell is TRAIL zone   -> capStartTrailStrip + trail LUT index
+ * 3. Next cell is END     -> capStartBreakStrip + endIndex
+ * 4. Default (FULL/EMPTY) -> capStartBreakStrip + STRIP_INDEX_FULL
+ *
+ * @param breakInfo          Pre-computed break zone info
+ * @param cellFillIndex      Fill index of the cap start cell
+ * @param capStartStrip      Default cap tileset (ROM strip)
+ * @param capStartBreakStrip Cap tileset for break/full state (can be NULL)
+ * @param capStartTrailStrip Cap tileset for trail zone (can be NULL)
+ * @param out                Output: selected strip, tile index, and flags
  */
-static inline void classify_cap_start_with_strips(const GaugeBreakInfo *brk,
+static inline void classify_cap_start_with_strips(const GaugeBreakInfo *breakInfo,
                                                   u8 cellFillIndex,
                                                   const u32 *capStartStrip,
                                                   const u32 *capStartBreakStrip,
                                                   const u32 *capStartTrailStrip,
                                                   CapStartResult *out)
 {
-    const u8 endValid = (brk->endFillIndex != CACHE_INVALID_U8);
-    const u8 isEndHere = (endValid && cellFillIndex == brk->endFillIndex);
-    const u8 isEndNext = (endValid && (u8)(cellFillIndex + 1) == brk->endFillIndex);
+    const u8 endValid = (breakInfo->endFillIndex != CACHE_INVALID_U8);
+    const u8 isEndHere = (endValid && cellFillIndex == breakInfo->endFillIndex);
+    const u8 isEndNext = (endValid && (u8)(cellFillIndex + 1) == breakInfo->endFillIndex);
 
     /* Pre-compute the END fill index (used in multiple branches) */
     const u8 endIndex = endValid
-        ? s_fillTileStripsIndexByValueTrail[brk->endValuePxInTile][brk->endTrailPxInTile]
+        ? s_tileIndexByValueTrail[breakInfo->endValuePxInTile][breakInfo->endTrailPxInTile]
         : STRIP_INDEX_FULL;
 
     /* Detect trail zone states */
-    const u8 isTrailBreak = (brk->trailBreakActive && capStartTrailStrip &&
-                             cellFillIndex == brk->trailBreakFillIndex);
-    const u8 isTrailBreak2 = (brk->trailBreakSecondActive && capStartTrailStrip &&
-                              cellFillIndex == brk->trailBreakFillIndex2);
-    const u8 isTrailFull = (brk->trailBreakActive && capStartTrailStrip &&
-                            cellFillIndex > brk->valueFillIndex &&
-                            cellFillIndex < brk->trailFillIndex);
+    const u8 isTrailBreak = (breakInfo->trailBreakActive && capStartTrailStrip &&
+                             cellFillIndex == breakInfo->trailBreakFillIndex);
+    const u8 isTrailBreak2 = (breakInfo->trailBreakSecondActive && capStartTrailStrip &&
+                              cellFillIndex == breakInfo->trailBreakFillIndex2);
+    const u8 isTrailFull = (breakInfo->trailBreakActive && capStartTrailStrip &&
+                            cellFillIndex > breakInfo->valueFillIndex &&
+                            cellFillIndex < breakInfo->trailFillIndex);
     const u8 useTrail = (isTrailBreak || isTrailBreak2 || isTrailFull);
 
     /* --- Select strip --- */
@@ -596,10 +663,10 @@ static inline void classify_cap_start_with_strips(const GaugeBreakInfo *brk,
         /* Trail break #1: transition cell right after value edge.
          * If a second trail break exists, this cell is fully covered by trail (trailPx=8).
          * Otherwise, use the actual trail px in the break cell. */
-        if (brk->trailBreakSecondActive)
-            out->fillStripIndex = s_trailTileStripsIndexByValueTrail[brk->valuePxInBreakCell][8];
+        if (breakInfo->trailBreakSecondActive)
+            out->fillStripIndex = s_trailTileIndexByValueTrail[breakInfo->valuePxInBreakCell][8];
         else
-            out->fillStripIndex = s_trailTileStripsIndexByValueTrail[brk->valuePxInBreakCell][brk->trailPxInBreakCell];
+            out->fillStripIndex = s_trailTileIndexByValueTrail[breakInfo->valuePxInBreakCell][breakInfo->trailPxInBreakCell];
     }
     else if (isTrailBreak2)
     {
@@ -607,7 +674,7 @@ static inline void classify_cap_start_with_strips(const GaugeBreakInfo *brk,
          * If END index is 8 (full trail column), use trail LUT for (0,8).
          * Otherwise reuse the END fill index on the trail strip. */
         if (endIndex == 8)
-            out->fillStripIndex = s_trailTileStripsIndexByValueTrail[0][8];
+            out->fillStripIndex = s_trailTileIndexByValueTrail[0][8];
         else
             out->fillStripIndex = endIndex;
     }
@@ -632,23 +699,23 @@ static inline void classify_cap_start_with_strips(const GaugeBreakInfo *brk,
  * Classify the cap start cell and determine which strip + index to use.
  *
  * @param layout         Layout configuration
- * @param brk            Pre-computed break zone info
+ * @param breakInfo            Pre-computed break zone info
  * @param cellFillIndex  Fill index of the cap start cell
- * @param segId          Segment ID of the cap start cell
+ * @param segmentId          Segment ID of the cap start cell
  * @param out            [out] Classification result (strip + index)
  *
  * Cost: ~30-50 cycles (a few comparisons + LUT lookups)
  */
 static inline void classify_cap_start(const GaugeLayout *layout,
-                                       const GaugeBreakInfo *brk,
+                                       const GaugeBreakInfo *breakInfo,
                                        u8 cellFillIndex,
-                                       u8 segId,
+                                       u8 segmentId,
                                        CapStartResult *out)
 {
-    classify_cap_start_with_strips(brk, cellFillIndex,
-                                   layout->tilesetCapStartBySegment[segId],
-                                   layout->tilesetCapStartBreakBySegment[segId],
-                                   layout->tilesetCapStartTrailBySegment[segId],
+    classify_cap_start_with_strips(breakInfo, cellFillIndex,
+                                   layout->tilesetCapStartBySegment[segmentId],
+                                   layout->tilesetCapStartBreakBySegment[segmentId],
+                                   layout->tilesetCapStartTrailBySegment[segmentId],
                                    out);
 }
 
@@ -677,7 +744,7 @@ static inline void classify_cap_start(const GaugeLayout *layout,
  * This ensures a seamless visual transition between segments.
  *
  * @param layout              Layout configuration
- * @param brk                 Pre-computed break zone info (for rendered trail)
+ * @param breakInfo                 Pre-computed break zone info (for rendered trail)
  * @param cellFillIndex       Fill index of the bridge cell
  * @param valuePixels         Current value fill in pixels
  * @param trailPixelsRendered Current trail fill in pixels (after blink)
@@ -686,7 +753,7 @@ static inline void classify_cap_start(const GaugeLayout *layout,
  * Cost: ~20-40 cycles (a few comparisons + optional fill computation)
  */
 static inline u8 compute_bridge_strip_index(const GaugeLayout *layout,
-                                             const GaugeBreakInfo *brk,
+                                             const GaugeBreakInfo *breakInfo,
                                              u8 cellFillIndex,
                                              u16 valuePixels,
                                              u16 trailPixelsRendered)
@@ -694,26 +761,26 @@ static inline u8 compute_bridge_strip_index(const GaugeLayout *layout,
     const u8 nextFillIndex = (u8)(cellFillIndex + 1);
 
     /* Case 1: next cell is END Ã¢â€ â€™ use END fill index */
-    if (brk->endFillIndex == nextFillIndex)
+    if (breakInfo->endFillIndex == nextFillIndex)
     {
-        return s_fillTileStripsIndexByValueTrail[brk->endValuePxInTile][brk->endTrailPxInTile];
+        return s_tileIndexByValueTrail[breakInfo->endValuePxInTile][breakInfo->endTrailPxInTile];
     }
 
     /* Case 2: next cell is trail break #1 Ã¢â€ â€™ compute its fill */
-    if (brk->trailBreakActive && nextFillIndex == brk->trailBreakFillIndex)
+    if (breakInfo->trailBreakActive && nextFillIndex == breakInfo->trailBreakFillIndex)
     {
         u8 nextValuePx = 0;
         u8 nextTrailPx = 0;
         compute_fill_for_fill_index(layout, nextFillIndex,
                                     valuePixels, trailPixelsRendered,
                                     &nextValuePx, &nextTrailPx);
-        return s_fillTileStripsIndexByValueTrail[nextValuePx][nextTrailPx];
+        return s_tileIndexByValueTrail[nextValuePx][nextTrailPx];
     }
 
     /* Case 3: next cell is full trail (between value and trail edges) */
-    if (brk->trailBreakActive &&
-        nextFillIndex > brk->valueFillIndex &&
-        nextFillIndex < brk->trailFillIndex)
+    if (breakInfo->trailBreakActive &&
+        nextFillIndex > breakInfo->valueFillIndex &&
+        nextFillIndex < breakInfo->trailFillIndex)
     {
         return STRIP_INDEX_FULL_TRAIL;
     }
@@ -783,7 +850,7 @@ static inline const u32 *select_blink_strip(const u32 *normalBlinkStrip,
  * Apply blink-off strip overrides for a single cell.
  *
  * Checks whether the cell at cellFillIndex falls into a blink-off zone
- * (end, trail, or value break) using the actual trail zone (brkBridge).
+ * (end, trail, or value break) using the actual trail zone (breakInfoActual).
  * If so, overrides the corresponding strip pointer to the blink-off variant.
  *
  * Shared between process_fixed_mode() and process_dynamic_mode() to avoid
@@ -792,7 +859,7 @@ static inline const u32 *select_blink_strip(const u32 *normalBlinkStrip,
  * @return 1 if blink-off was applied, 0 otherwise.
  */
 static inline u8 apply_blink_off_overrides(
-    const GaugeBreakInfo *brkBridge,
+    const GaugeBreakInfo *breakInfoActual,
     u8 cellFillIndex,
     const u32 *blinkOffEndStrip,
     const u32 *blinkOffTrailStrip,
@@ -801,20 +868,20 @@ static inline u8 apply_blink_off_overrides(
     const u32 **trailStrip,
     const u32 **bodyStrip)
 {
-    const u8 cellIsEnd = (brkBridge->endFillIndex != CACHE_INVALID_U8 &&
-                          *endStrip && cellFillIndex == brkBridge->endFillIndex);
+    const u8 cellIsEnd = (breakInfoActual->endFillIndex != CACHE_INVALID_U8 &&
+                          *endStrip && cellFillIndex == breakInfoActual->endFillIndex);
     const u8 cellIsTrailBreak =
-        (brkBridge->trailBreakActive && *trailStrip &&
-         cellFillIndex == brkBridge->trailBreakFillIndex);
+        (breakInfoActual->trailBreakActive && *trailStrip &&
+         cellFillIndex == breakInfoActual->trailBreakFillIndex);
     const u8 cellIsTrailBreak2 =
-        (brkBridge->trailBreakSecondActive && *trailStrip &&
-         cellFillIndex == brkBridge->trailBreakFillIndex2);
+        (breakInfoActual->trailBreakSecondActive && *trailStrip &&
+         cellFillIndex == breakInfoActual->trailBreakFillIndex2);
     const u8 cellIsTrailFull =
-        (brkBridge->trailBreakActive && *trailStrip &&
-         cellFillIndex > brkBridge->valueFillIndex &&
-         cellFillIndex < brkBridge->trailFillIndex);
-    const u8 cellIsValueBreak = (brkBridge->valueBreakFillIndex != CACHE_INVALID_U8 &&
-                                 cellFillIndex == brkBridge->valueBreakFillIndex);
+        (breakInfoActual->trailBreakActive && *trailStrip &&
+         cellFillIndex > breakInfoActual->valueFillIndex &&
+         cellFillIndex < breakInfoActual->trailFillIndex);
+    const u8 cellIsValueBreak = (breakInfoActual->valueBreakFillIndex != CACHE_INVALID_U8 &&
+                                 cellFillIndex == breakInfoActual->valueBreakFillIndex);
 
     if (cellIsEnd && blinkOffEndStrip)
     {
@@ -837,6 +904,13 @@ static inline u8 apply_blink_off_overrides(
 
 /**
  * Check if any blink-off tileset is provided for the active trail mode.
+ *
+ * Scans all segments for non-NULL blink-off tilesets (damage or gain).
+ * Called once per trail mode change to cache the result in GaugeLayout.
+ *
+ * @param layout    Layout to inspect
+ * @param trailMode GAUGE_TRAIL_DAMAGE or GAUGE_TRAIL_GAIN
+ * @return 1 if any segment has blink-off tilesets, 0 otherwise
  */
 static inline u8 layout_has_blink_off_mode(const GaugeLayout *layout, u8 trailMode)
 {
@@ -878,21 +952,28 @@ static inline u8 layout_has_blink_off_mode(const GaugeLayout *layout, u8 trailMo
 
 
 /**
- * Upload a cell tile from ROM strip to VRAM (fixed mode).
+ * Upload a tile from a ROM strip to VRAM if not already cached (fixed mode).
+ *
+ * Compares the desired strip and tile index against the cell's cache.
+ * If different, queues a DMA transfer and updates the cache.
+ *
+ * @param cell            Stream cell with VRAM address and cache
+ * @param wantedStrip     ROM strip to read from (NULL = skip)
+ * @param desiredStripIdx Tile index within the strip (0..44 for 45-tile, 0..63 for 64-tile)
  */
 static inline void upload_cell_if_needed(GaugeStreamCell *cell,
                                          const u32 *wantedStrip,
                                          u8 desiredStripIdx)
 {
     if (!wantedStrip) return;
-    if (cell->loadedFillIdx == desiredStripIdx &&
-        cell->loadedFillStrip45 == wantedStrip)
+    if (cell->cachedFillIndex == desiredStripIdx &&
+        cell->cachedStrip == wantedStrip)
         return;
 
     const u32 *src = wantedStrip + FILL_IDX_TO_OFFSET(desiredStripIdx);
     VDP_loadTileData(src, cell->vramTileIndex, 1, DMA_QUEUE);
-    cell->loadedFillIdx = desiredStripIdx;
-    cell->loadedFillStrip45 = wantedStrip;
+    cell->cachedFillIndex = desiredStripIdx;
+    cell->cachedStrip = wantedStrip;
 }
 
 /**
@@ -933,23 +1014,35 @@ static void build_bridge_luts(GaugeLayout *layout)
         layout->bridgeBreakBoundaryByFillIndex[i] = 0;
     }
 
+    /* Scan adjacent cell pairs looking for segment boundaries.
+     * At each boundary we mark:
+     *   bridgeEnd[i]   = 1  -> cell i is a bridge cell (last cell of its segment,
+     *                          rendered with the bridge tileset instead of body)
+     *   bridgeBreak[j] = 1  -> cell j is a BREAK cell (forced fully-filled when
+     *                          gauge edge is past this point, so the bridge
+     *                          transition tile has a clean left neighbor)
+     *   bridgeBreakBoundary[j] = fillIndex of the bridge cell that j protects */
     for (u8 fillIndex = 0; (u16)(fillIndex + 1) < layout->length; fillIndex++)
     {
         const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
         const u8 nextCellIndex = layout->cellIndexByFillIndex[fillIndex + 1];
-        const u8 segId = layout->segmentIdByCell[cellIndex];
+        const u8 segmentId = layout->segmentIdByCell[cellIndex];
         const u8 nextSegId = layout->segmentIdByCell[nextCellIndex];
 
-        if (segId == nextSegId)
+        /* Same segment: no boundary here */
+        if (segmentId == nextSegId)
             continue;
 
-        if (layout->tilesetBridgeBySegment[segId] || layout->gainTilesetBridgeBySegment[segId])
+        /* Segment boundary detected between fillIndex and fillIndex+1 */
+        if (layout->tilesetBridgeBySegment[segmentId] || layout->gainTilesetBridgeBySegment[segmentId])
         {
+            /* Bridge tileset exists: mark this cell as bridge end */
             layout->bridgeEndByFillIndex[fillIndex] = 1;
             if (fillIndex > 0)
             {
+                /* Mark the cell before the bridge as BREAK (forced full) */
                 const u8 prevCellIndex = layout->cellIndexByFillIndex[fillIndex - 1];
-                if (layout->segmentIdByCell[prevCellIndex] == segId)
+                if (layout->segmentIdByCell[prevCellIndex] == segmentId)
                 {
                     layout->bridgeBreakByFillIndex[fillIndex - 1] = 1;
                     layout->bridgeBreakBoundaryByFillIndex[fillIndex - 1] = fillIndex;
@@ -958,6 +1051,7 @@ static void build_bridge_luts(GaugeLayout *layout)
         }
         else
         {
+            /* No bridge tileset: treat boundary cell itself as BREAK */
             layout->bridgeBreakByFillIndex[fillIndex] = 1;
             layout->bridgeBreakBoundaryByFillIndex[fillIndex] = fillIndex;
         }
@@ -971,17 +1065,17 @@ static void build_bridge_luts(GaugeLayout *layout)
 
 void GaugeLayout_initEx(GaugeLayout *layout,
                         u8 length,
-                        GaugeFillDirection fillDir,
+                        GaugeFillDirection fillDirection,
                         const u32 * const *bodyTilesets,
                         const u32 * const *endTilesets,
                         const u32 * const *trailTilesets,
                         const u32 * const *bridgeTilesets,
                         const u8 *segmentIdByCell,
                         GaugeOrientation orientation,
-                        u8 paletteLine,
+                        u8 palette,
                         u8 priority,
-                        u8 vflip,
-                        u8 hflip)
+                        u8 verticalFlip,
+                        u8 horizontalFlip)
 {
     /* Validate and clamp length */
     if (length == 0) length = 1;
@@ -1047,17 +1141,17 @@ void GaugeLayout_initEx(GaugeLayout *layout,
     }
 
     /* Set fill direction */
-    if (fillDir == GAUGE_FILL_REVERSE)
+    if (fillDirection == GAUGE_FILL_REVERSE)
         GaugeLayout_setFillReverse(layout);
     else
         GaugeLayout_setFillForward(layout);
 
     /* Set visual properties */
     layout->orientation = orientation;
-    layout->paletteLine = paletteLine;
+    layout->palette = palette;
     layout->priority = priority ? 1 : 0;
-    layout->vflip = vflip ? 1 : 0;
-    layout->hflip = hflip ? 1 : 0;
+    layout->verticalFlip = verticalFlip ? 1 : 0;
+    layout->horizontalFlip = horizontalFlip ? 1 : 0;
 
     /* Initialize cached flags (computed later by setters/build) */
     layout->hasBlinkOff = 0;
@@ -1068,20 +1162,21 @@ void GaugeLayout_initEx(GaugeLayout *layout,
 
 void GaugeLayout_init(GaugeLayout *layout,
                       u8 length,
-                      GaugeFillDirection fillDir,
+                      GaugeFillDirection fillDirection,
                       const u32 * const *tilesets,
                       const u8 *segmentIdByCell,
                       GaugeOrientation orientation,
-                      u8 paletteLine,
+                      u8 palette,
                       u8 priority,
-                      u8 vflip,
-                      u8 hflip)
+                      u8 verticalFlip,
+                      u8 horizontalFlip)
 {
-    GaugeLayout_initEx(layout, length, fillDir, tilesets, NULL,
-                       NULL, NULL, segmentIdByCell, orientation, paletteLine,
-                       priority, vflip, hflip);
+    GaugeLayout_initEx(layout, length, fillDirection, tilesets, NULL,
+                       NULL, NULL, segmentIdByCell, orientation, palette,
+                       priority, verticalFlip, horizontalFlip);
 }
 
+/** Set fill direction to forward: cell 0 fills first (left-to-right / top-to-bottom). */
 void GaugeLayout_setFillForward(GaugeLayout *layout)
 {
     for (u8 c = 0; c < layout->length; c++)
@@ -1094,6 +1189,7 @@ void GaugeLayout_setFillForward(GaugeLayout *layout)
     build_pip_luts(layout);
 }
 
+/** Set pixel offset for fill computation (used for multi-part gauge windows). */
 void GaugeLayout_setFillOffset(GaugeLayout *layout, u16 fillOffsetPixels)
 {
     if (!layout)
@@ -1102,6 +1198,7 @@ void GaugeLayout_setFillOffset(GaugeLayout *layout, u16 fillOffsetPixels)
     layout->fillOffset = fillOffsetPixels;
 }
 
+/** Set fill direction to reverse: last cell fills first (right-to-left / bottom-to-top). */
 void GaugeLayout_setFillReverse(GaugeLayout *layout)
 {
     for (u8 c = 0; c < layout->length; c++)
@@ -1115,6 +1212,12 @@ void GaugeLayout_setFillReverse(GaugeLayout *layout)
     build_pip_luts(layout);
 }
 
+/**
+ * Create a mirrored copy of a layout (for P2/opponent side).
+ *
+ * Reverses segment order, swaps fill direction, and sets appropriate flip flags.
+ * Copies all tilesets by reference (no deep copy needed since tilesets are in ROM).
+ */
 void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src)
 {
     dst->length = src->length;
@@ -1180,19 +1283,19 @@ void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src)
 
     /* Copy base visual properties */
     dst->orientation = src->orientation;
-    dst->paletteLine = src->paletteLine;
+    dst->palette = src->palette;
     dst->priority = src->priority;
 
     /* Set flip based on orientation */
     if (src->orientation == GAUGE_ORIENT_HORIZONTAL)
     {
-        dst->hflip = 1;
-        dst->vflip = 0;
+        dst->horizontalFlip = 1;
+        dst->verticalFlip = 0;
     }
     else
     {
-        dst->hflip = 0;
-        dst->vflip = 1;
+        dst->horizontalFlip = 0;
+        dst->verticalFlip = 1;
     }
 
     /* Copy cached flags */
@@ -1335,7 +1438,7 @@ void GaugeLogic_initWithAnim(GaugeLogic *logic,
  * Build PIP lookup tables (by fillIndex).
  *
  * PIP boundaries are defined by contiguous runs of segment IDs in fill order.
- * For a given segment style, one logical pip spans pipWidthBySegment[segId] cells.
+ * For a given segment style, one logical pip spans pipWidthBySegment[segmentId] cells.
  * A run can therefore contain multiple pips with the same style.
  */
 static void build_pip_luts(GaugeLayout *layout)
@@ -1353,8 +1456,8 @@ static void build_pip_luts(GaugeLayout *layout)
     while (fillIndex < layout->length && layout->pipCount < GAUGE_MAX_LENGTH)
     {
         const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
-        const u8 segId = layout->segmentIdByCell[cellIndex];
-        u8 styleWidth = layout->pipWidthBySegment[segId];
+        const u8 segmentId = layout->segmentIdByCell[cellIndex];
+        u8 styleWidth = layout->pipWidthBySegment[segmentId];
         if (styleWidth == 0)
             styleWidth = 1;
 
@@ -1363,7 +1466,7 @@ static void build_pip_luts(GaugeLayout *layout)
         while ((u16)(fillIndex + runLength) < layout->length)
         {
             const u8 runCellIndex = layout->cellIndexByFillIndex[fillIndex + runLength];
-            if (layout->segmentIdByCell[runCellIndex] != segId)
+            if (layout->segmentIdByCell[runCellIndex] != segmentId)
                 break;
             runLength++;
         }
@@ -1436,7 +1539,8 @@ void GaugeLogic_tick(GaugeLogic *logic)
     {
         if (logic->valuePixels < logic->valueTargetPixels)
         {
-            /* Increasing (heal animation) */
+            /* Increasing (heal animation).
+             * In gain mode, value waits until hold+blink complete before catching up. */
             if (!(gainMode && (logic->holdFramesRemaining > 0 || logic->blinkFramesRemaining > 0)))
             {
                 const u16 diff = (u16)(logic->valueTargetPixels - logic->valuePixels);
@@ -1604,22 +1708,22 @@ static void init_dynamic_vram(GaugeDynamic *dyn, const GaugeLayout *layout, u16 
         dyn->vramTileFullValue[i] = 0;
         dyn->vramTileFullTrail[i] = 0;
         dyn->vramTileBridge[i] = 0;
-        dyn->loadedFillIdxBridge[i] = CACHE_INVALID_U8;
+        dyn->cachedFillIndexBridge[i] = CACHE_INVALID_U8;
     }
 
     dyn->vramTileCapStart = 0;
     dyn->vramTileCapEnd = 0;
 
     dyn->loadedSegmentPartialValue = CACHE_INVALID_U8;
-    dyn->loadedFillIdxPartialValue = CACHE_INVALID_U8;
+    dyn->cachedFillIndexPartialValue = CACHE_INVALID_U8;
     dyn->loadedSegmentPartialTrail = CACHE_INVALID_U8;
-    dyn->loadedFillIdxPartialTrail = CACHE_INVALID_U8;
+    dyn->cachedFillIndexPartialTrail = CACHE_INVALID_U8;
     dyn->loadedSegmentPartialEnd = CACHE_INVALID_U8;
-    dyn->loadedFillIdxPartialEnd = CACHE_INVALID_U8;
+    dyn->cachedFillIndexPartialEnd = CACHE_INVALID_U8;
     dyn->loadedSegmentPartialTrailSecond = CACHE_INVALID_U8;
-    dyn->loadedFillIdxPartialTrailSecond = CACHE_INVALID_U8;
-    dyn->loadedFillIdxCapStart = CACHE_INVALID_U8;
-    dyn->loadedFillIdxCapEnd = CACHE_INVALID_U8;
+    dyn->cachedFillIndexPartialTrailSecond = CACHE_INVALID_U8;
+    dyn->cachedFillIndexCapStart = CACHE_INVALID_U8;
+    dyn->cachedFillIndexCapEnd = CACHE_INVALID_U8;
     dyn->loadedCapStartUsesBreak = CACHE_INVALID_U8;
     dyn->loadedCapStartUsesTrail = CACHE_INVALID_U8;
 
@@ -1633,21 +1737,21 @@ static void init_dynamic_vram(GaugeDynamic *dyn, const GaugeLayout *layout, u16 
     u8 segmentUsed[GAUGE_MAX_SEGMENTS] = {0};
     for (u8 i = 0; i < layout->length; i++)
     {
-        const u8 segId = layout->segmentIdByCell[i];
-        if (layout->tilesetBySegment[segId] || layout->gainTilesetBySegment[segId])
+        const u8 segmentId = layout->segmentIdByCell[i];
+        if (layout->tilesetBySegment[segmentId] || layout->gainTilesetBySegment[segmentId])
         {
-            segmentUsed[segId] = 1;
+            segmentUsed[segmentId] = 1;
         }
     }
 
     /* Determine if any used segment has END tiles */
-    for (u8 segId = 0; segId < GAUGE_MAX_SEGMENTS; segId++)
+    for (u8 segmentId = 0; segmentId < GAUGE_MAX_SEGMENTS; segmentId++)
     {
-        if (segmentUsed[segId] &&
-            (layout->tilesetEndBySegment[segId] || layout->gainTilesetEndBySegment[segId]))
+        if (segmentUsed[segmentId] &&
+            (layout->tilesetEndBySegment[segmentId] || layout->gainTilesetEndBySegment[segmentId]))
             hasEndTileset = 1;
-        if (segmentUsed[segId] &&
-            (layout->tilesetBridgeBySegment[segId] || layout->gainTilesetBridgeBySegment[segId]))
+        if (segmentUsed[segmentId] &&
+            (layout->tilesetBridgeBySegment[segmentId] || layout->gainTilesetBridgeBySegment[segmentId]))
             bridgeCount++;
     }
 
@@ -1656,30 +1760,30 @@ static void init_dynamic_vram(GaugeDynamic *dyn, const GaugeLayout *layout, u16 
     capEndEnabled = layout->capEndEnabled;
 
     /* Allocate standard tiles for each used segment */
-    for (u8 segId = 0; segId < GAUGE_MAX_SEGMENTS; segId++)
+    for (u8 segmentId = 0; segmentId < GAUGE_MAX_SEGMENTS; segmentId++)
     {
-        if (!segmentUsed[segId])
+        if (!segmentUsed[segmentId])
             continue;
 
         /* Empty tile (0,0) */
-        dyn->vramTileEmpty[segId] = nextVram;
+        dyn->vramTileEmpty[segmentId] = nextVram;
         nextVram++;
 
         /* Full value tile (8,8) */
-        dyn->vramTileFullValue[segId] = nextVram;
+        dyn->vramTileFullValue[segmentId] = nextVram;
         nextVram++;
 
         /* Full trail tile (0,8) - only if trail enabled */
         if (trailEnabled)
         {
-            dyn->vramTileFullTrail[segId] = nextVram;
+            dyn->vramTileFullTrail[segmentId] = nextVram;
             nextVram++;
         }
 
         /* Bridge tile (per segment) */
-        if (layout->tilesetBridgeBySegment[segId] || layout->gainTilesetBridgeBySegment[segId])
+        if (layout->tilesetBridgeBySegment[segmentId] || layout->gainTilesetBridgeBySegment[segmentId])
         {
-            dyn->vramTileBridge[segId] = nextVram;
+            dyn->vramTileBridge[segmentId] = nextVram;
             nextVram++;
         }
     }
@@ -1733,41 +1837,48 @@ static void init_dynamic_vram(GaugeDynamic *dyn, const GaugeLayout *layout, u16 
 }
 
 /**
- * Preload standard tiles for dynamic mode.
+ * Preload standard tiles for dynamic mode (called once at init).
+ *
+ * Uploads the 3 "static" tiles for each segment (empty, full value, full trail)
+ * to their pre-allocated VRAM slots. These tiles never change at runtime.
+ *
+ * @param dyn          Dynamic VRAM data (contains VRAM tile indices)
+ * @param layout       Layout with tileset pointers
+ * @param trailEnabled 1 if trail effect is active (uploads full trail tiles)
  */
 static void preload_dynamic_standard_tiles(GaugeDynamic *dyn, const GaugeLayout *layout, u8 trailEnabled)
 {
     const u8 emptyIndex = STRIP_INDEX_EMPTY;
     const u8 fullValueIndex = STRIP_INDEX_FULL;
     const u8 fullTrailIndexBody = STRIP_INDEX_FULL_TRAIL;
-    const u8 fullTrailIndexTrail = s_trailTileStripsIndexByValueTrail[0][8]; /* value=0, trail=8 */
+    const u8 fullTrailIndexTrail = s_trailTileIndexByValueTrail[0][8]; /* value=0, trail=8 */
 
-    for (u8 segId = 0; segId < GAUGE_MAX_SEGMENTS; segId++)
+    for (u8 segmentId = 0; segmentId < GAUGE_MAX_SEGMENTS; segmentId++)
     {
-        const u32 *bodyStrip = select_base_strip(layout->tilesetBySegment[segId],
-                                                 layout->gainTilesetBySegment[segId],
+        const u32 *bodyStrip = select_base_strip(layout->tilesetBySegment[segmentId],
+                                                 layout->gainTilesetBySegment[segmentId],
                                                  GAUGE_TRAIL_DAMAGE);
         if (!bodyStrip)
             continue;
 
         /* Upload empty tile */
-        if (dyn->vramTileEmpty[segId] != 0)
-            upload_fill_tile(bodyStrip, emptyIndex, dyn->vramTileEmpty[segId], DMA_QUEUE);
+        if (dyn->vramTileEmpty[segmentId] != 0)
+            upload_fill_tile(bodyStrip, emptyIndex, dyn->vramTileEmpty[segmentId], DMA_QUEUE);
 
         /* Upload full value tile */
-        if (dyn->vramTileFullValue[segId] != 0)
-            upload_fill_tile(bodyStrip, fullValueIndex, dyn->vramTileFullValue[segId], DMA_QUEUE);
+        if (dyn->vramTileFullValue[segmentId] != 0)
+            upload_fill_tile(bodyStrip, fullValueIndex, dyn->vramTileFullValue[segmentId], DMA_QUEUE);
 
         /* Upload full trail tile (only if trail enabled) */
-        if (trailEnabled && dyn->vramTileFullTrail[segId] != 0)
+        if (trailEnabled && dyn->vramTileFullTrail[segmentId] != 0)
         {
-            const u32 *trailStrip = select_base_strip(layout->tilesetTrailBySegment[segId],
-                                                      layout->gainTilesetTrailBySegment[segId],
+            const u32 *trailStrip = select_base_strip(layout->tilesetTrailBySegment[segmentId],
+                                                      layout->gainTilesetTrailBySegment[segmentId],
                                                       GAUGE_TRAIL_DAMAGE);
             if (trailStrip)
-                upload_fill_tile(trailStrip, fullTrailIndexTrail, dyn->vramTileFullTrail[segId], DMA_QUEUE);
+                upload_fill_tile(trailStrip, fullTrailIndexTrail, dyn->vramTileFullTrail[segmentId], DMA_QUEUE);
             else
-                upload_fill_tile(bodyStrip, fullTrailIndexBody, dyn->vramTileFullTrail[segId], DMA_QUEUE);
+                upload_fill_tile(bodyStrip, fullTrailIndexBody, dyn->vramTileFullTrail[segmentId], DMA_QUEUE);
         }
     }
 
@@ -1863,6 +1974,13 @@ void GaugeLayout_setPipStyles(GaugeLayout *layout,
     build_pip_luts(layout);
 }
 
+/**
+ * Build a layout from a GaugeLayoutInit config (preferred one-call API).
+ *
+ * Initializes geometry, copies all segment styles (base/gain/blinkOff/gainBlinkOff),
+ * and sets cached flags. Equivalent to calling initEx + setCaps + setGainTrail +
+ * setBlinkOff + setGainBlinkOff individually.
+ */
 void GaugeLayout_build(GaugeLayout *layout, const GaugeLayoutInit *init)
 {
     if (!layout || !init)
@@ -1871,58 +1989,58 @@ void GaugeLayout_build(GaugeLayout *layout, const GaugeLayoutInit *init)
     /* Initialize geometry/visual properties first. */
     GaugeLayout_initEx(layout,
                        init->length,
-                       init->fillDir,
+                       init->fillDirection,
                        NULL, NULL, NULL, NULL,
                        init->segmentIdByCell,
                        init->orientation,
-                       init->paletteLine,
+                       init->palette,
                        init->priority,
-                       init->vflip,
-                       init->hflip);
+                       init->verticalFlip,
+                       init->horizontalFlip);
 
     /* Apply segment styles directly (no large stack temporaries). */
     if (init->segmentStyles)
     {
-        for (u8 segId = 0; segId < GAUGE_MAX_SEGMENTS; segId++)
+        for (u8 segmentId = 0; segmentId < GAUGE_MAX_SEGMENTS; segmentId++)
         {
-            const GaugeSegmentStyle *style = &init->segmentStyles[segId];
+            const GaugeSegmentStyle *style = &init->segmentStyles[segmentId];
 
-            layout->tilesetBySegment[segId] = style->base.body;
-            layout->tilesetEndBySegment[segId] = style->base.end;
-            layout->tilesetTrailBySegment[segId] = style->base.trail;
-            layout->tilesetBridgeBySegment[segId] = style->base.bridge;
-            layout->tilesetCapStartBySegment[segId] = style->base.capStart;
-            layout->tilesetCapEndBySegment[segId] = style->base.capEnd;
-            layout->tilesetCapStartBreakBySegment[segId] = style->base.capStartBreak;
-            layout->tilesetCapStartTrailBySegment[segId] = style->base.capStartTrail;
-            layout->capEndBySegment[segId] = style->capEndEnabled ? 1 : 0;
+            layout->tilesetBySegment[segmentId] = style->base.body;
+            layout->tilesetEndBySegment[segmentId] = style->base.end;
+            layout->tilesetTrailBySegment[segmentId] = style->base.trail;
+            layout->tilesetBridgeBySegment[segmentId] = style->base.bridge;
+            layout->tilesetCapStartBySegment[segmentId] = style->base.capStart;
+            layout->tilesetCapEndBySegment[segmentId] = style->base.capEnd;
+            layout->tilesetCapStartBreakBySegment[segmentId] = style->base.capStartBreak;
+            layout->tilesetCapStartTrailBySegment[segmentId] = style->base.capStartTrail;
+            layout->capEndBySegment[segmentId] = style->capEndEnabled ? 1 : 0;
 
-            layout->gainTilesetBySegment[segId] = style->gain.body;
-            layout->gainTilesetEndBySegment[segId] = style->gain.end;
-            layout->gainTilesetTrailBySegment[segId] = style->gain.trail;
-            layout->gainTilesetBridgeBySegment[segId] = style->gain.bridge;
-            layout->gainTilesetCapStartBySegment[segId] = style->gain.capStart;
-            layout->gainTilesetCapEndBySegment[segId] = style->gain.capEnd;
-            layout->gainTilesetCapStartBreakBySegment[segId] = style->gain.capStartBreak;
-            layout->gainTilesetCapStartTrailBySegment[segId] = style->gain.capStartTrail;
+            layout->gainTilesetBySegment[segmentId] = style->gain.body;
+            layout->gainTilesetEndBySegment[segmentId] = style->gain.end;
+            layout->gainTilesetTrailBySegment[segmentId] = style->gain.trail;
+            layout->gainTilesetBridgeBySegment[segmentId] = style->gain.bridge;
+            layout->gainTilesetCapStartBySegment[segmentId] = style->gain.capStart;
+            layout->gainTilesetCapEndBySegment[segmentId] = style->gain.capEnd;
+            layout->gainTilesetCapStartBreakBySegment[segmentId] = style->gain.capStartBreak;
+            layout->gainTilesetCapStartTrailBySegment[segmentId] = style->gain.capStartTrail;
 
-            layout->blinkOffTilesetBySegment[segId] = style->blinkOff.body;
-            layout->blinkOffTilesetEndBySegment[segId] = style->blinkOff.end;
-            layout->blinkOffTilesetTrailBySegment[segId] = style->blinkOff.trail;
-            layout->blinkOffTilesetBridgeBySegment[segId] = style->blinkOff.bridge;
-            layout->blinkOffTilesetCapStartBySegment[segId] = style->blinkOff.capStart;
-            layout->blinkOffTilesetCapEndBySegment[segId] = style->blinkOff.capEnd;
-            layout->blinkOffTilesetCapStartBreakBySegment[segId] = style->blinkOff.capStartBreak;
-            layout->blinkOffTilesetCapStartTrailBySegment[segId] = style->blinkOff.capStartTrail;
+            layout->blinkOffTilesetBySegment[segmentId] = style->blinkOff.body;
+            layout->blinkOffTilesetEndBySegment[segmentId] = style->blinkOff.end;
+            layout->blinkOffTilesetTrailBySegment[segmentId] = style->blinkOff.trail;
+            layout->blinkOffTilesetBridgeBySegment[segmentId] = style->blinkOff.bridge;
+            layout->blinkOffTilesetCapStartBySegment[segmentId] = style->blinkOff.capStart;
+            layout->blinkOffTilesetCapEndBySegment[segmentId] = style->blinkOff.capEnd;
+            layout->blinkOffTilesetCapStartBreakBySegment[segmentId] = style->blinkOff.capStartBreak;
+            layout->blinkOffTilesetCapStartTrailBySegment[segmentId] = style->blinkOff.capStartTrail;
 
-            layout->gainBlinkOffTilesetBySegment[segId] = style->gainBlinkOff.body;
-            layout->gainBlinkOffTilesetEndBySegment[segId] = style->gainBlinkOff.end;
-            layout->gainBlinkOffTilesetTrailBySegment[segId] = style->gainBlinkOff.trail;
-            layout->gainBlinkOffTilesetBridgeBySegment[segId] = style->gainBlinkOff.bridge;
-            layout->gainBlinkOffTilesetCapStartBySegment[segId] = style->gainBlinkOff.capStart;
-            layout->gainBlinkOffTilesetCapEndBySegment[segId] = style->gainBlinkOff.capEnd;
-            layout->gainBlinkOffTilesetCapStartBreakBySegment[segId] = style->gainBlinkOff.capStartBreak;
-            layout->gainBlinkOffTilesetCapStartTrailBySegment[segId] = style->gainBlinkOff.capStartTrail;
+            layout->gainBlinkOffTilesetBySegment[segmentId] = style->gainBlinkOff.body;
+            layout->gainBlinkOffTilesetEndBySegment[segmentId] = style->gainBlinkOff.end;
+            layout->gainBlinkOffTilesetTrailBySegment[segmentId] = style->gainBlinkOff.trail;
+            layout->gainBlinkOffTilesetBridgeBySegment[segmentId] = style->gainBlinkOff.bridge;
+            layout->gainBlinkOffTilesetCapStartBySegment[segmentId] = style->gainBlinkOff.capStart;
+            layout->gainBlinkOffTilesetCapEndBySegment[segmentId] = style->gainBlinkOff.capEnd;
+            layout->gainBlinkOffTilesetCapStartBreakBySegment[segmentId] = style->gainBlinkOff.capStartBreak;
+            layout->gainBlinkOffTilesetCapStartTrailBySegment[segmentId] = style->gainBlinkOff.capStartTrail;
         }
     }
 
@@ -1964,31 +2082,45 @@ void GaugeLayout_build(GaugeLayout *layout, const GaugeLayoutInit *init)
 }
 
 /**
- * Reset dynamic caches that depend on blink state.
+ * Reset all dynamic VRAM caches to force re-upload on next render.
+ *
+ * Called when blink state or trail mode changes, since the cached tiles
+ * may now be from the wrong tileset context (e.g., base vs blink-off).
+ *
+ * @param dyn  Dynamic VRAM data to reset
  */
 static void reset_dynamic_blink_cache(GaugeDynamic *dyn)
 {
     dyn->loadedSegmentPartialValue = CACHE_INVALID_U8;
-    dyn->loadedFillIdxPartialValue = CACHE_INVALID_U8;
+    dyn->cachedFillIndexPartialValue = CACHE_INVALID_U8;
     dyn->loadedSegmentPartialTrail = CACHE_INVALID_U8;
-    dyn->loadedFillIdxPartialTrail = CACHE_INVALID_U8;
+    dyn->cachedFillIndexPartialTrail = CACHE_INVALID_U8;
     dyn->loadedSegmentPartialEnd = CACHE_INVALID_U8;
-    dyn->loadedFillIdxPartialEnd = CACHE_INVALID_U8;
+    dyn->cachedFillIndexPartialEnd = CACHE_INVALID_U8;
     dyn->loadedSegmentPartialTrailSecond = CACHE_INVALID_U8;
-    dyn->loadedFillIdxPartialTrailSecond = CACHE_INVALID_U8;
-    dyn->loadedFillIdxCapStart = CACHE_INVALID_U8;
-    dyn->loadedFillIdxCapEnd = CACHE_INVALID_U8;
+    dyn->cachedFillIndexPartialTrailSecond = CACHE_INVALID_U8;
+    dyn->cachedFillIndexCapStart = CACHE_INVALID_U8;
+    dyn->cachedFillIndexCapEnd = CACHE_INVALID_U8;
     dyn->loadedCapStartUsesBreak = CACHE_INVALID_U8;
     dyn->loadedCapStartUsesTrail = CACHE_INVALID_U8;
 
     for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
     {
-        dyn->loadedFillIdxBridge[i] = CACHE_INVALID_U8;
+        dyn->cachedFillIndexBridge[i] = CACHE_INVALID_U8;
     }
 }
 
 /**
- * Reload full trail tiles when blink state toggles (dynamic mode).
+ * Reload the "full trail" standard tiles when blink state or trail mode changes.
+ *
+ * In dynamic mode, full trail tiles (value=0, trail=8) are pre-loaded once.
+ * When blink toggles, they must be re-uploaded from the correct tileset
+ * (normal or blink-off) so that TRAIL_FULL cells display correctly.
+ *
+ * @param dyn          Dynamic VRAM data
+ * @param layout       Layout with tileset pointers
+ * @param useBlinkOff  1 if blink-off tilesets should be used
+ * @param trailMode    Current trail mode (DAMAGE or GAIN)
  */
 static void reload_dynamic_full_trail_tiles(GaugeDynamic *dyn,
                                             const GaugeLayout *layout,
@@ -1996,17 +2128,17 @@ static void reload_dynamic_full_trail_tiles(GaugeDynamic *dyn,
                                             u8 trailMode)
 {
     const u8 fullTrailIndexBody = STRIP_INDEX_FULL_TRAIL;
-    const u8 fullTrailIndexTrail = s_trailTileStripsIndexByValueTrail[0][8];
+    const u8 fullTrailIndexTrail = s_trailTileIndexByValueTrail[0][8];
 
-    for (u8 segId = 0; segId < GAUGE_MAX_SEGMENTS; segId++)
+    for (u8 segmentId = 0; segmentId < GAUGE_MAX_SEGMENTS; segmentId++)
     {
-        const u16 vramTile = dyn->vramTileFullTrail[segId];
+        const u16 vramTile = dyn->vramTileFullTrail[segmentId];
         if (vramTile == 0)
             continue;
 
         const u32 *blinkOffTrailStrip = select_blink_strip(
-            layout->blinkOffTilesetTrailBySegment[segId],
-            layout->gainBlinkOffTilesetTrailBySegment[segId],
+            layout->blinkOffTilesetTrailBySegment[segmentId],
+            layout->gainBlinkOffTilesetTrailBySegment[segmentId],
             trailMode);
 
         if (useBlinkOff && blinkOffTrailStrip)
@@ -2016,11 +2148,11 @@ static void reload_dynamic_full_trail_tiles(GaugeDynamic *dyn,
         }
         else
         {
-            const u32 *trailStrip = select_base_strip(layout->tilesetTrailBySegment[segId],
-                                                      layout->gainTilesetTrailBySegment[segId],
+            const u32 *trailStrip = select_base_strip(layout->tilesetTrailBySegment[segmentId],
+                                                      layout->gainTilesetTrailBySegment[segmentId],
                                                       trailMode);
-            const u32 *bodyStrip = select_base_strip(layout->tilesetBySegment[segId],
-                                                     layout->gainTilesetBySegment[segId],
+            const u32 *bodyStrip = select_base_strip(layout->tilesetBySegment[segmentId],
+                                                     layout->gainTilesetBySegment[segmentId],
                                                      trailMode);
             if (trailStrip)
                 upload_fill_tile(trailStrip, fullTrailIndexTrail, vramTile, DMA);
@@ -2040,26 +2172,31 @@ static void reload_dynamic_full_body_tiles(GaugeDynamic *dyn,
     const u8 fullValueIndex = STRIP_INDEX_FULL;
     const u8 emptyIndex = STRIP_INDEX_EMPTY;
 
-    for (u8 segId = 0; segId < GAUGE_MAX_SEGMENTS; segId++)
+    for (u8 segmentId = 0; segmentId < GAUGE_MAX_SEGMENTS; segmentId++)
     {
-        const u32 *bodyStrip = select_base_strip(layout->tilesetBySegment[segId],
-                                                 layout->gainTilesetBySegment[segId],
+        const u32 *bodyStrip = select_base_strip(layout->tilesetBySegment[segmentId],
+                                                 layout->gainTilesetBySegment[segmentId],
                                                  trailMode);
         if (!bodyStrip)
             continue;
 
-        const u16 vramTileFull = dyn->vramTileFullValue[segId];
+        const u16 vramTileFull = dyn->vramTileFullValue[segmentId];
         if (vramTileFull)
             upload_fill_tile(bodyStrip, fullValueIndex, vramTileFull, DMA);
 
-        const u16 vramTileEmpty = dyn->vramTileEmpty[segId];
+        const u16 vramTileEmpty = dyn->vramTileEmpty[segmentId];
         if (vramTileEmpty)
             upload_fill_tile(bodyStrip, emptyIndex, vramTileEmpty, DMA);
     }
 }
 
 /**
- * Initialize tilemap positions and write initial tilemap (all empty).
+ * Initialize tilemap positions, cell validity, and write initial tilemap (all empty).
+ *
+ * Pre-computes tilemap X/Y coordinates and cell validity for each cell to avoid
+ * per-frame recalculation. Then writes all cells as empty tiles to the WINDOW plane.
+ *
+ * @param part  GaugePart to initialize (must have layout and dyn set)
  */
 static void init_dynamic_tilemap(GaugePart *part)
 {
@@ -2074,9 +2211,9 @@ static void init_dynamic_tilemap(GaugePart *part)
                         &layout->tilemapPosByCell[cellIndex].y);
 
         /* Pre-compute cell validity (avoids tileset NULL check in render loop) */
-        const u8 segId = layout->segmentIdByCell[cellIndex];
-        dyn->cellValid[cellIndex] = (layout->tilesetBySegment[segId] != NULL ||
-                                     layout->gainTilesetBySegment[segId] != NULL) ? 1 : 0;
+        const u8 segmentId = layout->segmentIdByCell[cellIndex];
+        dyn->cellValid[cellIndex] = (layout->tilesetBySegment[segmentId] != NULL ||
+                                     layout->gainTilesetBySegment[segmentId] != NULL) ? 1 : 0;
     }
 
     /* Write initial tilemap (all empty tiles) */
@@ -2085,10 +2222,10 @@ static void init_dynamic_tilemap(GaugePart *part)
         if (!dyn->cellValid[cellIndex])
             continue;
 
-        const u8 segId = layout->segmentIdByCell[cellIndex];
-        const u16 vramTile = dyn->vramTileEmpty[segId];
-        const u16 attr = TILE_ATTR_FULL(layout->paletteLine, layout->priority,
-                                        layout->vflip, layout->hflip, vramTile);
+        const u8 segmentId = layout->segmentIdByCell[cellIndex];
+        const u16 vramTile = dyn->vramTileEmpty[segmentId];
+        const u16 attr = TILE_ATTR_FULL(layout->palette, layout->priority,
+                                        layout->verticalFlip, layout->horizontalFlip, vramTile);
 
         VDP_setTileMapXY(WINDOW, attr,
                          layout->tilemapPosByCell[cellIndex].x,
@@ -2100,8 +2237,13 @@ static void init_dynamic_tilemap(GaugePart *part)
 }
 
 /**
- * Initialize tilemap for compact PIP mode.
- * One VRAM tile per cell, sourced from segment compact strips.
+ * Initialize tilemap for PIP mode (one VRAM tile per cell, fixed VRAM).
+ *
+ * Allocates one VRAM tile per cell, uploads the EMPTY state from each segment's
+ * compact strip, and writes the initial tilemap. Also sets up GaugeStreamCell
+ * entries for per-cell DMA updates at runtime.
+ *
+ * @param part  GaugePart to initialize (must have layout set)
  */
 static void write_tilemap_pip_init(GaugePart *part)
 {
@@ -2110,8 +2252,8 @@ static void write_tilemap_pip_init(GaugePart *part)
 
     for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
     {
-        const u8 segId = layout->segmentIdByCell[cellIndex];
-        const u32 *pipStrip = layout->pipTilesetBySegment[segId];
+        const u8 segmentId = layout->segmentIdByCell[cellIndex];
+        const u32 *pipStrip = layout->pipTilesetBySegment[segmentId];
         if (!pipStrip)
             continue;
 
@@ -2119,8 +2261,8 @@ static void write_tilemap_pip_init(GaugePart *part)
             break;
 
         const u16 vramTile = (u16)(part->vramBase + part->cellCount);
-        const u16 attr = TILE_ATTR_FULL(layout->paletteLine, layout->priority,
-                                        layout->vflip, layout->hflip, vramTile);
+        const u16 attr = TILE_ATTR_FULL(layout->palette, layout->priority,
+                                        layout->verticalFlip, layout->horizontalFlip, vramTile);
 
         u16 x, y;
         compute_tile_xy(layout->orientation, part->originX, part->originY, cellIndex, &x, &y);
@@ -2144,15 +2286,21 @@ static void write_tilemap_pip_init(GaugePart *part)
         part->cells[part->cellCount].endFillStrip45 = NULL;
         part->cells[part->cellCount].trailFillStrip64 = NULL;
         part->cells[part->cellCount].bridgeFillStrip45 = NULL;
-        part->cells[part->cellCount].loadedFillStrip45 = pipStrip;
-        part->cells[part->cellCount].loadedFillIdx = localTile;
+        part->cells[part->cellCount].cachedStrip = pipStrip;
+        part->cells[part->cellCount].cachedFillIndex = localTile;
         part->cells[part->cellCount].cellIndex = cellIndex;
         part->cellCount++;
     }
 }
 
 /**
- * Initialize tilemap for fixed mode (one VRAM tile per cell).
+ * Initialize tilemap for fixed VRAM mode (one VRAM tile per cell, fill mode).
+ *
+ * Allocates one VRAM tile per valid cell, pre-caches tileset strip pointers
+ * (body/end/trail/bridge) per cell to avoid per-frame segment lookups, uploads
+ * initial empty tiles, and writes the tilemap on the WINDOW plane.
+ *
+ * @param part  GaugePart to initialize (must have layout and vramBase set)
  */
 static void write_tilemap_fixed_init(GaugePart *part)
 {
@@ -2161,9 +2309,9 @@ static void write_tilemap_fixed_init(GaugePart *part)
 
     for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
     {
-        const u8 segId = layout->segmentIdByCell[cellIndex];
-        const u32 *bodyStrip = layout->tilesetBySegment[segId];
-        const u32 *gainBodyStrip = layout->gainTilesetBySegment[segId];
+        const u8 segmentId = layout->segmentIdByCell[cellIndex];
+        const u32 *bodyStrip = layout->tilesetBySegment[segmentId];
+        const u32 *gainBodyStrip = layout->gainTilesetBySegment[segmentId];
 
         if (!bodyStrip && !gainBodyStrip)
             continue;
@@ -2172,8 +2320,8 @@ static void write_tilemap_fixed_init(GaugePart *part)
             break;
 
         const u16 vramTile = (u16)(part->vramBase + part->cellCount);
-        const u16 attr = TILE_ATTR_FULL(layout->paletteLine, layout->priority,
-                                        layout->vflip, layout->hflip, vramTile);
+        const u16 attr = TILE_ATTR_FULL(layout->palette, layout->priority,
+                                        layout->verticalFlip, layout->horizontalFlip, vramTile);
 
         u16 x, y;
         compute_tile_xy(layout->orientation, part->originX, part->originY, cellIndex, &x, &y);
@@ -2181,29 +2329,111 @@ static void write_tilemap_fixed_init(GaugePart *part)
         VDP_setTileMapXY(WINDOW, attr, x, y);
 
         /* Precompute per-cell strips to avoid segment lookups every frame */
-        const u32 *endStrip = layout->tilesetEndBySegment[segId];
-        const u32 *trailStrip = layout->tilesetTrailBySegment[segId];
-        const u32 *bridgeStrip = layout->tilesetBridgeBySegment[segId];
+        const u32 *endStrip = layout->tilesetEndBySegment[segmentId];
+        const u32 *trailStrip = layout->tilesetTrailBySegment[segmentId];
+        const u32 *bridgeStrip = layout->tilesetBridgeBySegment[segmentId];
 
         part->cells[part->cellCount].vramTileIndex = vramTile;
         part->cells[part->cellCount].bodyFillStrip45 = bodyStrip;
         part->cells[part->cellCount].endFillStrip45 = endStrip;
         part->cells[part->cellCount].trailFillStrip64 = trailStrip;
         part->cells[part->cellCount].bridgeFillStrip45 = bridgeStrip;
-        part->cells[part->cellCount].loadedFillStrip45 = NULL;
-        part->cells[part->cellCount].loadedFillIdx = CACHE_INVALID_U8;
+        part->cells[part->cellCount].cachedStrip = NULL;
+        part->cells[part->cellCount].cachedFillIndex = CACHE_INVALID_U8;
         part->cells[part->cellCount].cellIndex = cellIndex;
         part->cellCount++;
 
     } 
 }
 
+/* =============================================================================
+   Break zone cell classification (shared by fixed and dynamic modes)
+   =============================================================================
+
+   Classifies a cell within the break zone into one of these types:
+
+     |FULL|VALUE_BREAK|TRAIL_FULL|TRAIL_BREAK|TRAIL_BREAK2|END|EMPTY|
+      <-- value -->|<---------- trail ---------->|
+
+   Both process_fixed_mode() and process_dynamic_mode() use the same
+   classification logic but differ in how they act on the result:
+   - Fixed:   selects ROM strip → DMA tile to per-cell VRAM
+   - Dynamic: selects VRAM tile → optional DMA + tilemap update
+
+   ============================================================================= */
+typedef enum
+{
+    CELL_TYPE_END,           /* Value/trail frontier (uses end tileset) */
+    CELL_TYPE_TRAIL_BREAK,   /* Trail edge cell, after VALUE_BREAK (uses trail tileset) */
+    CELL_TYPE_TRAIL_BREAK2,  /* Second trail break, before END (uses trail tileset) */
+    CELL_TYPE_TRAIL_FULL,    /* Fully covered by trail, no value (uses trail tileset) */
+    CELL_TYPE_VALUE_BREAK,   /* Value edge cell, before trail zone (uses body tileset) */
+    CELL_TYPE_REGION_FULL,   /* Region rendering: fully filled body */
+    CELL_TYPE_REGION_EMPTY,  /* Region rendering: empty body */
+    CELL_TYPE_REGION_TRAIL,  /* Region rendering: full trail */
+    CELL_TYPE_DEFAULT        /* Standard fill computation (no special break zone) */
+} CellBreakType;
+
+/**
+ * Classify a cell's break zone type based on pre-computed break info.
+ *
+ * This is the shared classification logic used by both process_fixed_mode
+ * and process_dynamic_mode to determine which tileset and tile index to use.
+ *
+ * @param breakInfoUsed  Break zone info (normal or blink-off adjusted)
+ * @param cellFillIndex  Fill index of the cell to classify
+ * @param hasEndStrip    1 if segment has an end tileset
+ * @param hasTrailStrip  1 if segment has a trail tileset
+ * @return CellBreakType indicating which visual mode applies
+ */
+static inline CellBreakType classify_break_zone_cell(
+    const GaugeBreakInfo *breakInfoUsed,
+    u8 cellFillIndex,
+    u8 hasEndStrip,
+    u8 hasTrailStrip)
+{
+    if (breakInfoUsed->endFillIndex != CACHE_INVALID_U8 &&
+        hasEndStrip && cellFillIndex == breakInfoUsed->endFillIndex)
+        return CELL_TYPE_END;
+
+    if (breakInfoUsed->trailBreakActive && hasTrailStrip &&
+        cellFillIndex == breakInfoUsed->trailBreakFillIndex)
+        return CELL_TYPE_TRAIL_BREAK;
+
+    if (breakInfoUsed->trailBreakSecondActive && hasTrailStrip &&
+        cellFillIndex == breakInfoUsed->trailBreakFillIndex2)
+        return CELL_TYPE_TRAIL_BREAK2;
+
+    if (breakInfoUsed->trailBreakActive && hasTrailStrip &&
+        cellFillIndex > breakInfoUsed->valueFillIndex &&
+        cellFillIndex < breakInfoUsed->trailFillIndex)
+        return CELL_TYPE_TRAIL_FULL;
+
+    if (breakInfoUsed->valueBreakFillIndex != CACHE_INVALID_U8 &&
+        cellFillIndex == breakInfoUsed->valueBreakFillIndex)
+        return CELL_TYPE_VALUE_BREAK;
+
+    if (breakInfoUsed->regionRenderActive)
+    {
+        if (cellFillIndex < breakInfoUsed->valueFillIndex)
+            return CELL_TYPE_REGION_FULL;
+        if (cellFillIndex > breakInfoUsed->trailFillIndex)
+            return CELL_TYPE_REGION_EMPTY;
+        if (cellFillIndex > breakInfoUsed->valueFillIndex &&
+            cellFillIndex < breakInfoUsed->trailFillIndex)
+            return CELL_TYPE_REGION_TRAIL;
+    }
+
+    return CELL_TYPE_DEFAULT;
+}
+
+
 /**
  * Process fixed mode: stream tiles for all cells via DMA.
  *
  * Each cell has its own dedicated VRAM tile. When the gauge value changes,
  * only the affected cells get new tile data DMA'd from ROM strips.
- * Change detection per cell (loadedFillIdx + loadedFillStrip45) avoids
+ * Change detection per cell (cachedFillIndex + cachedStrip) avoids
  * redundant DMA transfers.
  *
  * Algorithm:
@@ -2233,20 +2463,20 @@ static void process_fixed_mode(GaugePart *part,
     const GaugeLayout *layout = &part->layout;
 
     /* --- Break zone computation ---
-     * brk: used for normal cell classification (trail with blink applied)
-     * brkBridge: used for bridge visibility (trail WITHOUT blink, so bridges
+     * breakInfo: used for normal cell classification (trail with blink applied)
+     * breakInfoActual: used for bridge visibility (trail WITHOUT blink, so bridges
      *            don't flicker on/off during blink phase) */
-    GaugeBreakInfo brk;
-    compute_break_info(layout, valuePixels, trailPixelsRendered, trailMode, &brk);
-    GaugeBreakInfo brkBridge = brk;
+    GaugeBreakInfo breakInfo;
+    compute_break_info(layout, valuePixels, trailPixelsRendered, trailMode, &breakInfo);
+    GaugeBreakInfo breakInfoActual = breakInfo;
     if (trailPixelsActual != trailPixelsRendered)
-        compute_break_info(layout, valuePixels, trailPixelsActual, trailMode, &brkBridge);
+        compute_break_info(layout, valuePixels, trailPixelsActual, trailMode, &breakInfoActual);
 
     /* Early-exit boundaries: cells with fillIndex outside [breakLow..breakHigh]
      * are trivially full or empty (~70-80% of cells). Skips full classification. */
-    const u8 breakLow = (brk.valueBreakFillIndex != CACHE_INVALID_U8)
-                       ? brk.valueBreakFillIndex : brk.valueFillIndex;
-    const u8 breakHigh = brk.trailFillIndex;
+    const u8 breakLow = (breakInfo.valueBreakFillIndex != CACHE_INVALID_U8)
+                       ? breakInfo.valueBreakFillIndex : breakInfo.valueFillIndex;
+    const u8 breakHigh = breakInfo.trailFillIndex;
 
     /* Cap detection */
     const u8 capStartCellIndex = layout->cellIndexByFillIndex[0];
@@ -2263,37 +2493,37 @@ static void process_fixed_mode(GaugePart *part,
         GaugeStreamCell *cell = &part->cells[i];
         const u8 cellIndex = cell->cellIndex;
         const u8 cellFillIndex = layout->fillIndexByCell[cellIndex];
-        const u8 segId = layout->segmentIdByCell[cellIndex];
+        const u8 segmentId = layout->segmentIdByCell[cellIndex];
         const u32 *bodyStrip = select_base_strip(cell->bodyFillStrip45,
-                                                 layout->gainTilesetBySegment[segId],
+                                                 layout->gainTilesetBySegment[segmentId],
                                                  trailMode);
         const u32 *blinkOffBodyStrip = select_blink_strip(
-            layout->blinkOffTilesetBySegment[segId],
-            layout->gainBlinkOffTilesetBySegment[segId],
+            layout->blinkOffTilesetBySegment[segmentId],
+            layout->gainBlinkOffTilesetBySegment[segmentId],
             trailMode);
         /* endStrip, trailStrip, bridgeStrip and blink-off variants are
          * computed lazily below — only when needed (bridge or break zone).
          * Saves 6 x select calls (~6-8 cycles each) for ~70-80% trivial cells. */
 
         /* === Cap end (always uses its tileset) === */
-        if (cellIndex == capEndCellIndex && capEndEnabled && segId == capEndSegId)
+        if (cellIndex == capEndCellIndex && capEndEnabled && segmentId == capEndSegId)
         {
             u8 capValuePx = 0;
             u8 capTrailPx = 0;
             const u32 *capEndStrip = select_base_strip(
-                layout->tilesetCapEndBySegment[segId],
-                layout->gainTilesetCapEndBySegment[segId],
+                layout->tilesetCapEndBySegment[segmentId],
+                layout->gainTilesetCapEndBySegment[segmentId],
                 trailMode);
             u16 capTrailPixels = trailPixelsRendered;
 
             const u32 *capEndBlinkStrip = select_blink_strip(
-                layout->blinkOffTilesetCapEndBySegment[segId],
-                layout->gainBlinkOffTilesetCapEndBySegment[segId],
+                layout->blinkOffTilesetCapEndBySegment[segmentId],
+                layout->gainBlinkOffTilesetCapEndBySegment[segmentId],
                 trailMode);
 
             if (blinkOffActive &&
                 capEndBlinkStrip &&
-                is_cell_in_trail_zone(&brkBridge, cellFillIndex))
+                is_cell_in_trail_zone(&breakInfoActual, cellFillIndex))
             {
                 capEndStrip = capEndBlinkStrip;
                 capTrailPixels = trailPixelsActual;
@@ -2303,36 +2533,36 @@ static void process_fixed_mode(GaugePart *part,
                                   &capValuePx, &capTrailPx);
             upload_cell_if_needed(cell,
                                   capEndStrip,
-                                  s_fillTileStripsIndexByValueTrail[capValuePx][capTrailPx]);
+                                  s_tileIndexByValueTrail[capValuePx][capTrailPx]);
             continue;
         }
 
         /* === Cap start (fixed border at cell 0) === */
-        if (cellIndex == capStartCellIndex && capStartEnabled && segId == capStartSegId)
+        if (cellIndex == capStartCellIndex && capStartEnabled && segmentId == capStartSegId)
         {
             const u32 *capStartStrip = select_base_strip(
-                layout->tilesetCapStartBySegment[segId],
-                layout->gainTilesetCapStartBySegment[segId],
+                layout->tilesetCapStartBySegment[segmentId],
+                layout->gainTilesetCapStartBySegment[segmentId],
                 trailMode);
             const u32 *capStartBreakStrip = select_base_strip(
-                layout->tilesetCapStartBreakBySegment[segId],
-                layout->gainTilesetCapStartBreakBySegment[segId],
+                layout->tilesetCapStartBreakBySegment[segmentId],
+                layout->gainTilesetCapStartBreakBySegment[segmentId],
                 trailMode);
             const u32 *capStartTrailStrip = select_base_strip(
-                layout->tilesetCapStartTrailBySegment[segId],
-                layout->gainTilesetCapStartTrailBySegment[segId],
+                layout->tilesetCapStartTrailBySegment[segmentId],
+                layout->gainTilesetCapStartTrailBySegment[segmentId],
                 trailMode);
             const u32 *capStartBlinkStrip = select_blink_strip(
-                layout->blinkOffTilesetCapStartBySegment[segId],
-                layout->gainBlinkOffTilesetCapStartBySegment[segId],
+                layout->blinkOffTilesetCapStartBySegment[segmentId],
+                layout->gainBlinkOffTilesetCapStartBySegment[segmentId],
                 trailMode);
             const u32 *capStartBlinkBreakStrip = select_blink_strip(
-                layout->blinkOffTilesetCapStartBreakBySegment[segId],
-                layout->gainBlinkOffTilesetCapStartBreakBySegment[segId],
+                layout->blinkOffTilesetCapStartBreakBySegment[segmentId],
+                layout->gainBlinkOffTilesetCapStartBreakBySegment[segmentId],
                 trailMode);
             const u32 *capStartBlinkTrailStrip = select_blink_strip(
-                layout->blinkOffTilesetCapStartTrailBySegment[segId],
-                layout->gainBlinkOffTilesetCapStartTrailBySegment[segId],
+                layout->blinkOffTilesetCapStartTrailBySegment[segmentId],
+                layout->gainBlinkOffTilesetCapStartTrailBySegment[segmentId],
                 trailMode);
 
             if (capStartStrip)
@@ -2341,14 +2571,14 @@ static void process_fixed_mode(GaugePart *part,
                 if (blinkOffActive)
                 {
                     CapStartResult capActual;
-                    classify_cap_start_with_strips(&brkBridge,
+                    classify_cap_start_with_strips(&breakInfoActual,
                                                    cellFillIndex,
                                                    capStartStrip,
                                                    capStartBreakStrip,
                                                    capStartTrailStrip,
                                                    &capActual);
 
-                    const u8 inTrailZone = is_cell_in_trail_zone(&brkBridge, cellFillIndex);
+                    const u8 inTrailZone = is_cell_in_trail_zone(&breakInfoActual, cellFillIndex);
                     const u32 *blinkStrip = NULL;
 
                     if (inTrailZone)
@@ -2368,7 +2598,7 @@ static void process_fixed_mode(GaugePart *part,
                     }
                     else
                     {
-                        classify_cap_start_with_strips(&brk,
+                        classify_cap_start_with_strips(&breakInfo,
                                                        cellFillIndex,
                                                        capStartStrip,
                                                        capStartBreakStrip,
@@ -2378,7 +2608,7 @@ static void process_fixed_mode(GaugePart *part,
                 }
                 else
                 {
-                    classify_cap_start_with_strips(&brk,
+                    classify_cap_start_with_strips(&breakInfo,
                                                    cellFillIndex,
                                                    capStartStrip,
                                                    capStartBreakStrip,
@@ -2393,25 +2623,25 @@ static void process_fixed_mode(GaugePart *part,
         /* === Bridge/BREAK forced rendering (D/B before gauge END) ===
          * Bridge cells sit at segment boundaries. When the gauge's value/trail
          * edge is past this cell, the bridge shows a transition tile.
-         * brkBridge uses trailPixelsActual (ignoring blink) so bridges don't
+         * breakInfoActual uses trailPixelsActual (ignoring blink) so bridges don't
          * flicker during blink phase. */
-        if (brkBridge.endFillIndex != CACHE_INVALID_U8)
+        if (breakInfoActual.endFillIndex != CACHE_INVALID_U8)
         {
             /* Bridge end cell: last cell of a segment with a bridge tileset */
             if (layout->bridgeEndByFillIndex[cellFillIndex] &&
-                brkBridge.endFillIndex > cellFillIndex &&
-                brkBridge.valueFillIndex > cellFillIndex)
+                breakInfoActual.endFillIndex > cellFillIndex &&
+                breakInfoActual.valueFillIndex > cellFillIndex)
             {
                 const u8 nextFillIndex = (u8)(cellFillIndex + 1);
-                const u8 bridgeInTrailZone = is_cell_in_trail_zone(&brkBridge, nextFillIndex);
+                const u8 bridgeInTrailZone = is_cell_in_trail_zone(&breakInfoActual, nextFillIndex);
 
                 /* Lazy: bridge strips computed only for bridge cells (rare) */
                 const u32 *bridgeStrip = select_base_strip(cell->bridgeFillStrip45,
-                                                           layout->gainTilesetBridgeBySegment[segId],
+                                                           layout->gainTilesetBridgeBySegment[segmentId],
                                                            trailMode);
                 const u32 *blinkOffBridgeStrip = select_blink_strip(
-                    layout->blinkOffTilesetBridgeBySegment[segId],
-                    layout->gainBlinkOffTilesetBridgeBySegment[segId],
+                    layout->blinkOffTilesetBridgeBySegment[segmentId],
+                    layout->gainBlinkOffTilesetBridgeBySegment[segmentId],
                     trailMode);
 
                 if (bridgeStrip)
@@ -2419,13 +2649,13 @@ static void process_fixed_mode(GaugePart *part,
                     const u8 useBlinkOffBridge = (blinkOffActive &&
                                                   blinkOffBridgeStrip &&
                                                   bridgeInTrailZone);
-                    const GaugeBreakInfo *bridgeBrk = useBlinkOffBridge ? &brkBridge : &brk;
+                    const GaugeBreakInfo *bridgeBreakInfo = useBlinkOffBridge ? &breakInfoActual : &breakInfo;
                     const u16 bridgeTrailPixels = useBlinkOffBridge ? trailPixelsActual : trailPixelsRendered;
                     const u32 *bridgeStripUse = useBlinkOffBridge
                                                 ? blinkOffBridgeStrip
                                                 : bridgeStrip;
                     const u8 bridgeIdx = compute_bridge_strip_index(
-                        layout, bridgeBrk, cellFillIndex, valuePixels, bridgeTrailPixels);
+                        layout, bridgeBreakInfo, cellFillIndex, valuePixels, bridgeTrailPixels);
                     upload_cell_if_needed(cell, bridgeStripUse, bridgeIdx);
                 }
                 else
@@ -2446,12 +2676,12 @@ static void process_fixed_mode(GaugePart *part,
             if (layout->bridgeBreakByFillIndex[cellFillIndex])
             {
                 const u8 boundaryFillIndex = layout->bridgeBreakBoundaryByFillIndex[cellFillIndex];
-                if (brkBridge.endFillIndex > boundaryFillIndex &&
-                    brkBridge.valueFillIndex > boundaryFillIndex)
+                if (breakInfoActual.endFillIndex > boundaryFillIndex &&
+                    breakInfoActual.valueFillIndex > boundaryFillIndex)
                 {
                     const u32 *breakStripUse = bodyStrip;
                     if (blinkOffActive && blinkOffBodyStrip &&
-                        is_cell_in_trail_zone(&brkBridge, cellFillIndex))
+                        is_cell_in_trail_zone(&breakInfoActual, cellFillIndex))
                     {
                         breakStripUse = blinkOffBodyStrip;
                     }
@@ -2485,149 +2715,112 @@ static void process_fixed_mode(GaugePart *part,
         /* Lazy: remaining strips only for break zone cells (~20-30%).
          * bodyStrip and blinkOffBodyStrip already computed above. */
         const u32 *endStrip = select_base_strip(cell->endFillStrip45,
-                                                layout->gainTilesetEndBySegment[segId],
+                                                layout->gainTilesetEndBySegment[segmentId],
                                                 trailMode);
         const u32 *trailStrip = select_base_strip(cell->trailFillStrip64,
-                                                  layout->gainTilesetTrailBySegment[segId],
+                                                  layout->gainTilesetTrailBySegment[segmentId],
                                                   trailMode);
         const u32 *blinkOffEndStrip = select_blink_strip(
-            layout->blinkOffTilesetEndBySegment[segId],
-            layout->gainBlinkOffTilesetEndBySegment[segId],
+            layout->blinkOffTilesetEndBySegment[segmentId],
+            layout->gainBlinkOffTilesetEndBySegment[segmentId],
             trailMode);
         const u32 *blinkOffTrailStrip = select_blink_strip(
-            layout->blinkOffTilesetTrailBySegment[segId],
-            layout->gainBlinkOffTilesetTrailBySegment[segId],
+            layout->blinkOffTilesetTrailBySegment[segmentId],
+            layout->gainBlinkOffTilesetTrailBySegment[segmentId],
             trailMode);
 
-        /* === Break zone: classify cell by visual mode ===
-         * Priority order:
-         * 1. END (E)          â€” cap/termination tile
-         * 2. TRAIL_BREAK (T)  â€” first trail transition cell (after B)
-         * 3. TRAIL_BREAK2 (T) â€” second trail transition (before E)
-         * 4. TRAIL_FULL (T)   â€” full trail between value and trail edges
-         * 5. VALUE_BREAK (B)  â€” transition cell before value edge
-         * 6. DEFAULT          â€” standard fill or region-based rendering
-         */
-        const GaugeBreakInfo *brkUse = &brk;
+        /* === Break zone classification + strip selection === */
+        const GaugeBreakInfo *breakInfoUsed = &breakInfo;
         u16 trailPixelsUse = trailPixelsRendered;
         u8 useBlinkOff = 0;
 
         if (blinkOffActive)
         {
             useBlinkOff = apply_blink_off_overrides(
-                &brkBridge, cellFillIndex,
+                &breakInfoActual, cellFillIndex,
                 blinkOffEndStrip, blinkOffTrailStrip, blinkOffBodyStrip,
                 &endStrip, &trailStrip, &bodyStrip);
             if (useBlinkOff)
             {
-                brkUse = &brkBridge;
+                breakInfoUsed = &breakInfoActual;
                 trailPixelsUse = trailPixelsActual;
             }
         }
 
-        const u8 cellIsEnd = (brkUse->endFillIndex != CACHE_INVALID_U8 &&
-                              endStrip && cellFillIndex == brkUse->endFillIndex);
-        const u8 cellIsTrailBreak =
-            (brkUse->trailBreakActive && trailStrip && cellFillIndex == brkUse->trailBreakFillIndex);
-        const u8 cellIsTrailBreak2 =
-            (brkUse->trailBreakSecondActive && trailStrip && cellFillIndex == brkUse->trailBreakFillIndex2);
-        const u8 cellIsTrailFull =
-            (brkUse->trailBreakActive && trailStrip &&
-             cellFillIndex > brkUse->valueFillIndex && cellFillIndex < brkUse->trailFillIndex);
-        const u8 cellIsValueBreak = (brkUse->valueBreakFillIndex != CACHE_INVALID_U8 &&
-                                     cellFillIndex == brkUse->valueBreakFillIndex);
+        const CellBreakType cellType = classify_break_zone_cell(
+            breakInfoUsed, cellFillIndex, (endStrip != NULL), (trailStrip != NULL));
 
         const u32 *stripToUse = bodyStrip;
         u8 desiredStripIndex = 0;
 
-        if (cellIsEnd)
+        switch (cellType)
         {
-            /* END (E) uses the end strip and the standard fill LUT. */
+        case CELL_TYPE_END:
             stripToUse = endStrip;
-            desiredStripIndex = s_fillTileStripsIndexByValueTrail[brkUse->endValuePxInTile][brkUse->endTrailPxInTile];
-        }
-        else if (cellIsTrailBreak)
-        {
-        /* TRAIL_BREAK (T, after B):
-         * If next cell is full trail, force trailPx=8 for proper raccord.
-         */
+            desiredStripIndex = s_tileIndexByValueTrail[breakInfoUsed->endValuePxInTile][breakInfoUsed->endTrailPxInTile];
+            break;
+
+        case CELL_TYPE_TRAIL_BREAK:
+            /* If next cell is full trail, force trailPx=8 for proper raccord */
             stripToUse = trailStrip;
-            if (brkUse->trailBreakSecondActive)
-                desiredStripIndex = s_trailTileStripsIndexByValueTrail[brkUse->valuePxInBreakCell][8];
-            else
-                desiredStripIndex = s_trailTileStripsIndexByValueTrail[brkUse->valuePxInBreakCell][brkUse->trailPxInBreakCell];
-        }
-        else if (cellIsTrailBreak2)
+            desiredStripIndex = breakInfoUsed->trailBreakSecondActive
+                ? s_trailTileIndexByValueTrail[breakInfoUsed->valuePxInBreakCell][8]
+                : s_trailTileIndexByValueTrail[breakInfoUsed->valuePxInBreakCell][breakInfoUsed->trailPxInBreakCell];
+            break;
+
+        case CELL_TYPE_TRAIL_BREAK2:
         {
-        /* TRAIL_BREAK2 (T, before E): same fill index as END (E) but on TRAIL tileset.
-         * Special case: if END index is 8, use trail LUT [0][endIndex].
-         */
+            /* Same fill index as END but on TRAIL tileset */
             stripToUse = trailStrip;
-            const u8 endIndex = s_fillTileStripsIndexByValueTrail[brkUse->endValuePxInTile][brkUse->endTrailPxInTile];
-            if (endIndex == 8)
-                desiredStripIndex = s_trailTileStripsIndexByValueTrail[0][endIndex];
-            else
-                desiredStripIndex = endIndex;
+            const u8 endIndex = s_tileIndexByValueTrail[breakInfoUsed->endValuePxInTile][breakInfoUsed->endTrailPxInTile];
+            desiredStripIndex = (endIndex == 8)
+                ? s_trailTileIndexByValueTrail[0][endIndex]
+                : endIndex;
+            break;
         }
-        else if (cellIsTrailFull)
-        {
-        /* TRAIL_FULL (T) uses the trail strip, fixed full index (7). */
+
+        case CELL_TYPE_TRAIL_FULL:
             stripToUse = trailStrip;
             desiredStripIndex = 7;
-        }
-        else if (cellIsValueBreak)
-        {
-        /* VALUE_BREAK (B) always uses BODY (never BREAK tileset).
-         * - If trailBreakActive: index = valuePxInBreakCell
-         * - Else: index follows END (E) (same fill as break)
-         */
+            break;
+
+        case CELL_TYPE_VALUE_BREAK:
             stripToUse = bodyStrip;
-            if (brkUse->trailBreakActive)
-                desiredStripIndex = brkUse->valuePxInBreakCell;
-            else
-                desiredStripIndex = s_fillTileStripsIndexByValueTrail[brkUse->endValuePxInTile][brkUse->endTrailPxInTile];
-        }
-        else
+            desiredStripIndex = breakInfoUsed->trailBreakActive
+                ? breakInfoUsed->valuePxInBreakCell
+                : s_tileIndexByValueTrail[breakInfoUsed->endValuePxInTile][breakInfoUsed->endTrailPxInTile];
+            break;
+
+        case CELL_TYPE_REGION_FULL:
+            stripToUse = bodyStrip;
+            desiredStripIndex = STRIP_INDEX_FULL;
+            break;
+
+        case CELL_TYPE_REGION_EMPTY:
+            stripToUse = bodyStrip;
+            desiredStripIndex = STRIP_INDEX_EMPTY;
+            break;
+
+        case CELL_TYPE_REGION_TRAIL:
+            stripToUse = trailStrip;
+            desiredStripIndex = 7;
+            break;
+
+        case CELL_TYPE_DEFAULT:
         {
-            if (brkUse->regionRenderActive)
-            {
-                /* Region-based rendering when trail is active. */
-                if (cellFillIndex < brkUse->valueFillIndex)
-                {
-                    /* BODY full */
-                    stripToUse = bodyStrip;
-                    desiredStripIndex = STRIP_INDEX_FULL;
-                }
-                else if (cellFillIndex > brkUse->trailFillIndex)
-                {
-                    /* BODY empty */
-                    stripToUse = bodyStrip;
-                    desiredStripIndex = STRIP_INDEX_EMPTY;
-                }
-                else if (cellFillIndex > brkUse->valueFillIndex && cellFillIndex < brkUse->trailFillIndex)
-                {
-                    /* TRAIL full */
-                    stripToUse = trailStrip;
-                    desiredStripIndex = 7;
-                }
-            } 
-            else
-            {
-                /* Default behavior: standard fill computation (no T/B/E special cases). */
-                if (brkUse->endFillIndex != CACHE_INVALID_U8)
-                {
-                    if (cellFillIndex == brkUse->endFillIndex)
-                        stripToUse = endStrip;
-                }
+            /* Standard fill computation (no special break zone) */
+            if (breakInfoUsed->endFillIndex != CACHE_INVALID_U8 &&
+                cellFillIndex == breakInfoUsed->endFillIndex)
+                stripToUse = endStrip;
 
-                u8 valuePxInTile = 0;
-                u8 trailPxInTile = 0;
-                compute_fill_for_cell(layout, cell->cellIndex,
-                                      valuePixels, trailPixelsUse,
-                                      &valuePxInTile, &trailPxInTile);
-
-                desiredStripIndex = s_fillTileStripsIndexByValueTrail[valuePxInTile][trailPxInTile];
-            }
+            u8 valuePxInTile = 0;
+            u8 trailPxInTile = 0;
+            compute_fill_for_cell(layout, cell->cellIndex,
+                                  valuePixels, trailPixelsUse,
+                                  &valuePxInTile, &trailPxInTile);
+            desiredStripIndex = s_tileIndexByValueTrail[valuePxInTile][trailPxInTile];
+            break;
+        }
         }
         upload_cell_if_needed(cell, stripToUse, desiredStripIndex);
     }
@@ -2678,19 +2871,25 @@ static void process_dynamic_mode(GaugePart *part,
     const GaugeLayout *layout = &part->layout;
 
     /* Pre-compute tilemap attribute base (without tile index) */
-    const u16 attrBase = TILE_ATTR_FULL(layout->paletteLine, layout->priority,
-                                        layout->vflip, layout->hflip, 0);
+    const u16 attrBase = TILE_ATTR_FULL(layout->palette, layout->priority,
+                                        layout->verticalFlip, layout->horizontalFlip, 0);
 
     /* --- Break zone computation ---
-     * brk: used for normal cell classification (trail with blink applied)
-     * brkBridge: used for bridge visibility (trail WITHOUT blink, so bridges
+     * breakInfo: used for normal cell classification (trail with blink applied)
+     * breakInfoActual: used for bridge visibility (trail WITHOUT blink, so bridges
      *            don't flicker on/off during blink phase) */
-    GaugeBreakInfo brk;
-    compute_break_info(layout, valuePixels, trailPixelsRendered, trailMode, &brk);
-    GaugeBreakInfo brkBridge = brk;
+    GaugeBreakInfo breakInfo;
+    compute_break_info(layout, valuePixels, trailPixelsRendered, trailMode, &breakInfo);
+    GaugeBreakInfo breakInfoActual = breakInfo;
     if (trailPixelsActual != trailPixelsRendered)
-        compute_break_info(layout, valuePixels, trailPixelsActual, trailMode, &brkBridge);
+        compute_break_info(layout, valuePixels, trailPixelsActual, trailMode, &breakInfoActual);
 
+    /* Dynamic mode caches tile data in VRAM. When blink toggles or trail mode
+     * changes, the cached standard tiles (full/empty/trail) may now come from
+     * a different tileset (normal vs blink-off, damage vs gain). We must:
+     * 1. Invalidate partial tile caches (forces re-upload on next use)
+     * 2. Re-upload full body tiles if trail mode changed (DAMAGE<->GAIN)
+     * 3. Re-upload full trail tiles with the correct tileset variant */
     const u8 layoutHasBlink = (trailMode == GAUGE_TRAIL_GAIN)
                              ? layout->hasGainBlinkOff : layout->hasBlinkOff;
     if ((blinkOnChanged && layoutHasBlink) || trailModeChanged)
@@ -2703,11 +2902,10 @@ static void process_dynamic_mode(GaugePart *part,
 
     /* Early-exit boundaries: cells outside [breakLow..breakHigh] are trivially
      * full or empty. Same logic as fixed mode. */
-    const u8 breakLow = (brk.valueBreakFillIndex != CACHE_INVALID_U8)
-                       ? brk.valueBreakFillIndex : brk.valueFillIndex;
-    const u8 breakHigh = brk.trailFillIndex;
+    const u8 breakLow = (breakInfo.valueBreakFillIndex != CACHE_INVALID_U8)
+                       ? breakInfo.valueBreakFillIndex : breakInfo.valueFillIndex;
+    const u8 breakHigh = breakInfo.trailFillIndex;
 
-    /* Debug: confirm dynamic blink path + break info */
     /* Cap detection */
     const u8 capStartCellIndex = layout->cellIndexByFillIndex[0];
     const u8 capEndCellIndex = layout->cellIndexByFillIndex[layout->length - 1];
@@ -2731,27 +2929,27 @@ static void process_dynamic_mode(GaugePart *part,
             continue;
 
         const u8 cellFillIndex = layout->fillIndexByCell[cellIndex];
-        const u8 segId = layout->segmentIdByCell[cellIndex];
+        const u8 segmentId = layout->segmentIdByCell[cellIndex];
 
         /* === Cap end (always uses its tileset) === */
-        if (cellIndex == capEndCellIndex && capEndEnabled && segId == capEndSegId)
+        if (cellIndex == capEndCellIndex && capEndEnabled && segmentId == capEndSegId)
         {
             u8 capValuePx = 0;
             u8 capTrailPx = 0;
             const u32 *capEndStrip = select_base_strip(
-                layout->tilesetCapEndBySegment[segId],
-                layout->gainTilesetCapEndBySegment[segId],
+                layout->tilesetCapEndBySegment[segmentId],
+                layout->gainTilesetCapEndBySegment[segmentId],
                 trailMode);
             u16 capTrailPixels = trailPixelsRendered;
 
             const u32 *capEndBlinkStrip = select_blink_strip(
-                layout->blinkOffTilesetCapEndBySegment[segId],
-                layout->gainBlinkOffTilesetCapEndBySegment[segId],
+                layout->blinkOffTilesetCapEndBySegment[segmentId],
+                layout->gainBlinkOffTilesetCapEndBySegment[segmentId],
                 trailMode);
 
             if (blinkOffActive &&
                 capEndBlinkStrip &&
-                is_cell_in_trail_zone(&brkBridge, cellFillIndex))
+                is_cell_in_trail_zone(&breakInfoActual, cellFillIndex))
             {
                 capEndStrip = capEndBlinkStrip;
                 capTrailPixels = trailPixelsActual;
@@ -2759,14 +2957,14 @@ static void process_dynamic_mode(GaugePart *part,
 
             compute_fill_for_cell(layout, cellIndex, valuePixels, capTrailPixels,
                                   &capValuePx, &capTrailPx);
-            const u8 fillStripIndex = s_fillTileStripsIndexByValueTrail[capValuePx][capTrailPx];
-            if (dyn->loadedFillIdxCapEnd != fillStripIndex)
+            const u8 fillStripIndex = s_tileIndexByValueTrail[capValuePx][capTrailPx];
+            if (dyn->cachedFillIndexCapEnd != fillStripIndex)
             {
                 upload_fill_tile(capEndStrip,
                                  fillStripIndex,
                                  dyn->vramTileCapEnd,
                                  DMA);
-                dyn->loadedFillIdxCapEnd = fillStripIndex;
+                dyn->cachedFillIndexCapEnd = fillStripIndex;
             }
             if (dyn->cellCurrentTileIndex[cellIndex] != dyn->vramTileCapEnd)
             {
@@ -2779,31 +2977,31 @@ static void process_dynamic_mode(GaugePart *part,
         }
 
         /* === Cap start (fixed border at cell 0) === */
-        if (cellIndex == capStartCellIndex && capStartEnabled && segId == capStartSegId)
+        if (cellIndex == capStartCellIndex && capStartEnabled && segmentId == capStartSegId)
         {
             const u32 *capStartStrip = select_base_strip(
-                layout->tilesetCapStartBySegment[segId],
-                layout->gainTilesetCapStartBySegment[segId],
+                layout->tilesetCapStartBySegment[segmentId],
+                layout->gainTilesetCapStartBySegment[segmentId],
                 trailMode);
             const u32 *capStartBreakStrip = select_base_strip(
-                layout->tilesetCapStartBreakBySegment[segId],
-                layout->gainTilesetCapStartBreakBySegment[segId],
+                layout->tilesetCapStartBreakBySegment[segmentId],
+                layout->gainTilesetCapStartBreakBySegment[segmentId],
                 trailMode);
             const u32 *capStartTrailStrip = select_base_strip(
-                layout->tilesetCapStartTrailBySegment[segId],
-                layout->gainTilesetCapStartTrailBySegment[segId],
+                layout->tilesetCapStartTrailBySegment[segmentId],
+                layout->gainTilesetCapStartTrailBySegment[segmentId],
                 trailMode);
             const u32 *capStartBlinkStrip = select_blink_strip(
-                layout->blinkOffTilesetCapStartBySegment[segId],
-                layout->gainBlinkOffTilesetCapStartBySegment[segId],
+                layout->blinkOffTilesetCapStartBySegment[segmentId],
+                layout->gainBlinkOffTilesetCapStartBySegment[segmentId],
                 trailMode);
             const u32 *capStartBlinkBreakStrip = select_blink_strip(
-                layout->blinkOffTilesetCapStartBreakBySegment[segId],
-                layout->gainBlinkOffTilesetCapStartBreakBySegment[segId],
+                layout->blinkOffTilesetCapStartBreakBySegment[segmentId],
+                layout->gainBlinkOffTilesetCapStartBreakBySegment[segmentId],
                 trailMode);
             const u32 *capStartBlinkTrailStrip = select_blink_strip(
-                layout->blinkOffTilesetCapStartTrailBySegment[segId],
-                layout->gainBlinkOffTilesetCapStartTrailBySegment[segId],
+                layout->blinkOffTilesetCapStartTrailBySegment[segmentId],
+                layout->gainBlinkOffTilesetCapStartTrailBySegment[segmentId],
                 trailMode);
 
             if (capStartStrip)
@@ -2812,14 +3010,14 @@ static void process_dynamic_mode(GaugePart *part,
                 if (blinkOffActive)
                 {
                     CapStartResult capActual;
-                    classify_cap_start_with_strips(&brkBridge,
+                    classify_cap_start_with_strips(&breakInfoActual,
                                                    cellFillIndex,
                                                    capStartStrip,
                                                    capStartBreakStrip,
                                                    capStartTrailStrip,
                                                    &capActual);
 
-                    const u8 inTrailZone = is_cell_in_trail_zone(&brkBridge, cellFillIndex);
+                    const u8 inTrailZone = is_cell_in_trail_zone(&breakInfoActual, cellFillIndex);
                     const u32 *blinkStrip = NULL;
 
                     if (inTrailZone)
@@ -2839,7 +3037,7 @@ static void process_dynamic_mode(GaugePart *part,
                     }
                     else
                     {
-                        classify_cap_start_with_strips(&brk,
+                        classify_cap_start_with_strips(&breakInfo,
                                                        cellFillIndex,
                                                        capStartStrip,
                                                        capStartBreakStrip,
@@ -2849,7 +3047,7 @@ static void process_dynamic_mode(GaugePart *part,
                 }
                 else
                 {
-                    classify_cap_start_with_strips(&brk,
+                    classify_cap_start_with_strips(&breakInfo,
                                                    cellFillIndex,
                                                    capStartStrip,
                                                    capStartBreakStrip,
@@ -2858,13 +3056,13 @@ static void process_dynamic_mode(GaugePart *part,
                 }
 
                 /* Stream cap start tile if strip/index/variant changed */
-                if (dyn->loadedFillIdxCapStart != capResult.fillStripIndex ||
+                if (dyn->cachedFillIndexCapStart != capResult.fillStripIndex ||
                     dyn->loadedCapStartUsesBreak != capResult.usesBreak ||
                     dyn->loadedCapStartUsesTrail != capResult.usesTrail)
                 {
                     upload_fill_tile(capResult.strip, capResult.fillStripIndex,
                                      dyn->vramTileCapStart, DMA);
-                    dyn->loadedFillIdxCapStart = capResult.fillStripIndex;
+                    dyn->cachedFillIndexCapStart = capResult.fillStripIndex;
                     dyn->loadedCapStartUsesBreak = capResult.usesBreak;
                     dyn->loadedCapStartUsesTrail = capResult.usesTrail;
                 }
@@ -2884,44 +3082,44 @@ static void process_dynamic_mode(GaugePart *part,
         /* === Bridge/BREAK forced rendering (D/B before gauge END) ===
          * Bridge cells sit at segment boundaries. When the gauge's value/trail
          * edge is past this cell, the bridge shows a transition tile.
-         * brkBridge uses trailPixelsActual (ignoring blink) so bridges don't
+         * breakInfoActual uses trailPixelsActual (ignoring blink) so bridges don't
          * flicker during blink phase. */
-        if (brkBridge.endFillIndex != CACHE_INVALID_U8)
+        if (breakInfoActual.endFillIndex != CACHE_INVALID_U8)
         {
             /* Bridge end cell: last cell of a segment with a bridge tileset */
             if (layout->bridgeEndByFillIndex[cellFillIndex] &&
-                brkBridge.endFillIndex > cellFillIndex &&
-                brkBridge.valueFillIndex > cellFillIndex)
+                breakInfoActual.endFillIndex > cellFillIndex &&
+                breakInfoActual.valueFillIndex > cellFillIndex)
             {
-                const u16 vramTileBridge = dyn->vramTileBridge[segId];
+                const u16 vramTileBridge = dyn->vramTileBridge[segmentId];
                 if (vramTileBridge != 0)
                 {
                     const u8 nextFillIndex = (u8)(cellFillIndex + 1);
-                    const u8 bridgeInTrailZone = is_cell_in_trail_zone(&brkBridge, nextFillIndex);
+                    const u8 bridgeInTrailZone = is_cell_in_trail_zone(&breakInfoActual, nextFillIndex);
                     const u32 *bridgeStrip = select_base_strip(
-                        layout->tilesetBridgeBySegment[segId],
-                        layout->gainTilesetBridgeBySegment[segId],
+                        layout->tilesetBridgeBySegment[segmentId],
+                        layout->gainTilesetBridgeBySegment[segmentId],
                         trailMode);
                     const u32 *blinkOffBridgeStrip = select_blink_strip(
-                        layout->blinkOffTilesetBridgeBySegment[segId],
-                        layout->gainBlinkOffTilesetBridgeBySegment[segId],
+                        layout->blinkOffTilesetBridgeBySegment[segmentId],
+                        layout->gainBlinkOffTilesetBridgeBySegment[segmentId],
                         trailMode);
                     const u8 useBlinkOffBridge = (blinkOffActive &&
                                                   blinkOffBridgeStrip &&
                                                   bridgeInTrailZone);
-                    const GaugeBreakInfo *bridgeBrk = useBlinkOffBridge ? &brkBridge : &brk;
+                    const GaugeBreakInfo *bridgeBreakInfo = useBlinkOffBridge ? &breakInfoActual : &breakInfo;
                     const u16 bridgeTrailPixels = useBlinkOffBridge ? trailPixelsActual : trailPixelsRendered;
                     const u32 *bridgeStripUse = useBlinkOffBridge
                                                 ? blinkOffBridgeStrip
                                                 : bridgeStrip;
                     const u8 bridgeIdx = compute_bridge_strip_index(
-                        layout, bridgeBrk, cellFillIndex, valuePixels, bridgeTrailPixels);
+                        layout, bridgeBreakInfo, cellFillIndex, valuePixels, bridgeTrailPixels);
 
-                    if (dyn->loadedFillIdxBridge[segId] != bridgeIdx)
+                    if (dyn->cachedFillIndexBridge[segmentId] != bridgeIdx)
                     {
                         upload_fill_tile(bridgeStripUse,
                                          bridgeIdx, vramTileBridge, DMA);
-                        dyn->loadedFillIdxBridge[segId] = bridgeIdx;
+                        dyn->cachedFillIndexBridge[segmentId] = bridgeIdx;
                     }
                     if (dyn->cellCurrentTileIndex[cellIndex] != vramTileBridge)
                     {
@@ -2938,10 +3136,10 @@ static void process_dynamic_mode(GaugePart *part,
             if (layout->bridgeBreakByFillIndex[cellFillIndex])
             {
                 const u8 boundaryFillIndex = layout->bridgeBreakBoundaryByFillIndex[cellFillIndex];
-                if (brkBridge.endFillIndex > boundaryFillIndex &&
-                    brkBridge.valueFillIndex > boundaryFillIndex)
+                if (breakInfoActual.endFillIndex > boundaryFillIndex &&
+                    breakInfoActual.valueFillIndex > boundaryFillIndex)
                 {
-                    const u16 vramTile = dyn->vramTileFullValue[segId];
+                    const u16 vramTile = dyn->vramTileFullValue[segmentId];
                     if (dyn->cellCurrentTileIndex[cellIndex] != vramTile)
                     {
                         VDP_setTileMapXY(WINDOW, attrBase | vramTile,
@@ -2962,7 +3160,7 @@ static void process_dynamic_mode(GaugePart *part,
         {
             if (cellFillIndex < breakLow)
             {
-                const u16 vt = dyn->vramTileFullValue[segId];
+                const u16 vt = dyn->vramTileFullValue[segmentId];
                 if (dyn->cellCurrentTileIndex[cellIndex] != vt)
                 {
                     VDP_setTileMapXY(WINDOW, attrBase | vt,
@@ -2974,7 +3172,7 @@ static void process_dynamic_mode(GaugePart *part,
             }
             if (cellFillIndex > breakHigh)
             {
-                const u16 vt = dyn->vramTileEmpty[segId];
+                const u16 vt = dyn->vramTileEmpty[segmentId];
                 if (dyn->cellCurrentTileIndex[cellIndex] != vt)
                 {
                     VDP_setTileMapXY(WINDOW, attrBase | vt,
@@ -2987,242 +3185,201 @@ static void process_dynamic_mode(GaugePart *part,
         }
 
         /* === Break zone: full classification needed (END(E)/TRAIL(T)/VALUE_BREAK(B)/FULL(F)/EMPTY(V)) === */
-        const GaugeBreakInfo *brkUse = &brk;
+        const GaugeBreakInfo *breakInfoUsed = &breakInfo;
         u16 trailPixelsUse = trailPixelsRendered;
-        const u32 *bodyStrip = select_base_strip(layout->tilesetBySegment[segId],
-                                                 layout->gainTilesetBySegment[segId],
+        const u32 *bodyStrip = select_base_strip(layout->tilesetBySegment[segmentId],
+                                                 layout->gainTilesetBySegment[segmentId],
                                                  trailMode);
-        const u32 *endStrip = select_base_strip(layout->tilesetEndBySegment[segId],
-                                                layout->gainTilesetEndBySegment[segId],
+        const u32 *endStrip = select_base_strip(layout->tilesetEndBySegment[segmentId],
+                                                layout->gainTilesetEndBySegment[segmentId],
                                                 trailMode);
-        const u32 *trailStrip = select_base_strip(layout->tilesetTrailBySegment[segId],
-                                                  layout->gainTilesetTrailBySegment[segId],
+        const u32 *trailStrip = select_base_strip(layout->tilesetTrailBySegment[segmentId],
+                                                  layout->gainTilesetTrailBySegment[segmentId],
                                                   trailMode);
         const u32 *blinkOffEndStrip = select_blink_strip(
-            layout->blinkOffTilesetEndBySegment[segId],
-            layout->gainBlinkOffTilesetEndBySegment[segId],
+            layout->blinkOffTilesetEndBySegment[segmentId],
+            layout->gainBlinkOffTilesetEndBySegment[segmentId],
             trailMode);
         const u32 *blinkOffTrailStrip = select_blink_strip(
-            layout->blinkOffTilesetTrailBySegment[segId],
-            layout->gainBlinkOffTilesetTrailBySegment[segId],
+            layout->blinkOffTilesetTrailBySegment[segmentId],
+            layout->gainBlinkOffTilesetTrailBySegment[segmentId],
             trailMode);
         const u32 *blinkOffBodyStrip = select_blink_strip(
-            layout->blinkOffTilesetBySegment[segId],
-            layout->gainBlinkOffTilesetBySegment[segId],
+            layout->blinkOffTilesetBySegment[segmentId],
+            layout->gainBlinkOffTilesetBySegment[segmentId],
             trailMode);
         u8 useBlinkOff = 0;
 
         if (blinkOffActive)
         {
             useBlinkOff = apply_blink_off_overrides(
-                &brkBridge, cellFillIndex,
+                &breakInfoActual, cellFillIndex,
                 blinkOffEndStrip, blinkOffTrailStrip, blinkOffBodyStrip,
                 &endStrip, &trailStrip, &bodyStrip);
             if (useBlinkOff)
             {
-                brkUse = &brkBridge;
+                breakInfoUsed = &breakInfoActual;
                 trailPixelsUse = trailPixelsActual;
             }
         }
 
-        const u8 cellHasEnd = (endStrip != NULL);
-        const u8 cellHasTrail = (trailStrip != NULL);
-        const u32 *trailStripUse = cellHasTrail ? trailStrip : bodyStrip;
+        const u32 *trailStripUse = trailStrip ? trailStrip : bodyStrip;
 
-        const u8 cellIsEnd = (brkUse->endFillIndex != CACHE_INVALID_U8 &&
-                              cellHasEnd && cellFillIndex == brkUse->endFillIndex);
-        const u8 cellIsTrailBreak =
-            (brkUse->trailBreakActive && cellHasTrail && cellFillIndex == brkUse->trailBreakFillIndex);
-        const u8 cellIsTrailBreak2 =
-            (brkUse->trailBreakSecondActive && cellHasTrail && cellFillIndex == brkUse->trailBreakFillIndex2);
-        const u8 cellIsTrailFull =
-            (brkUse->trailBreakActive && cellHasTrail &&
-             cellFillIndex > brkUse->valueFillIndex && cellFillIndex < brkUse->trailFillIndex);
-        const u8 cellIsValueBreak = (brkUse->valueBreakFillIndex != CACHE_INVALID_U8 &&
-                                     cellFillIndex == brkUse->valueBreakFillIndex);
+        const CellBreakType cellType = classify_break_zone_cell(
+            breakInfoUsed, cellFillIndex, (endStrip != NULL), (trailStrip != NULL));
 
         u16 vramTile = 0;
         u8 needsUpload = 0;
         u8 fillStripIndex = 0;
         const u32 *stripToUse = NULL;
 
-        if (cellIsEnd)
+        switch (cellType)
         {
-            /* END (E) uses the end strip and the standard fill LUT. */
+        case CELL_TYPE_END:
             stripToUse = endStrip;
-            fillStripIndex = s_fillTileStripsIndexByValueTrail[brkUse->endValuePxInTile][brkUse->endTrailPxInTile];
+            fillStripIndex = s_tileIndexByValueTrail[breakInfoUsed->endValuePxInTile][breakInfoUsed->endTrailPxInTile];
             vramTile = dyn->vramTilePartialEnd;
-
-            if (dyn->loadedSegmentPartialEnd != segId ||
-                dyn->loadedFillIdxPartialEnd != fillStripIndex)
+            if (dyn->loadedSegmentPartialEnd != segmentId ||
+                dyn->cachedFillIndexPartialEnd != fillStripIndex)
             {
                 needsUpload = 1;
-                dyn->loadedSegmentPartialEnd = segId;
-                dyn->loadedFillIdxPartialEnd = fillStripIndex;
+                dyn->loadedSegmentPartialEnd = segmentId;
+                dyn->cachedFillIndexPartialEnd = fillStripIndex;
             }
-        }
-        else if (cellIsTrailBreak)
-        {
-            /* TRAIL_BREAK (T, after B): if next cell is full trail, force trailPx=8. */
+            break;
+
+        case CELL_TYPE_TRAIL_BREAK:
             stripToUse = trailStripUse;
-            if (brkUse->trailBreakSecondActive)
-                fillStripIndex = s_trailTileStripsIndexByValueTrail[brkUse->valuePxInBreakCell][8];
-            else
-                fillStripIndex = s_trailTileStripsIndexByValueTrail[brkUse->valuePxInBreakCell][brkUse->trailPxInBreakCell];
+            fillStripIndex = breakInfoUsed->trailBreakSecondActive
+                ? s_trailTileIndexByValueTrail[breakInfoUsed->valuePxInBreakCell][8]
+                : s_trailTileIndexByValueTrail[breakInfoUsed->valuePxInBreakCell][breakInfoUsed->trailPxInBreakCell];
             vramTile = dyn->vramTilePartialTrail;
-
-            if (dyn->loadedSegmentPartialTrail != segId ||
-                dyn->loadedFillIdxPartialTrail != fillStripIndex)
+            if (dyn->loadedSegmentPartialTrail != segmentId ||
+                dyn->cachedFillIndexPartialTrail != fillStripIndex)
             {
                 needsUpload = 1;
-                dyn->loadedSegmentPartialTrail = segId;
-                dyn->loadedFillIdxPartialTrail = fillStripIndex;
+                dyn->loadedSegmentPartialTrail = segmentId;
+                dyn->cachedFillIndexPartialTrail = fillStripIndex;
             }
-        }
-        else if (cellIsTrailBreak2)
+            break;
+
+        case CELL_TYPE_TRAIL_BREAK2:
         {
-            /* TRAIL_BREAK2 (T, before E): same fill index as END (E) but on TRAIL tileset. */
             stripToUse = trailStripUse;
-            const u8 endIndex = s_fillTileStripsIndexByValueTrail[brkUse->endValuePxInTile][brkUse->endTrailPxInTile];
-            if (endIndex == 8)
-                fillStripIndex = s_trailTileStripsIndexByValueTrail[0][endIndex];
-            else
-                fillStripIndex = endIndex;
+            const u8 endIndex = s_tileIndexByValueTrail[breakInfoUsed->endValuePxInTile][breakInfoUsed->endTrailPxInTile];
+            fillStripIndex = (endIndex == 8)
+                ? s_trailTileIndexByValueTrail[0][endIndex]
+                : endIndex;
             vramTile = dyn->vramTilePartialTrailSecond;
-
-            if (dyn->loadedSegmentPartialTrailSecond != segId ||
-                dyn->loadedFillIdxPartialTrailSecond != fillStripIndex)
+            if (dyn->loadedSegmentPartialTrailSecond != segmentId ||
+                dyn->cachedFillIndexPartialTrailSecond != fillStripIndex)
             {
                 needsUpload = 1;
-                dyn->loadedSegmentPartialTrailSecond = segId;
-                dyn->loadedFillIdxPartialTrailSecond = fillStripIndex;
+                dyn->loadedSegmentPartialTrailSecond = segmentId;
+                dyn->cachedFillIndexPartialTrailSecond = fillStripIndex;
             }
+            break;
         }
-        else if (cellIsTrailFull)
-        {
-            /* TRAIL_FULL (T) uses the trail strip, fixed full index (7). */
-            vramTile = dyn->vramTileFullTrail[segId];
-        }
-        else if (cellIsValueBreak)
-        {
-            /* VALUE_BREAK (B) always uses BODY.
-             * - If trailBreakActive: index = valuePxInBreakCell
-             * - Else: index follows END (E) (same fill as break)
-             */
+
+        case CELL_TYPE_TRAIL_FULL:
+            vramTile = dyn->vramTileFullTrail[segmentId];
+            break;
+
+        case CELL_TYPE_VALUE_BREAK:
             stripToUse = bodyStrip;
-            if (brkUse->trailBreakActive)
-                fillStripIndex = brkUse->valuePxInBreakCell;
-            else
-                fillStripIndex = s_fillTileStripsIndexByValueTrail[brkUse->endValuePxInTile][brkUse->endTrailPxInTile];
+            fillStripIndex = breakInfoUsed->trailBreakActive
+                ? breakInfoUsed->valuePxInBreakCell
+                : s_tileIndexByValueTrail[breakInfoUsed->endValuePxInTile][breakInfoUsed->endTrailPxInTile];
             vramTile = dyn->vramTilePartialValue;
-
-            if (dyn->loadedSegmentPartialValue != segId ||
-                dyn->loadedFillIdxPartialValue != fillStripIndex)
+            if (dyn->loadedSegmentPartialValue != segmentId ||
+                dyn->cachedFillIndexPartialValue != fillStripIndex)
             {
                 needsUpload = 1;
-                dyn->loadedSegmentPartialValue = segId;
-                dyn->loadedFillIdxPartialValue = fillStripIndex;
+                dyn->loadedSegmentPartialValue = segmentId;
+                dyn->cachedFillIndexPartialValue = fillStripIndex;
             }
-        }
-        else if (brkUse->regionRenderActive)
+            break;
+
+        case CELL_TYPE_REGION_FULL:
+            vramTile = dyn->vramTileFullValue[segmentId];
+            break;
+
+        case CELL_TYPE_REGION_EMPTY:
+            vramTile = dyn->vramTileEmpty[segmentId];
+            break;
+
+        case CELL_TYPE_REGION_TRAIL:
+            vramTile = dyn->vramTileFullTrail[segmentId];
+            break;
+
+        case CELL_TYPE_DEFAULT:
         {
-            /* Region-based rendering when trail is active. */
-            if (cellFillIndex < brkUse->valueFillIndex)
+            /* Standard fill computation: determine which partial tile to use */
+            if (cellFillIndex < breakInfoUsed->valueFillIndex)
             {
-                /* BODY full */
-                vramTile = dyn->vramTileFullValue[segId];
+                vramTile = dyn->vramTileFullValue[segmentId];
             }
-            else if (cellFillIndex > brkUse->trailFillIndex)
+            else if (cellFillIndex > breakInfoUsed->valueFillIndex && cellFillIndex < breakInfoUsed->trailFillIndex)
             {
-                /* BODY empty */
-                vramTile = dyn->vramTileEmpty[segId];
+                vramTile = dyn->vramTileFullTrail[segmentId];
             }
-            else if (cellFillIndex > brkUse->valueFillIndex && cellFillIndex < brkUse->trailFillIndex)
+            else if (cellFillIndex > breakInfoUsed->trailFillIndex)
             {
-                /* TRAIL full */
-                vramTile = dyn->vramTileFullTrail[segId];
+                vramTile = dyn->vramTileEmpty[segmentId];
             }
-            else
-            {
-                /* Value/trail break cells (B/T) are handled by special cases above. */
-                vramTile = dyn->vramTileEmpty[segId];
-            }
-        }
-        else
-        {
-            /* Default behavior: standard fill computation (no E/T/B special cases). */
-            if (cellFillIndex < brkUse->valueFillIndex)
-            {
-                /* Full value region */
-                vramTile = dyn->vramTileFullValue[segId];
-            }
-            else if (cellFillIndex > brkUse->valueFillIndex && cellFillIndex < brkUse->trailFillIndex)
-            {
-                /* Full trail region */
-                vramTile = dyn->vramTileFullTrail[segId];
-            }
-            else if (cellFillIndex > brkUse->trailFillIndex)
-            {
-                /* Empty region */
-                vramTile = dyn->vramTileEmpty[segId];
-            }
-            else if (cellFillIndex == brkUse->valueFillIndex && cellFillIndex == brkUse->trailFillIndex)
+            else if (cellFillIndex == breakInfoUsed->valueFillIndex && cellFillIndex == breakInfoUsed->trailFillIndex)
             {
                 /* Both value and trail partial in same cell */
                 u8 valuePxInTile, trailPxInTile;
                 compute_fill_for_cell(layout, cellIndex, valuePixels, trailPixelsUse,
                                       &valuePxInTile, &trailPxInTile);
-
                 stripToUse = bodyStrip;
-                fillStripIndex = s_fillTileStripsIndexByValueTrail[valuePxInTile][trailPxInTile];
-                vramTile = dyn->vramTilePartialValue;  /* Reuse PartialValue for "both" case */
-
-                if (dyn->loadedSegmentPartialValue != segId ||
-                    dyn->loadedFillIdxPartialValue != fillStripIndex)
+                fillStripIndex = s_tileIndexByValueTrail[valuePxInTile][trailPxInTile];
+                vramTile = dyn->vramTilePartialValue;
+                if (dyn->loadedSegmentPartialValue != segmentId ||
+                    dyn->cachedFillIndexPartialValue != fillStripIndex)
                 {
                     needsUpload = 1;
-                    dyn->loadedSegmentPartialValue = segId;
-                    dyn->loadedFillIdxPartialValue = fillStripIndex;
+                    dyn->loadedSegmentPartialValue = segmentId;
+                    dyn->cachedFillIndexPartialValue = fillStripIndex;
                 }
             }
-            else if (cellFillIndex == brkUse->valueFillIndex)
+            else if (cellFillIndex == breakInfoUsed->valueFillIndex)
             {
                 /* Value partial cell (trail is full=8) */
                 u8 valuePxInTile, trailPxInTile;
                 compute_fill_for_cell(layout, cellIndex, valuePixels, trailPixelsUse,
                                       &valuePxInTile, &trailPxInTile);
-
                 stripToUse = bodyStrip;
-                fillStripIndex = s_fillTileStripsIndexByValueTrail[valuePxInTile][8];
+                fillStripIndex = s_tileIndexByValueTrail[valuePxInTile][8];
                 vramTile = dyn->vramTilePartialValue;
-
-                if (dyn->loadedSegmentPartialValue != segId ||
-                    dyn->loadedFillIdxPartialValue != fillStripIndex)
+                if (dyn->loadedSegmentPartialValue != segmentId ||
+                    dyn->cachedFillIndexPartialValue != fillStripIndex)
                 {
                     needsUpload = 1;
-                    dyn->loadedSegmentPartialValue = segId;
-                    dyn->loadedFillIdxPartialValue = fillStripIndex;
+                    dyn->loadedSegmentPartialValue = segmentId;
+                    dyn->cachedFillIndexPartialValue = fillStripIndex;
                 }
             }
-            else  /* cellFillIndex == brkUse->trailFillIndex */
+            else  /* cellFillIndex == breakInfoUsed->trailFillIndex */
             {
                 /* Trail partial cell (value=0) */
                 u8 valuePxInTile, trailPxInTile;
                 compute_fill_for_cell(layout, cellIndex, valuePixels, trailPixelsUse,
                                       &valuePxInTile, &trailPxInTile);
-
                 stripToUse = bodyStrip;
-                fillStripIndex = s_fillTileStripsIndexByValueTrail[0][trailPxInTile];
+                fillStripIndex = s_tileIndexByValueTrail[0][trailPxInTile];
                 vramTile = dyn->vramTilePartialTrail;
-
-                if (dyn->loadedSegmentPartialTrail != segId ||
-                    dyn->loadedFillIdxPartialTrail != fillStripIndex)
+                if (dyn->loadedSegmentPartialTrail != segmentId ||
+                    dyn->cachedFillIndexPartialTrail != fillStripIndex)
                 {
                     needsUpload = 1;
-                    dyn->loadedSegmentPartialTrail = segId;
-                    dyn->loadedFillIdxPartialTrail = fillStripIndex;
+                    dyn->loadedSegmentPartialTrail = segmentId;
+                    dyn->cachedFillIndexPartialTrail = fillStripIndex;
                 }
             }
+            break;
+        }
         }
         /* Upload partial tile if needed */
         if (needsUpload && stripToUse)
@@ -3240,6 +3397,19 @@ static void process_dynamic_mode(GaugePart *part,
     }
 }
 
+/**
+ * Determine the PIP visual state for a single cell.
+ *
+ * Priority rules:
+ * 1. Cell fully covered by value        -> PIP_STATE_VALUE
+ * 2. Cell NOT covered by actual trail    -> PIP_STATE_EMPTY
+ * 3. Blink-off active (damage)           -> PIP_STATE_BLINK_OFF
+ * 4. Blink-off active (gain)             -> PIP_STATE_EMPTY (hidden)
+ * 5. Trail is gain mode                  -> PIP_STATE_GAIN
+ * 6. Default (damage trail visible)      -> PIP_STATE_LOSS
+ *
+ * @return One of PIP_STATE_* constants (0..4)
+ */
 static inline u8 select_pip_state_for_cell(const GaugeLayout *layout,
                                            u8 cellIndex,
                                            u16 valuePixels,
@@ -3278,6 +3448,13 @@ static inline u8 select_pip_state_for_cell(const GaugeLayout *layout,
     return PIP_STATE_LOSS;
 }
 
+/**
+ * PIP-mode renderer: update each cell's tile from compact strip based on pip state.
+ *
+ * For each cell, computes its PIP state (VALUE/EMPTY/LOSS/GAIN/BLINK_OFF),
+ * selects the corresponding tile from the compact strip, and uploads via DMA
+ * if changed. Uses fixed VRAM (one tile per cell) regardless of VRAM mode.
+ */
 static void process_pip_mode(GaugePart *part,
                              u16 valuePixels,
                              u16 trailPixelsRendered,
@@ -3291,8 +3468,8 @@ static void process_pip_mode(GaugePart *part,
     {
         GaugeStreamCell *cell = &part->cells[i];
         const u8 cellIndex = cell->cellIndex;
-        const u8 segId = layout->segmentIdByCell[cellIndex];
-        const u32 *pipStrip = layout->pipTilesetBySegment[segId];
+        const u8 segmentId = layout->segmentIdByCell[cellIndex];
+        const u32 *pipStrip = layout->pipTilesetBySegment[segmentId];
         if (!pipStrip)
             continue;
 
@@ -3381,6 +3558,11 @@ static void render_part_pip_fixed(GaugePart *part,
                      blinkOffActive, trailMode);
 }
 
+/**
+ * Select the correct render handler based on value mode and VRAM mode.
+ *
+ * Returns one of 4 handlers: fill_dynamic, fill_fixed, pip_dynamic, pip_fixed.
+ */
 static GaugePartRenderHandler *resolve_part_render_handler(GaugeValueMode valueMode,
                                                            GaugeVramMode vramMode)
 {
@@ -3397,6 +3579,7 @@ static GaugePartRenderHandler *resolve_part_render_handler(GaugeValueMode valueM
 static void gauge_tick_and_render_fill(Gauge *gauge);
 static void gauge_tick_and_render_pip(Gauge *gauge);
 
+/** Select the tick-and-render handler: fill (continuous) or pip (discrete). */
 static GaugeTickAndRenderHandler *resolve_tick_and_render_handler(GaugeValueMode valueMode)
 {
     return (valueMode == GAUGE_VALUE_MODE_PIP)
@@ -3475,6 +3658,9 @@ static u16* generate_value_to_pixels_lut_fill(u16 maxValue, u16 maxFillPixels)
         return lut;
     }
 
+    /* Linear interpolation: lut[v] = round(v * maxFillPixels / maxValue).
+     * Adding halfMax before integer division gives proper rounding
+     * instead of truncation (e.g. 3/4=0 truncated vs 1 rounded). */
     const u16 halfMax = maxValue >> 1;
     for (u16 v = 0; v <= maxValue; v++)
     {
@@ -3485,6 +3671,12 @@ static u16* generate_value_to_pixels_lut_fill(u16 maxValue, u16 maxFillPixels)
     return lut;
 }
 
+/**
+ * Compute total pixel span of all pips in a layout.
+ *
+ * Each pip contributes (pipWidth * 8) pixels. Used to validate that
+ * maxFillPixels matches the layout's actual pixel capacity.
+ */
 static u16 compute_pip_total_pixels(const GaugeLayout *layout)
 {
     u16 totalPixels = 0;
@@ -3495,6 +3687,15 @@ static u16 compute_pip_total_pixels(const GaugeLayout *layout)
     return totalPixels;
 }
 
+/**
+ * Validate PIP layout configuration (called once on first Gauge_addPart).
+ *
+ * Checks: pipCount > 0, all segments have compact tilesets, pipIndex mapping
+ * is valid, pip widths match segment styles, maxValue == pipCount, and
+ * total pixel span matches maxFillPixels. Logs errors via KLog on failure.
+ *
+ * @return 1 if valid, 0 if any check fails
+ */
 static u8 validate_pip_layout(const GaugeLogic *logic, const GaugeLayout *layout)
 {
     if (layout->pipCount == 0)
@@ -3505,10 +3706,10 @@ static u8 validate_pip_layout(const GaugeLogic *logic, const GaugeLayout *layout
 
     for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
     {
-        const u8 segId = layout->segmentIdByCell[cellIndex];
-        if (layout->pipTilesetBySegment[segId] == NULL)
+        const u8 segmentId = layout->segmentIdByCell[cellIndex];
+        if (layout->pipTilesetBySegment[segmentId] == NULL)
         {
-            KLog_U1("Gauge PIP config error missing compact tileset segId: ", segId);
+            KLog_U1("Gauge PIP config error missing compact tileset segmentId: ", segmentId);
             return 0;
         }
     }
@@ -3527,8 +3728,8 @@ static u8 validate_pip_layout(const GaugeLogic *logic, const GaugeLayout *layout
         if (localTile == 0)
         {
             const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
-            const u8 segId = layout->segmentIdByCell[cellIndex];
-            u8 styleWidth = layout->pipWidthBySegment[segId];
+            const u8 segmentId = layout->segmentIdByCell[cellIndex];
+            u8 styleWidth = layout->pipWidthBySegment[segmentId];
             if (styleWidth == 0)
                 styleWidth = 1;
 
@@ -3559,6 +3760,15 @@ static u8 validate_pip_layout(const GaugeLogic *logic, const GaugeLayout *layout
     return 1;
 }
 
+/**
+ * Build the value-to-pixels LUT for PIP mode from layout pip widths.
+ *
+ * For PIP mode, each gauge value N maps to the cumulative pixel width of
+ * pips 0..N-1. Example: 4 pips of width 2 tiles each = [0, 16, 32, 48, 64].
+ * This LUT is used by value_to_pixels() for pixel-accurate rendering.
+ *
+ * @return 1 on success, 0 on validation failure or allocation error
+ */
 static u8 configure_pip_value_lut_from_layout(Gauge *gauge, const GaugeLayout *layout)
 {
     GaugeLogic *logic = &gauge->logic;
@@ -3602,6 +3812,13 @@ static u8 configure_pip_value_lut_from_layout(Gauge *gauge, const GaugeLayout *l
     return 1;
 }
 
+/**
+ * Initialize a Gauge from a GaugeInit config.
+ *
+ * Sets up the embedded GaugeLogic, auto-generates the value-to-pixels LUT
+ * (for fill mode when maxValue != maxFillPixels), and initializes VRAM
+ * allocation state. Trail and value animation are disabled by default.
+ */
 void Gauge_init(Gauge *gauge, const GaugeInit *init)
 {
     if (!gauge || !init)
@@ -3641,6 +3858,7 @@ void Gauge_init(Gauge *gauge, const GaugeInit *init)
     gauge->vramMode = init->vramMode;
 }
 
+/** Configure value animation (0=instant changes, 1=animated transitions). */
 void Gauge_setValueAnim(Gauge *gauge, u8 enabled, u8 shift)
 {
     GaugeLogic *logic = &gauge->logic;
@@ -3648,6 +3866,7 @@ void Gauge_setValueAnim(Gauge *gauge, u8 enabled, u8 shift)
     logic->valueAnimShift = (shift == 0) ? GAUGE_DEFAULT_VALUE_ANIM_SHIFT : shift;
 }
 
+/** Configure trail animation (0=no trail, 1=hold+blink+shrink trail effect). */
 void Gauge_setTrailAnim(Gauge *gauge, u8 enabled, u8 shift, u8 blinkShift)
 {
     GaugeLogic *logic = &gauge->logic;
@@ -3780,6 +3999,11 @@ static inline BlinkState compute_blink_state(const GaugeLogic *logic)
     s.blinkOn = 1;
     if (logic->trailEnabled && logic->blinkFramesRemaining > 0)
     {
+        /* Toggle blink on/off at a rate controlled by blinkShift.
+         * blinkTimer increments each frame; shifting right by blinkShift
+         * divides by 2^blinkShift, so bit 0 of the result toggles every
+         * 2^blinkShift frames.  blinkShift=1 -> toggle every 2 frames,
+         * blinkShift=2 -> every 4 frames, etc. */
         s.blinkOn = (u8)(((logic->blinkTimer >> logic->blinkShift) & 1) == 0);
     }
     s.blinkOnChanged = (logic->lastBlinkOn != s.blinkOn);
@@ -3848,7 +4072,11 @@ static void gauge_tick_and_render_fill(Gauge *gauge)
     /* --- Compute current render state --- */
     const u16 valuePixels = logic->valuePixels;
 
-    /* Compute trail with blink effect */
+    /* Compute trail with blink effect.
+     * trailPixels = actual trail position (clamped to at least valuePixels).
+     * trailPixelsRendered = what the render loop uses:
+     *   - blinkOn=1 -> show trail normally (trailPixels)
+     *   - blinkOn=0 -> hide trail by collapsing it to valuePixels */
     u16 trailPixels = logic->trailPixels;
     if (trailPixels < valuePixels)
         trailPixels = valuePixels;
@@ -3873,8 +4101,14 @@ static void gauge_tick_and_render_fill(Gauge *gauge)
 }
 
 /**
- * Quantize a pixel position to PIP boundaries.
- * Uses valueToPixelsLUT when available (layout-derived PIP widths).
+ * Quantize a pixel position to the nearest PIP step boundary.
+ *
+ * Scans the valueToPixelsLUT to find the largest pip boundary <= pixels.
+ * Example: LUT = [0, 16, 32, 48, 64], pixels=20 -> returns 16.
+ *
+ * @param logic   Logic with valueToPixelsLUT and maxValue
+ * @param pixels  Raw pixel value to quantize
+ * @return Quantized pixel value aligned to a pip boundary
  */
 static inline u16 quantize_pixels_to_pip_step(const GaugeLogic *logic, u16 pixels)
 {
@@ -3895,6 +4129,13 @@ static inline u16 quantize_pixels_to_pip_step(const GaugeLogic *logic, u16 pixel
     return lut[value];
 }
 
+/**
+ * PIP-mode update path: tick logic + render all parts.
+ *
+ * Same flow as fill mode, but pixel values are quantized to pip boundaries
+ * before rendering. This ensures each pip snaps to full/empty states rather
+ * than showing partial fills. Uses valueToPixelsLUT for quantization.
+ */
 static void gauge_tick_and_render_pip(Gauge *gauge)
 {
     GaugeLogic *logic = &gauge->logic;
@@ -3937,6 +4178,7 @@ static void gauge_tick_and_render_pip(Gauge *gauge)
     }
 }
 
+/** Update gauge: tick logic + render all parts. Call once per frame. */
 void Gauge_update(Gauge *gauge)
 {
     if (!gauge || !gauge->tickAndRenderHandler)
@@ -3945,6 +4187,7 @@ void Gauge_update(Gauge *gauge)
     gauge->tickAndRenderHandler(gauge);
 }
 
+/** Set gauge value instantly (no trail, no animation). Resets all trail state. */
 void Gauge_setValue(Gauge *gauge, u16 newValue)
 {
     GaugeLogic *logic = &gauge->logic;
@@ -3964,6 +4207,13 @@ void Gauge_setValue(Gauge *gauge, u16 newValue)
     logic->trailMode = GAUGE_TRAIL_NONE;
 }
 
+/**
+ * Decrease gauge value (damage).
+ *
+ * Trail holds at the previous position for holdFrames, then blinks for
+ * blinkFrames, then shrinks toward the new value. If valueAnim is enabled,
+ * the value itself also animates down.
+ */
 void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
 {
     GaugeLogic *logic = &gauge->logic;
@@ -3990,7 +4240,11 @@ void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
         return;
     }
 
-    /* Trail stays at previous position (damage effect) */
+    /* Trail anchors at the currently displayed value (not the new target).
+     * This creates the visual "damage gap" between trail and value.
+     * Uses valuePixels (animated position) so the trail doesn't jump ahead
+     * if a previous animation is still in progress.
+     * If switching from GAIN mode, reset trail from the target to current. */
     const u16 previousDisplayedValuePixels = logic->valuePixels;
     if (logic->trailMode == GAUGE_TRAIL_GAIN)
     {
@@ -4008,6 +4262,13 @@ void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
     logic->trailMode = GAUGE_TRAIL_DAMAGE;
 }
 
+/**
+ * Increase gauge value (heal).
+ *
+ * If both valueAnim and trail are enabled, triggers a gain trail effect:
+ * trail jumps to target, holds, blinks, then value catches up.
+ * Otherwise, trail follows value immediately.
+ */
 void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
 {
     GaugeLogic *logic = &gauge->logic;
@@ -4053,6 +4314,17 @@ void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
    Utility functions
    ============================================================================= */
 
+/**
+ * Compute how many VRAM tiles are needed for a layout.
+ *
+ * VRAM budget depends on mode:
+ * - PIP:     1 tile per cell with a compact strip
+ * - Fixed:   1 tile per cell with a valid tileset
+ * - Dynamic: 3 standard tiles per unique segment (empty/full/fullTrail) +
+ *            partial tiles (value/trail/end/trailSecond) + bridge + cap tiles
+ *
+ * @return Number of VRAM tiles required
+ */
 static u16 compute_vram_size_for_layout(const GaugeLayout *layout,
                                         GaugeVramMode vramMode,
                                         u8 trailEnabled,
@@ -4064,8 +4336,8 @@ static u16 compute_vram_size_for_layout(const GaugeLayout *layout,
         u16 count = 0;
         for (u8 i = 0; i < layout->length; i++)
         {
-            const u8 segId = layout->segmentIdByCell[i];
-            if (layout->pipTilesetBySegment[segId] != NULL)
+            const u8 segmentId = layout->segmentIdByCell[i];
+            if (layout->pipTilesetBySegment[segmentId] != NULL)
                 count++;
         }
         return count;
@@ -4077,8 +4349,8 @@ static u16 compute_vram_size_for_layout(const GaugeLayout *layout,
         u16 count = 0;
         for (u8 i = 0; i < layout->length; i++)
         {
-            const u8 segId = layout->segmentIdByCell[i];
-            if (layout->tilesetBySegment[segId] || layout->gainTilesetBySegment[segId])
+            const u8 segmentId = layout->segmentIdByCell[i];
+            if (layout->tilesetBySegment[segmentId] || layout->gainTilesetBySegment[segmentId])
                 count++;
         }
         return count;
@@ -4094,22 +4366,22 @@ static u16 compute_vram_size_for_layout(const GaugeLayout *layout,
 
     for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
     {
-        const u8 segId = layout->segmentIdByCell[cellIndex];
-        if ((layout->tilesetBySegment[segId] || layout->gainTilesetBySegment[segId]) &&
-            !segmentUsed[segId])
+        const u8 segmentId = layout->segmentIdByCell[cellIndex];
+        if ((layout->tilesetBySegment[segmentId] || layout->gainTilesetBySegment[segmentId]) &&
+            !segmentUsed[segmentId])
         {
-            segmentUsed[segId] = 1;
+            segmentUsed[segmentId] = 1;
             segmentCount++;
         }
     }
 
-    for (u8 segId = 0; segId < GAUGE_MAX_SEGMENTS; segId++)
+    for (u8 segmentId = 0; segmentId < GAUGE_MAX_SEGMENTS; segmentId++)
     {
-        if (segmentUsed[segId] &&
-            (layout->tilesetEndBySegment[segId] || layout->gainTilesetEndBySegment[segId]))
+        if (segmentUsed[segmentId] &&
+            (layout->tilesetEndBySegment[segmentId] || layout->gainTilesetEndBySegment[segmentId]))
             hasEndTileset = 1;
-        if (segmentUsed[segId] &&
-            (layout->tilesetBridgeBySegment[segId] || layout->gainTilesetBridgeBySegment[segId]))
+        if (segmentUsed[segmentId] &&
+            (layout->tilesetBridgeBySegment[segmentId] || layout->gainTilesetBridgeBySegment[segmentId]))
             bridgeCount++;
     }
 
@@ -4137,6 +4409,7 @@ static u16 compute_vram_size_for_layout(const GaugeLayout *layout,
     return (u16)(segmentCount * tilesPerSegment + partialTiles + bridgeCount + capTiles);
 }
 
+/** Public API: compute VRAM tiles needed for a layout (for manual VRAM allocation). */
 u16 Gauge_getVramSize(const Gauge *gauge,
                       const GaugeLayout *layout)
 {

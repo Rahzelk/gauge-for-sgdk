@@ -4,25 +4,74 @@
 #include <genesis.h>
 
 /* =============================================================================
-   gauge.h / gauge.c â€” Single-lane HUD gauge for SGDK / Mega Drive
+   gauge.h / gauge.c - Pixel-perfect HUD gauge for SGDK / Mega Drive
    =============================================================================
 
-   SIMPLIFIED GAUGE MODULE
-   -----------------------
-   This module provides a pixel-perfect gauge rendering system optimized for
-   16-bit hardware with minimal CPU/VRAM overhead.
+   WHAT IS A GAUGE?
+   ----------------
+   A gauge is a visual bar (health bar, energy bar, etc.) rendered on the
+   Mega Drive's tile-based hardware. It fills/empties pixel by pixel to show
+   a value between 0 and maxValue.
 
-   KEY CONCEPTS:
-   - NO lane concept: 1 gauge = 1 row/column of tiles
-   - Shared GaugeLogic via Gauge container (multiple parts sync perfectly)
-   - Only 2 main objects: Gauge (high-level) and GaugeLayout (configuration)
-   - Fill offset support for extended/segmented gauges
+   Example: a 12-tile horizontal health bar
+     [################............]   value = 60%
+      <-- filled -->  <-- empty -->
+
+   VISUAL CONCEPTS:
+   ----------------
+   SEGMENTS: A gauge is divided into cells (one 8x8 tile each). Each cell
+     belongs to a "segment" which determines its tileset (graphic style).
+     Multiple segments allow different visual zones (e.g., green/yellow/red).
+
+   FILL: Each tile can be partially filled from 0 to 8 pixels. The "fill"
+     is the pixel-level progression within a tile. A gauge with 12 tiles
+     has 12*8 = 96 pixels of fill resolution.
+
+   TRAIL: When the gauge value decreases (damage), the old value can leave
+     a "trail" (ghost bar) that lingers, blinks, then shrinks. When the
+     gauge increases (heal), a "gain trail" can lead the value.
+       [####====........]   # = value, = = trail (damage)
+       [####====########]   = = gain trail (value catching up)
+
+   BLINK-OFF: During the blink phase, the trail alternates between normal
+     appearance and a "blink-off" tileset (can be blank or a different style).
+
+   CAPS: Optional decorative tiles at the start/end of the gauge that always
+     display but change tileset based on whether the value edge is present.
+
+   BRIDGE: When two segments meet, the last cell of the first segment can use
+     a special "bridge" tileset for smooth visual transition.
 
    ARCHITECTURE:
-   - GaugeLayout: Geometry + visual appearance (orientation, palette, flip)
-   - GaugeLogic:  Value state machine (value, trail, animation timers)
-   - GaugePart: VRAM streaming engine (internal, managed by Gauge)
-   - Gauge: High-level container (1 logic + N parts)
+   -------------
+   4 main structures, from configuration to runtime:
+
+   GaugeLayout  - Visual configuration (static after init)
+     Defines the gauge's appearance: tile count, segment assignment,
+     tilesets for body/end/trail/bridge/caps, orientation, palette, flip.
+     Set once during init, then shared by reference across parts.
+
+   GaugeLogic   - Value state machine (ticked every frame)
+     Manages the current value, trail position, blink timers, and animation.
+     One GaugeLogic per Gauge, shared across all parts for perfect sync.
+
+   GaugePart    - VRAM renderer (one per visual instance)
+     Streams ROM tiles to VRAM each frame. Contains a COPY of the layout.
+     Two VRAM modes:
+       FIXED   = 1 VRAM tile per cell, updated via DMA. More VRAM, less CPU.
+       DYNAMIC = shared VRAM tiles, remapped via tilemap. Less VRAM, more CPU.
+
+   Gauge        - High-level container
+     Binds 1 GaugeLogic + N GaugeParts. This is the main object users create.
+
+   VALUE MODES:
+   ------------
+   FILL: Classic continuous gauge. Each tile fills pixel by pixel (0..8 px).
+     Total fill resolution = cellCount * 8 pixels.
+
+   PIP: Discrete gauge. Each "pip" is 1 or more tiles that switch between
+     5 states: EMPTY, VALUE, LOSS, GAIN, BLINK_OFF.
+     Total value range = number of pips.
 
    TYPICAL USAGE:
    ```c
@@ -77,10 +126,13 @@
 #define GAUGE_FILL_TILE_COUNT 45   /* Tiles in a 45-tile fill strip */
 #define GAUGE_TILE_U32_COUNT   8   /* 32-bit words per tile (8x8 @ 4bpp = 32 bytes) */
 
-/* Default animation values */
-#define GAUGE_DEFAULT_VALUE_ANIM_SHIFT  4  /* step = diff/16 + 1 */
-#define GAUGE_DEFAULT_TRAIL_ANIM_SHIFT  4  /* step = diff/16 + 1 */
-#define GAUGE_DEFAULT_BLINK_SHIFT       3  /* ~7.5 Hz @ 60fps */
+/* Default animation speeds (bit shift dividers: higher = slower)
+ * Animation step formula: step = (distance >> shift) + 1
+ * Blink frequency formula: frequency = 60fps / (2 * (1 << shift)) Hz
+ */
+#define GAUGE_DEFAULT_VALUE_ANIM_SHIFT  4  /* Value moves at distance/16 + 1 px per frame */
+#define GAUGE_DEFAULT_TRAIL_ANIM_SHIFT  4  /* Trail shrinks at distance/16 + 1 px per frame */
+#define GAUGE_DEFAULT_BLINK_SHIFT       3  /* Blink toggles every 8 frames (~7.5 Hz @ 60fps) */
 
 /* Fill pixel range */
 #define GAUGE_FILL_PX_MIN  0
@@ -273,13 +325,13 @@ typedef void GaugePartRenderHandler(GaugePart *part,
    orientation:
      GAUGE_ORIENT_HORIZONTAL or GAUGE_ORIENT_VERTICAL.
 
-   paletteLine:
+   palette:
      Palette line (0-3) for tile rendering.
 
    priority:
      Tile priority (0=behind sprites, 1=in front of sprites).
 
-   vflip, hflip:
+   verticalFlip, horizontalFlip:
      Vertical/horizontal flip flags for tile rendering.
      Used for mirrored gauges (P2 side).
 
@@ -387,10 +439,10 @@ typedef struct
 
     /* --- Visual properties (all u8 for compact packing) --- */
     u8 orientation;                              /* GAUGE_ORIENT_HORIZONTAL=0 or GAUGE_ORIENT_VERTICAL=1 */
-    u8 paletteLine;                              /* Palette line (0-3) */
+    u8 palette;                              /* Palette line (0-3) */
     u8 priority;                                 /* Tile priority (0-1) */
-    u8 vflip;                                    /* Vertical flip */
-    u8 hflip;                                    /* Horizontal flip */
+    u8 verticalFlip;                                    /* Vertical flip */
+    u8 horizontalFlip;                                    /* Horizontal flip */
 
     /* --- Cached flags (pre-computed at init, avoid runtime scans) --- */
     u8 hasBlinkOff;                              /* 1 if any segment has blink-off tilesets (damage) */
@@ -406,8 +458,19 @@ typedef struct
    ----------------------------------------------------------------------------- */
 
 /**
- * Set of tilesets for one visual context.
- * NULL entries are allowed and follow normal fallback behavior.
+ * Set of tilesets for one visual context (base, gain, blinkOff, gainBlinkOff).
+ *
+ * Each field is a pointer to a pre-rendered strip of tiles in ROM:
+ * - body:          45-tile strip for interior cells (always needed)
+ * - end:           45-tile strip for the value/trail edge cell (optional)
+ * - trail:         64-tile strip for trail-specific edge rendering (optional)
+ * - bridge:        45-tile strip for segment transition cells (optional)
+ * - capStart:      45-tile strip for the first cell border (optional)
+ * - capEnd:        45-tile strip for the last cell border (optional)
+ * - capStartBreak: 45-tile strip for cap start when fully filled or empty (optional)
+ * - capStartTrail: 45-tile strip for cap start when in trail zone (optional)
+ *
+ * NULL entries fall back to the parent context's tileset (e.g., gain→base).
  */
 typedef struct
 {
@@ -422,33 +485,42 @@ typedef struct
 } GaugeSkinSet;
 
 /**
- * Complete style for one segment across all contexts.
+ * Complete style for one segment across all 4 visual contexts.
+ *
+ * A segment can have up to 4 sets of tilesets, selected based on trail state:
+ * - base:         Normal rendering (always needed)
+ * - gain:         Used when trail mode is GAIN (value increasing)
+ * - blinkOff:     Used during blink OFF frames of damage trail
+ * - gainBlinkOff: Used during blink OFF frames of gain trail
+ *
+ * capEndEnabled: set to 1 to enable cap end rendering for this segment.
  */
 typedef struct
 {
-    GaugeSkinSet base;
-    GaugeSkinSet gain;
-    GaugeSkinSet blinkOff;
-    GaugeSkinSet gainBlinkOff;
-    u8 capEndEnabled;
+    GaugeSkinSet base;         /* Normal tilesets (required) */
+    GaugeSkinSet gain;         /* Gain trail tilesets (optional, falls back to base) */
+    GaugeSkinSet blinkOff;     /* Blink-off tilesets for damage (optional) */
+    GaugeSkinSet gainBlinkOff; /* Blink-off tilesets for gain (optional) */
+    u8 capEndEnabled;          /* 1 = enable cap end tile for this segment */
 } GaugeSegmentStyle;
 
 /**
- * Full layout initialization config.
- * This is the preferred API for new code: one call configures base/gain/blink
- * assets and optional caps/bridges for all segments.
+ * Full layout initialization config (preferred API for new code).
+ *
+ * Bundles all layout parameters into a single struct passed to GaugeLayout_build().
+ * Configures base/gain/blink tilesets and caps/bridges for all segments at once.
  */
 typedef struct
 {
-    u8 length;
-    GaugeFillDirection fillDir;
-    GaugeOrientation orientation;
-    u8 paletteLine;
-    u8 priority;
-    u8 vflip;
-    u8 hflip;
-    const u8 *segmentIdByCell;               /* length entries, NULL => segment 0 everywhere */
-    const GaugeSegmentStyle *segmentStyles;  /* GAUGE_MAX_SEGMENTS entries, NULL => all styles disabled */
+    u8 length;                               /* Number of cells (1..GAUGE_MAX_LENGTH) */
+    GaugeFillDirection fillDirection;         /* GAUGE_FILL_FORWARD or GAUGE_FILL_REVERSE */
+    GaugeOrientation orientation;             /* GAUGE_ORIENT_HORIZONTAL or GAUGE_ORIENT_VERTICAL */
+    u8 palette;                              /* Palette line (0-3) */
+    u8 priority;                             /* Tile priority (0 or 1) */
+    u8 verticalFlip;                         /* Vertical flip flag */
+    u8 horizontalFlip;                       /* Horizontal flip flag */
+    const u8 *segmentIdByCell;               /* Segment assignment per cell (NULL => all segment 0) */
+    const GaugeSegmentStyle *segmentStyles;  /* Style per segment (NULL => no tilesets) */
 } GaugeLayoutInit;
 
 
@@ -467,27 +539,27 @@ void GaugeLayout_build(GaugeLayout *layout, const GaugeLayoutInit *init);
  *
  * @param layout        Layout to initialize
  * @param length        Number of cells (1..GAUGE_MAX_LENGTH)
- * @param fillDir       GAUGE_FILL_FORWARD or GAUGE_FILL_REVERSE
+ * @param fillDirection       GAUGE_FILL_FORWARD or GAUGE_FILL_REVERSE
  * @param tilesets      Array of GAUGE_MAX_SEGMENTS tileset pointers (45-tile strips)
  *                      Can be NULL, tiles will be set from this array
  * @param segmentIdByCell Array of length elements specifying segment ID per cell
  *                      Can be NULL, all cells will use segment 0
  * @param orientation   GAUGE_ORIENT_HORIZONTAL or GAUGE_ORIENT_VERTICAL
- * @param paletteLine   Palette line (0-3, typically PAL0-PAL3)
+ * @param palette   Palette line (0-3, typically PAL0-PAL3)
  * @param priority      Tile priority (0 or 1)
- * @param vflip         Vertical flip (0 or 1)
- * @param hflip         Horizontal flip (0 or 1)
+ * @param verticalFlip         Vertical flip (0 or 1)
+ * @param horizontalFlip         Horizontal flip (0 or 1)
  */
 void GaugeLayout_init(GaugeLayout *layout,
                       u8 length,
-                      GaugeFillDirection fillDir,
+                      GaugeFillDirection fillDirection,
                       const u32 * const *tilesets,
                       const u8 *segmentIdByCell,
                       GaugeOrientation orientation,
-                      u8 paletteLine,
+                      u8 palette,
                       u8 priority,
-                      u8 vflip,
-                      u8 hflip);
+                      u8 verticalFlip,
+                      u8 horizontalFlip);
 
 /**
  * Initialize layout with BODY + optional END tilesets.
@@ -498,31 +570,31 @@ void GaugeLayout_init(GaugeLayout *layout,
  *
  * @param layout        Layout to initialize
  * @param length        Number of cells (1..GAUGE_MAX_LENGTH)
- * @param fillDir       GAUGE_FILL_FORWARD or GAUGE_FILL_REVERSE
+ * @param fillDirection       GAUGE_FILL_FORWARD or GAUGE_FILL_REVERSE
  * @param bodyTilesets  Array of GAUGE_MAX_SEGMENTS BODY tileset pointers (45-tile strips)
  * @param endTilesets   Array of GAUGE_MAX_SEGMENTS END tileset pointers (optional, can be NULL)
  * @param trailTilesets Array of GAUGE_MAX_SEGMENTS TRAIL tileset pointers (optional, can be NULL)
  * @param bridgeTilesets Array of GAUGE_MAX_SEGMENTS BRIDGE tileset pointers (optional, can be NULL)
  * @param segmentIdByCell Array of length elements specifying segment ID per cell
  * @param orientation   GAUGE_ORIENT_HORIZONTAL or GAUGE_ORIENT_VERTICAL
- * @param paletteLine   Palette line (0-3, typically PAL0-PAL3)
+ * @param palette   Palette line (0-3, typically PAL0-PAL3)
  * @param priority      Tile priority (0 or 1)
- * @param vflip         Vertical flip (0 or 1)
- * @param hflip         Horizontal flip (0 or 1)
+ * @param verticalFlip         Vertical flip (0 or 1)
+ * @param horizontalFlip         Horizontal flip (0 or 1)
  */
 void GaugeLayout_initEx(GaugeLayout *layout,
                         u8 length,
-                        GaugeFillDirection fillDir,
+                        GaugeFillDirection fillDirection,
                         const u32 * const *bodyTilesets,
                         const u32 * const *endTilesets,
                         const u32 * const *trailTilesets,
                         const u32 * const *bridgeTilesets,
                         const u8 *segmentIdByCell,
                         GaugeOrientation orientation,
-                        u8 paletteLine,
+                        u8 palette,
                         u8 priority,
-                        u8 vflip,
-                        u8 hflip);
+                        u8 verticalFlip,
+                        u8 horizontalFlip);
 
 /**
  * Set pixel fill offset for a layout window.
@@ -756,9 +828,9 @@ typedef struct
     const u32 *endFillStrip45;      /* END strip (NULL if not supported) */
     const u32 *trailFillStrip64;    /* TRAIL strip (NULL if not supported) */
     const u32 *bridgeFillStrip45;   /* BRIDGE strip (NULL if not supported) */
-    const u32 *loadedFillStrip45;   /* Last strip uploaded (for cache) */
+    const u32 *cachedStrip;   /* Last strip uploaded (for cache) */
     u16 vramTileIndex;              /* VRAM tile index for this cell */
-    u8 loadedFillIdx;               /* Last fill index uploaded (0xFF=none) */
+    u8 cachedFillIndex;               /* Last fill index uploaded (0xFF=none) */
     u8 cellIndex;                   /* Index in layout (for fill calculation) */
 } GaugeStreamCell;
 
@@ -775,7 +847,7 @@ typedef struct
  * Additional dedicated VRAM tiles exist for bridges and caps, since these
  * use different tilesets and can't share the standard segment tiles.
  *
- * Change detection caches (loadedFillIdx*, loadedSegment*) avoid redundant
+ * Change detection caches (cachedFillIndex*, loadedSegment*) avoid redundant
  * DMA transfers when the same tile content is already in VRAM.
  */
 typedef struct
@@ -796,16 +868,16 @@ typedef struct
 
     /* --- Cache for loaded partial tiles --- */
     u8 loadedSegmentPartialValue;   /* Which segment's partial value is loaded */
-    u8 loadedFillIdxPartialValue;   /* Loaded fill index for partial value */
+    u8 cachedFillIndexPartialValue;   /* Loaded fill index for partial value */
     u8 loadedSegmentPartialTrail;   /* Which segment's partial trail is loaded */
-    u8 loadedFillIdxPartialTrail;   /* Loaded fill index for partial trail */
+    u8 cachedFillIndexPartialTrail;   /* Loaded fill index for partial trail */
     u8 loadedSegmentPartialEnd;     /* Which segment's END tile is loaded */
-    u8 loadedFillIdxPartialEnd;     /* Loaded fill index for END */
+    u8 cachedFillIndexPartialEnd;     /* Loaded fill index for END */
     u8 loadedSegmentPartialTrailSecond; /* Which segment's second trail break is loaded */
-    u8 loadedFillIdxPartialTrailSecond; /* Loaded fill index for second trail break */
-    u8 loadedFillIdxBridge[GAUGE_MAX_SEGMENTS]; /* Loaded fill index for bridge tile */
-    u8 loadedFillIdxCapStart;           /* Loaded fill index for cap start tile */
-    u8 loadedFillIdxCapEnd;             /* Loaded fill index for cap end tile */
+    u8 cachedFillIndexPartialTrailSecond; /* Loaded fill index for second trail break */
+    u8 cachedFillIndexBridge[GAUGE_MAX_SEGMENTS]; /* Loaded fill index for bridge tile */
+    u8 cachedFillIndexCapStart;           /* Loaded fill index for cap start tile */
+    u8 cachedFillIndexCapEnd;             /* Loaded fill index for cap end tile */
     u8 loadedCapStartUsesBreak;         /* 1 if cap start break strip is loaded */
     u8 loadedCapStartUsesTrail;         /* 1 if cap start trail strip is loaded */
 
