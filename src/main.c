@@ -59,7 +59,7 @@
 
 /* Tile lengths for each sample */
 #define SAMPLE1_LENGTH      12      /* Sample 1: 12-tile yellow gauge */
-#define SAMPLE2_LENGTH  14      /* Sample 2: 7 pips, 2 tiles each */
+#define SAMPLE2_LENGTH      14      /* Sample 2: 7 pips, 2 tiles each */
 #define SAMPLE3_LENGTH      15      /* Sample 3: 15 tiles cap+border */
 #define SAMPLE5_LENGTH      16      /* Sample 5: 16 tiles multi-bridge */
 #define SAMPLE6_LENGTH      12      /* Sample 6: 12 tiles vertical (3 segments) */
@@ -176,13 +176,13 @@ static const char* getSelectedGaugeName(void)
 {
     switch (g_selectedGauge)
     {
-        case 0: return "Sample 1          ";
+        case 0: return "Sample 1           ";
         case 1: return "Sample 2 PIP (7 pts)  ";
-        case 2: return "Sample 3 Cap+Border   ";
+        case 2: return "Sample 3 Bevel        ";
         case 3: return "Sample 4 Cap Start/End";
-        case 4: return "Sample 5 Bridge       ";
+        case 4: return "Sample 5 Bridge & Gain  ";
         case 5: return "Sample 6 Vertical     ";
-        case 6: return "Sample 7 Multi Segment";
+        case 6: return "Sample 7 Multi Part   ";
         default: return "Unknown               ";
     }
 }
@@ -305,19 +305,19 @@ static void initSample1(u16 *nextVram)
                      0,                          /* verticalFlip */
                      0);                         /* horizontalFlip */
 
-    /* Step 4: Calculate pixel dimensions
-       - maxValue = maxFillPixels for 1:1 mapping (no LUT needed) */
-    const u16 sample1MaxPixels = (u16)(SAMPLE1_LENGTH * GAUGE_PIXELS_PER_TILE);
-
-    /* Step 5: Initialize the gauge
+    /* Step 4: Initialize the gauge
+       - maxFillPixels auto-derived from layout (12 * 8 = 96)
+       - maxValue = maxFillPixels for 1:1 mapping (no LUT needed)
        - Starts at full value
        - Uses VRAM_DYNAMIC mode (fewer tiles, more CPU efficient for single gauge) */
+    const u16 sample1MaxPixels = (u16)(SAMPLE1_LENGTH * GAUGE_PIXELS_PER_TILE);
+
     vramBase = *nextVram;
     Gauge_init(&g_gaugeSample1, &(GaugeInit){
         .maxValue = sample1MaxPixels,
-        .maxFillPixels = sample1MaxPixels,
         .initialValue = sample1MaxPixels,
         .parts = g_partsSample1,
+        .layout = &s_layoutSample1,
         .vramBase = vramBase,
         .vramMode = GAUGE_VRAM_DYNAMIC,
         .valueMode = GAUGE_VALUE_MODE_FILL
@@ -371,15 +371,13 @@ static void initSample1(u16 *nextVram)
                      0);
     GaugeLayout_setPipStyles(&s_layoutSample2, sample2CompactTilesets, sample2Widths);
 
-    const u16 sample2MaxPixels = (u16)(SAMPLE2_LENGTH * GAUGE_PIXELS_PER_TILE);
-
     /* maxValue=7 with 14 tiles in PIP mode => 2 tiles per value point */
     vramBase = *nextVram;
     Gauge_init(&g_gaugeSample2, &(GaugeInit){
         .maxValue = 7,
-        .maxFillPixels = sample2MaxPixels,
         .initialValue = 7,
         .parts = g_partsSample2,
+        .layout = &s_layoutSample2,
         .vramBase = vramBase,
         .vramMode = GAUGE_VRAM_DYNAMIC,
         .valueMode = GAUGE_VALUE_MODE_PIP
@@ -448,9 +446,9 @@ static void initSample3(u16 *nextVram)
     vramBase = *nextVram;
     Gauge_init(&g_gaugeSample3, &(GaugeInit){
         .maxValue = sample3MaxPixels,
-        .maxFillPixels = sample3MaxPixels,
         .initialValue = sample3MaxPixels,
         .parts = g_partsSample3,
+        .layout = &s_layoutSample3,
         .vramBase = vramBase,
         .vramMode = GAUGE_VRAM_DYNAMIC,
         .valueMode = GAUGE_VALUE_MODE_FILL
@@ -465,11 +463,12 @@ static void initSample3(u16 *nextVram)
 
     /* Step 6: Log VRAM */
     vramSize = Gauge_getVramSize(&g_gaugeSample3, &s_layoutSample3);
-    logVramUsage("Sample 3 (Cap+Border)", vramBase, vramSize);
+    logVramUsage("Sample 3 (bevel)", vramBase, vramSize);
     *nextVram = (u16)(vramBase + vramSize);
 
     /* Draw label under gauge */
     VDP_drawText("Sample 3", SAMPLE3_X, SAMPLE3_Y + 1);
+    VDP_drawText("Bevel tileset", SAMPLE3_X, SAMPLE3_Y + 2);
 }
 
 
@@ -550,16 +549,15 @@ static void initSample5(u16 *nextVram)
     };
     GaugeLayout_build(&s_layoutSample5, &sample5LayoutInit);
 
-    /* Step 4: Calculate dimensions */
-    const u16 sample5MaxPixels = (u16)(SAMPLE5_LENGTH * GAUGE_PIXELS_PER_TILE);
-
-    /* Step 5: Initialize gauge */
+    /* Step 4: Initialize gauge
+       - maxValue=100 with 16 tiles (128px): scaling LUT is built automatically
+       - initialValue=100 (starts full, clamped to maxValue) */
     vramBase = *nextVram;
     Gauge_init(&g_gaugeSample5, &(GaugeInit){
         .maxValue = 100,
-        .maxFillPixels = sample5MaxPixels,
-        .initialValue = sample5MaxPixels,
+        .initialValue = 100,
         .parts = g_partsSample5,
+        .layout = &s_layoutSample5,
         .vramBase = vramBase,
         .vramMode = GAUGE_VRAM_DYNAMIC,
         .valueMode = GAUGE_VALUE_MODE_FILL
@@ -581,7 +579,7 @@ static void initSample5(u16 *nextVram)
 
     /* Draw label under gauge */
     VDP_drawText("Sample 5", SAMPLE5_X, SAMPLE5_Y + 1);
-    VDP_drawText("Bridge", SAMPLE5_X, SAMPLE5_Y + 2);
+    VDP_drawText("Bevel, Bridge and Gain Trail", SAMPLE5_X, SAMPLE5_Y + 2);
 }
 
 /* =============================================================================
@@ -635,9 +633,9 @@ static void initSample6(u16 *nextVram)
     vramBase = *nextVram;
     Gauge_init(&g_gaugeSample6, &(GaugeInit){
         .maxValue = sample6MaxPixels,
-        .maxFillPixels = sample6MaxPixels,
         .initialValue = sample6MaxPixels,
         .parts = g_partsSample6,
+        .layout = &s_layoutSample6,
         .vramBase = vramBase,
         .vramMode = GAUGE_VRAM_FIXED,
         .valueMode = GAUGE_VALUE_MODE_FILL
@@ -807,9 +805,9 @@ static void initSample7(u16 *nextVram)
     vramBase = *nextVram;
     Gauge_init(&g_gaugeSample7, &(GaugeInit){
         .maxValue = sample7MaxPixels,
-        .maxFillPixels = sample7MaxPixels,
         .initialValue = sample7MaxPixels,
         .parts = g_partsSample7,
+        .layout = &s_layoutSample7Part1,
         .vramBase = vramBase,
         .vramMode = GAUGE_VRAM_DYNAMIC,
         .valueMode = GAUGE_VALUE_MODE_FILL
@@ -823,7 +821,7 @@ static void initSample7(u16 *nextVram)
                   SAMPLE7_X, SAMPLE7_Y);
 
     /* Debug: log dynamic VRAM tiles to detect overlaps */
-    logDynamicVramTiles("Sample 7 part1 dyn tiles", &g_partsSample7[0]);
+    logDynamicVramTiles("Sample 7 multi part ", &g_partsSample7[0]);
     vramSize = Gauge_getVramSize(&g_gaugeSample7, &s_layoutSample7Part1);
     logVramUsage("Sample 7 top part gauge", vramBase, vramSize);
     vramBase = (u16)(vramBase + vramSize);
@@ -869,14 +867,12 @@ static void initSample7(u16 *nextVram)
                      PAL0, 1, 0, 0);
     GaugeLayout_setPipStyles(&s_layoutSample7Pip, sample7PipCompactTilesets, sample7PipWidths);
 
-    const u16 sample7PipMaxPixels = (u16)(SAMPLE7_PIP_LEN * GAUGE_PIXELS_PER_TILE);
-
     vramBase = *nextVram;
     Gauge_init(&g_gaugeSample7Pip, &(GaugeInit){
         .maxValue = 4,
-        .maxFillPixels = sample7PipMaxPixels,
         .initialValue = 0,
         .parts = g_partsSample7Pip,
+        .layout = &s_layoutSample7Pip,
         .vramBase = vramBase,
         .vramMode = GAUGE_VRAM_DYNAMIC,
         .valueMode = GAUGE_VALUE_MODE_PIP
@@ -893,8 +889,8 @@ static void initSample7(u16 *nextVram)
     *nextVram = (u16)(vramBase + vramSize);
 
     /* Draw labels under gauges */
-    VDP_drawText("Sample 7 Multi-Segment", SAMPLE7_X, SAMPLE7_PART2_Y + 1);
-    VDP_drawText("    and  Multi-Part", SAMPLE7_X, SAMPLE7_PART2_Y + 2);
+    VDP_drawText("Sample 7 Multi-Part", SAMPLE7_X, SAMPLE7_PART2_Y + 1);
+    VDP_drawText("   + mini PIP Gauge", SAMPLE7_X, SAMPLE7_PART2_Y + 2);
 }
 
 /* =============================================================================
@@ -1068,9 +1064,9 @@ static void initSample4(u16 *nextVram)
     vramBase = *nextVram;
     Gauge_init(&g_gaugeSample4, &(GaugeInit){
         .maxValue = sample4MaxPixels,
-        .maxFillPixels = sample4MaxPixels,
         .initialValue = sample4MaxPixels,
         .parts = g_partsSample4,
+        .layout = &s_layoutSample4,
         .vramBase = vramBase,
         .vramMode = GAUGE_VRAM_DYNAMIC,
         .valueMode = GAUGE_VALUE_MODE_FILL
