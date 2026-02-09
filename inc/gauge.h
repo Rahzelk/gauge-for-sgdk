@@ -103,11 +103,11 @@
    The value then catches up after hold+blink.
 
      Time 0 (heal happens):
-       [########|###value|===TRAIL=|==TRAIL==|########|########]
+       [########|###value|===TRAIL=|==TRAIL==|........|........]
         value moving -->   <--- trail at new target
 
      Time 1 (value catches up after blink):
-       [########|########|########|########|########|########]
+       [########|########|########|########|........|........]
 
    Timeline summary:
      Gauge_decrease() -> hold (N frames) -> blink (M frames) -> shrink -> done
