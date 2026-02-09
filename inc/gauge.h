@@ -213,8 +213,8 @@
    - Fill direction (forward or reverse)
 
    You typically create one GaugeLayout per gauge visual design, then pass
-   it to Gauge_addPart(). The layout is COPIED into the part, so you can
-   reuse or modify the original after calling addPart.
+   it to Gauge_addPart(). The layout is retained by each part (refcounted),
+   so rebuild/reconfigure only after all referencing gauges are released.
 
 
    GaugeLogic -- "What is the gauge's current value?"
@@ -233,7 +233,7 @@
    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
    The VRAM rendering engine. One part = one visual instance on screen.
    Each part has:
-   - A COPY of a GaugeLayout (its own visual config)
+   - A retained GaugeLayout reference (shared visual config with refcount)
    - A screen position (originX, originY in tilemap coordinates)
    - A VRAM allocation (vramBase + tiles)
    - A render handler (selected at init based on VRAM mode + value mode)
@@ -273,7 +273,7 @@
    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
    High-level container that binds everything together:
    - 1 embedded GaugeLogic (value state machine)
-   - N GaugeParts (rendering units, user-allocated array)
+   - N GaugeParts (rendering units, allocated internally)
    - VRAM allocation state (auto-increments as parts are added)
 
    This is the only struct most users need to interact with.
@@ -312,7 +312,6 @@
 
    ```c
    static Gauge myGauge;
-   static GaugePart myParts[2];
    static GaugeLayout myLayout;
 
    // 1. Initialize layout with visual properties
@@ -323,7 +322,6 @@
    Gauge_init(&myGauge, &(GaugeInit){
        .maxValue = 100,
        .initialValue = 100,
-       .parts = myParts,
        .layout = &myLayout,
        .vramBase = VRAM_BASE,
        .vramMode = GAUGE_VRAM_DYNAMIC,
@@ -331,8 +329,8 @@
    });
 
    // 3. Add parts (VRAM auto-allocated sequentially)
-   Gauge_addPart(&myGauge, &myParts[0], &myLayout, 2, 5);
-   Gauge_addPart(&myGauge, &myParts[1], &myLayout, 2, 6);
+   Gauge_addPart(&myGauge, &myLayout, 2, 5);
+   Gauge_addPart(&myGauge, &myLayout, 2, 6);
 
    // 4. Game loop
    while(1) {
@@ -357,23 +355,22 @@
 #define GAUGE_MAX_LENGTH      16   /* Maximum tiles per gauge */
 #define GAUGE_MAX_PARTS        8   /* Maximum parts per gauge (safety guard) */
 
-/* Maximum logical value (maxValue) supported by the embedded LUT.
- * Each Gauge embeds a value-to-pixels lookup table of
- * (GAUGE_LUT_CAPACITY + 1) entries in its GaugeLogic struct.
+/* Maximum logical value (maxValue) supported by the LUT buffer.
+ * Each Gauge allocates a value-to-pixels lookup table of
+ * (GAUGE_LUT_CAPACITY + 1) entries when needed.
  *
  * Any maxValue passed to Gauge_init() must be <= GAUGE_LUT_CAPACITY.
  * Set this to the largest maxValue you'll use across all gauges.
  *
  * Default: 160 (= 20 tiles * 8 pixels/tile).
  *
- * RAM cost per Gauge instance: (GAUGE_LUT_CAPACITY + 1) * 2 bytes.
+ * Worst-case RAM cost per Gauge instance: (GAUGE_LUT_CAPACITY + 1) * 2 bytes.
  *   GAUGE_LUT_CAPACITY  96  -> 194 bytes/gauge (12-tile gauges)
  *   GAUGE_LUT_CAPACITY 128  -> 258 bytes/gauge (16-tile gauges)
  *   GAUGE_LUT_CAPACITY 160  -> 322 bytes/gauge (20-tile gauges, default)
  *
- * Note: FILL mode 1:1 (maxValue == maxFillPixels) does NOT use the LUT,
- * but the storage is still allocated in the struct. Reduce this value
- * to save RAM if all your gauges use 1:1 mapping.
+ * Note: FILL mode 1:1 (maxValue == maxFillPixels) does not need the LUT.
+ * LUT allocation is dynamic and can be omitted in this case.
  */
 #ifndef GAUGE_LUT_CAPACITY
 #define GAUGE_LUT_CAPACITY  160
@@ -663,65 +660,66 @@ typedef struct
     /* --- Geometry (u16 first for 68000 word alignment) --- */
     u16 fillOffset;                              /* Pixel offset for fill calc */
     u8 length;                                   /* Number of cells (1..16) */
+    u8 segmentCount;                             /* Number of segment entries actually allocated */
 
-    u8 segmentIdByCell[GAUGE_MAX_LENGTH];        /* Segment style per cell */
-    u8 fillIndexByCell[GAUGE_MAX_LENGTH];        /* Fill order per cell */
-    u8 cellIndexByFillIndex[GAUGE_MAX_LENGTH];   /* Inverse LUT: cell index for a given fill index (O(1) lookup) */
+    u8 *segmentIdByCell;                         /* [length] Segment style per cell */
+    u8 *fillIndexByCell;                         /* [length] Fill order per cell */
+    u8 *cellIndexByFillIndex;                    /* [length] Inverse LUT: cell index for a given fill index (O(1) lookup) */
 
     /* --- Tilemap positions --- */
-    Vect2D_u16 tilemapPosByCell[GAUGE_MAX_LENGTH]; /* Tilemap X,Y coordinates per cell */
+    Vect2D_u16 *tilemapPosByCell;                /* [length] Tilemap X,Y coordinates per cell */
  
     /* --- Tilesets --- */
-    const u32 *tilesetBySegment[GAUGE_MAX_SEGMENTS];     /* BODY: 45-tile strips */
-    const u32 *tilesetEndBySegment[GAUGE_MAX_SEGMENTS];  /* END: optional 45-tile strips */
-    const u32 *tilesetTrailBySegment[GAUGE_MAX_SEGMENTS];/* TRAIL: optional 64-tile strips */
-    const u32 *tilesetBridgeBySegment[GAUGE_MAX_SEGMENTS];/* BRIDGE: optional 45-tile strips */
-    const u32 *tilesetCapStartBySegment[GAUGE_MAX_SEGMENTS];/* CAP START: optional 45-tile strips */
-    const u32 *tilesetCapEndBySegment[GAUGE_MAX_SEGMENTS];/* CAP END: optional 45-tile strips */
-    const u32 *tilesetCapStartBreakBySegment[GAUGE_MAX_SEGMENTS];/* CAP START BREAK: optional 45-tile strips */
-    const u32 *tilesetCapStartTrailBySegment[GAUGE_MAX_SEGMENTS];/* CAP START TRAIL: optional 45-tile strips */
-    u8 capEndBySegment[GAUGE_MAX_SEGMENTS];             /* CAP END: 1 if enabled for segment */
+    const u32 **tilesetBySegment;                 /* [segmentCount] BODY: 45-tile strips */
+    const u32 **tilesetEndBySegment;              /* [segmentCount] END: optional 45-tile strips */
+    const u32 **tilesetTrailBySegment;            /* [segmentCount] TRAIL: optional 64-tile strips */
+    const u32 **tilesetBridgeBySegment;           /* [segmentCount] BRIDGE: optional 45-tile strips */
+    const u32 **tilesetCapStartBySegment;         /* [segmentCount] CAP START: optional 45-tile strips */
+    const u32 **tilesetCapEndBySegment;           /* [segmentCount] CAP END: optional 45-tile strips */
+    const u32 **tilesetCapStartBreakBySegment;    /* [segmentCount] CAP START BREAK: optional 45-tile strips */
+    const u32 **tilesetCapStartTrailBySegment;    /* [segmentCount] CAP START TRAIL: optional 45-tile strips */
+    u8 *capEndBySegment;                          /* [segmentCount] CAP END: 1 if enabled for segment */
 
     /* --- Gain trail tilesets (optional, per segment) ---
      * Used during gain trail (value increasing).
      * NULL entries fall back to the normal tilesets.
      */
-    const u32 *gainTilesetBySegment[GAUGE_MAX_SEGMENTS];     /* BODY: 45-tile strips */
-    const u32 *gainTilesetEndBySegment[GAUGE_MAX_SEGMENTS];  /* END: 45-tile strips */
-    const u32 *gainTilesetTrailBySegment[GAUGE_MAX_SEGMENTS];/* TRAIL: 64-tile strips */
-    const u32 *gainTilesetBridgeBySegment[GAUGE_MAX_SEGMENTS];/* BRIDGE: 45-tile strips */
-    const u32 *gainTilesetCapStartBySegment[GAUGE_MAX_SEGMENTS];     /* CAP START: 45-tile strips */
-    const u32 *gainTilesetCapEndBySegment[GAUGE_MAX_SEGMENTS];       /* CAP END: 45-tile strips */
-    const u32 *gainTilesetCapStartBreakBySegment[GAUGE_MAX_SEGMENTS];/* CAP START BREAK: 45-tile strips */
-    const u32 *gainTilesetCapStartTrailBySegment[GAUGE_MAX_SEGMENTS];/* CAP START TRAIL: 45-tile strips */
+    const u32 **gainTilesetBySegment;             /* [segmentCount] BODY: 45-tile strips */
+    const u32 **gainTilesetEndBySegment;          /* [segmentCount] END: 45-tile strips */
+    const u32 **gainTilesetTrailBySegment;        /* [segmentCount] TRAIL: 64-tile strips */
+    const u32 **gainTilesetBridgeBySegment;       /* [segmentCount] BRIDGE: 45-tile strips */
+    const u32 **gainTilesetCapStartBySegment;     /* [segmentCount] CAP START: 45-tile strips */
+    const u32 **gainTilesetCapEndBySegment;       /* [segmentCount] CAP END: 45-tile strips */
+    const u32 **gainTilesetCapStartBreakBySegment;/* [segmentCount] CAP START BREAK: 45-tile strips */
+    const u32 **gainTilesetCapStartTrailBySegment;/* [segmentCount] CAP START TRAIL: 45-tile strips */
 
     /* --- Blink-off tilesets (optional, per segment) ---
      * Used only during trail blink OFF frames (blinkFramesRemaining > 0).
      * If a blink-off tileset is NULL, rendering falls back to normal behavior
      * for that visual element (i.e., trail hidden).
      */
-    const u32 *blinkOffTilesetBySegment[GAUGE_MAX_SEGMENTS];      /* BODY: 45-tile strips */
-    const u32 *blinkOffTilesetEndBySegment[GAUGE_MAX_SEGMENTS];   /* END: 45-tile strips */
-    const u32 *blinkOffTilesetTrailBySegment[GAUGE_MAX_SEGMENTS]; /* TRAIL: 64-tile strips */
-    const u32 *blinkOffTilesetBridgeBySegment[GAUGE_MAX_SEGMENTS];/* BRIDGE: 45-tile strips */
-    const u32 *blinkOffTilesetCapStartBySegment[GAUGE_MAX_SEGMENTS];     /* CAP START: 45-tile strips */
-    const u32 *blinkOffTilesetCapEndBySegment[GAUGE_MAX_SEGMENTS];       /* CAP END: 45-tile strips */
-    const u32 *blinkOffTilesetCapStartBreakBySegment[GAUGE_MAX_SEGMENTS];/* CAP START BREAK: 45-tile strips */
-    const u32 *blinkOffTilesetCapStartTrailBySegment[GAUGE_MAX_SEGMENTS];/* CAP START TRAIL: 45-tile strips */
+    const u32 **blinkOffTilesetBySegment;         /* [segmentCount] BODY: 45-tile strips */
+    const u32 **blinkOffTilesetEndBySegment;      /* [segmentCount] END: 45-tile strips */
+    const u32 **blinkOffTilesetTrailBySegment;    /* [segmentCount] TRAIL: 64-tile strips */
+    const u32 **blinkOffTilesetBridgeBySegment;   /* [segmentCount] BRIDGE: 45-tile strips */
+    const u32 **blinkOffTilesetCapStartBySegment; /* [segmentCount] CAP START: 45-tile strips */
+    const u32 **blinkOffTilesetCapEndBySegment;   /* [segmentCount] CAP END: 45-tile strips */
+    const u32 **blinkOffTilesetCapStartBreakBySegment; /* [segmentCount] CAP START BREAK: 45-tile strips */
+    const u32 **blinkOffTilesetCapStartTrailBySegment; /* [segmentCount] CAP START TRAIL: 45-tile strips */
 
     /* --- Gain blink-off tilesets (optional, per segment) ---
      * Used only during gain trail blink OFF frames.
      * If a gain blink-off tileset is NULL, rendering falls back to normal behavior
      * for that visual element (i.e., trail hidden).
      */
-    const u32 *gainBlinkOffTilesetBySegment[GAUGE_MAX_SEGMENTS];      /* BODY: 45-tile strips */
-    const u32 *gainBlinkOffTilesetEndBySegment[GAUGE_MAX_SEGMENTS];   /* END: 45-tile strips */
-    const u32 *gainBlinkOffTilesetTrailBySegment[GAUGE_MAX_SEGMENTS]; /* TRAIL: 64-tile strips */
-    const u32 *gainBlinkOffTilesetBridgeBySegment[GAUGE_MAX_SEGMENTS];/* BRIDGE: 45-tile strips */
-    const u32 *gainBlinkOffTilesetCapStartBySegment[GAUGE_MAX_SEGMENTS];     /* CAP START: 45-tile strips */
-    const u32 *gainBlinkOffTilesetCapEndBySegment[GAUGE_MAX_SEGMENTS];       /* CAP END: 45-tile strips */
-    const u32 *gainBlinkOffTilesetCapStartBreakBySegment[GAUGE_MAX_SEGMENTS];/* CAP START BREAK: 45-tile strips */
-    const u32 *gainBlinkOffTilesetCapStartTrailBySegment[GAUGE_MAX_SEGMENTS];/* CAP START TRAIL: 45-tile strips */
+    const u32 **gainBlinkOffTilesetBySegment;     /* [segmentCount] BODY: 45-tile strips */
+    const u32 **gainBlinkOffTilesetEndBySegment;  /* [segmentCount] END: 45-tile strips */
+    const u32 **gainBlinkOffTilesetTrailBySegment;/* [segmentCount] TRAIL: 64-tile strips */
+    const u32 **gainBlinkOffTilesetBridgeBySegment;/* [segmentCount] BRIDGE: 45-tile strips */
+    const u32 **gainBlinkOffTilesetCapStartBySegment;/* [segmentCount] CAP START: 45-tile strips */
+    const u32 **gainBlinkOffTilesetCapEndBySegment;  /* [segmentCount] CAP END: 45-tile strips */
+    const u32 **gainBlinkOffTilesetCapStartBreakBySegment;/* [segmentCount] CAP START BREAK: 45-tile strips */
+    const u32 **gainBlinkOffTilesetCapStartTrailBySegment;/* [segmentCount] CAP START TRAIL: 45-tile strips */
 
     /* --- PIP compact style (optional, per segment) ---
      * Compact strip layout (width = pipWidthBySegment[segId]):
@@ -731,14 +729,14 @@ typedef struct
      *   state 3: GAIN      [3*width .. 4*width-1]
      *   state 4: BLINK_OFF [4*width .. 5*width-1]
      */
-    const u32 *pipTilesetBySegment[GAUGE_MAX_SEGMENTS]; /* compact strip: 5*width tiles */
-    u8 pipWidthBySegment[GAUGE_MAX_SEGMENTS];           /* width in tiles per segment style */
+    const u32 **pipTilesetBySegment;              /* [segmentCount] compact strip: 5*width tiles */
+    u8 *pipWidthBySegment;                        /* [segmentCount] width in tiles per segment style */
 
     /* --- PIP metadata (auto-built from fill order + pipWidthBySegment) --- */
     u8 pipCount;                                   /* number of logical pips in this layout */
-    u8 pipIndexByFillIndex[GAUGE_MAX_LENGTH];      /* fillIndex -> pip index */
-    u8 pipLocalTileByFillIndex[GAUGE_MAX_LENGTH];  /* fillIndex -> local tile inside pip */
-    u8 pipWidthByPipIndex[GAUGE_MAX_LENGTH];       /* pip index -> width in tiles */
+    u8 *pipIndexByFillIndex;                       /* [length] fillIndex -> pip index */
+    u8 *pipLocalTileByFillIndex;                   /* [length] fillIndex -> local tile inside pip */
+    u8 *pipWidthByPipIndex;                        /* [length] pip index -> width in tiles */
 
     /* --- Segment boundary LUTs (by fillIndex) ---
      *
@@ -755,9 +753,9 @@ typedef struct
      *                               ^        ^
      *                         forced BREAK cells (one before bridge)
      */
-    u8 bridgeEndByFillIndex[GAUGE_MAX_LENGTH];     /* 1 if fillIndex is last cell of a segment with bridge */
-    u8 bridgeBreakByFillIndex[GAUGE_MAX_LENGTH];   /* 1 if fillIndex is forced BREAK before a bridge */
-    u8 bridgeBreakBoundaryByFillIndex[GAUGE_MAX_LENGTH]; /* fillIndex of the bridge cell this BREAK aligns to */
+    u8 *bridgeEndByFillIndex;                      /* [length] 1 if fillIndex is last cell of a segment with bridge */
+    u8 *bridgeBreakByFillIndex;                    /* [length] 1 if fillIndex is forced BREAK before a bridge */
+    u8 *bridgeBreakBoundaryByFillIndex;            /* [length] fillIndex of the bridge cell this BREAK aligns to */
 
     /* --- Visual properties (all u8 for compact packing) --- */
     u8 orientation;                              /* GAUGE_ORIENT_HORIZONTAL=0 or GAUGE_ORIENT_VERTICAL=1 */
@@ -771,6 +769,7 @@ typedef struct
     u8 hasGainBlinkOff;                          /* 1 if any segment has gain blink-off tilesets */
     u8 capStartEnabled;                          /* 1 if cap start tileset is configured */
     u8 capEndEnabled;                            /* 1 if cap end tileset is configured */
+    u16 refCount;                                 /* Reference count (retained by parts) */
 
 } GaugeLayout;
 
@@ -1139,7 +1138,7 @@ void GaugeLayout_setPipStyles(GaugeLayout *layout,
    maxFillPixels is auto-derived from the layout (layout->length * 8).
    When maxValue != maxFillPixels, a lookup table (valueToPixelsData)
    maps between them. When they're equal, it's a direct 1:1 mapping.
-   The LUT is embedded in the struct (no heap allocation).
+   The LUT buffer is allocated dynamically (maxValue+1 entries).
 
    VALUE BEHAVIOR ON DAMAGE (Gauge_decrease):
    -------------------------------------------
@@ -1201,7 +1200,7 @@ typedef struct
     u16 currentValue;               /* Current logical value (0..maxValue) */
     u16 maxFillPixels;              /* Total gauge pixel width (e.g., 80 = 10 tiles) */
     const u16 *valueToPixelsLUT;    /* Points to valueToPixelsData when active, NULL for 1:1 */
-    u16 valueToPixelsData[GAUGE_LUT_CAPACITY + 1]; /* Embedded LUT storage (no heap alloc) */
+    u16 *valueToPixelsData;         /* Dynamically allocated LUT (maxValue+1 entries) */
 
     u16 valueTargetPixels;          /* Where the value is heading (animation target) */
     u16 valuePixels;                /* Where the value is currently displayed (animated) */
@@ -1301,10 +1300,10 @@ typedef struct
 typedef struct
 {
     /* --- Standard tiles per segment --- */
-    u16 vramTileEmpty[GAUGE_MAX_SEGMENTS];       /* Empty tile per segment (0,0) */
-    u16 vramTileFullValue[GAUGE_MAX_SEGMENTS];   /* Full value tile per segment (8,8) */
-    u16 vramTileFullTrail[GAUGE_MAX_SEGMENTS];   /* Full trail tile per segment (0,8) */
-    u16 vramTileBridge[GAUGE_MAX_SEGMENTS];      /* Bridge tile per segment (dynamic) */
+    u16 *vramTileEmpty;                           /* [segmentCount] Empty tile per segment (0,0) */
+    u16 *vramTileFullValue;                       /* [segmentCount] Full value tile per segment (8,8) */
+    u16 *vramTileFullTrail;                       /* [segmentCount] Full trail tile per segment (0,8) */
+    u16 *vramTileBridge;                          /* [segmentCount] Bridge tile per segment (dynamic) */
     u16 vramTileCapStart;                        /* Cap start tile (per part) */
     u16 vramTileCapEnd;                          /* Cap end tile (per part) */
 
@@ -1323,20 +1322,22 @@ typedef struct
     u8 cachedFillIndexPartialEnd;     /* Loaded fill index for END */
     u8 loadedSegmentPartialTrailSecond; /* Which segment's second trail break is loaded */
     u8 cachedFillIndexPartialTrailSecond; /* Loaded fill index for second trail break */
-    u8 cachedFillIndexBridge[GAUGE_MAX_SEGMENTS]; /* Loaded fill index for bridge tile */
+    u8 *cachedFillIndexBridge;                   /* [segmentCount] Loaded fill index for bridge tile */
     u8 cachedFillIndexCapStart;           /* Loaded fill index for cap start tile */
     u8 cachedFillIndexCapEnd;             /* Loaded fill index for cap end tile */
     u8 loadedCapStartUsesBreak;         /* 1 if cap start break strip is loaded */
     u8 loadedCapStartUsesTrail;         /* 1 if cap start trail strip is loaded */
 
     /* --- Tilemap cache (for change detection) --- */
-    u16 cellCurrentTileIndex[GAUGE_MAX_LENGTH];  /* Currently displayed VRAM tile per cell */
+    u16 *cellCurrentTileIndex;                   /* [cellCount] Currently displayed VRAM tile per cell */
 
     /* --- Cell validity (pre-computed for CPU optimization) ---
      * Avoids checking tilesetBySegment[segId] != NULL in render loop.
      * Trade-off: 16 bytes SRAM vs 2 memory accesses + 1 branch per cell per frame.
      */
-    u8 cellValid[GAUGE_MAX_LENGTH];              /* 1 if cell has valid tileset, 0 otherwise */
+    u8 *cellValid;                               /* [cellCount] 1 if cell has valid tileset, 0 otherwise */
+    u8 segmentCount;                             /* Allocated segment array length */
+    u8 cellCount;                                /* Allocated cell array length */
 
 } GaugeDynamic;
 
@@ -1350,11 +1351,10 @@ typedef struct
    the tilemap so the correct tiles appear at the correct screen position.
 
    Users don't interact with GaugePart directly -- it's managed internally
-   by the Gauge container. You just allocate the array and pass it to
-   Gauge_init(), then add parts with Gauge_addPart().
+   by the Gauge container and allocated by Gauge_addPart().
 
    WHAT'S INSIDE A PART:
-   - A COPY of the GaugeLayout (so each part can have different visual config)
+   - A retained GaugeLayout reference (shared safely via refcount)
    - Screen position (originX, originY in tilemap coordinates)
    - VRAM allocation (vramBase + reserved tiles)
    - Per-cell streaming data (for fixed mode) or shared VRAM data (for dynamic)
@@ -1391,11 +1391,11 @@ typedef struct GaugePart
     u16 vramBase;                   /* Base VRAM tile index */
     GaugePartRenderHandler *renderHandler; /* Resolved renderer for this part */
 
-    /* --- Layout copy (includes visual properties) --- */
-    GaugeLayout layout;
+    /* --- Shared layout reference (retained) --- */
+    const GaugeLayout *layout;
 
     /* --- Fixed mode data --- */
-    GaugeStreamCell cells[GAUGE_MAX_LENGTH];    /* Per-cell streaming data */
+    GaugeStreamCell *cells;                     /* [layout->length] Per-cell streaming data */
     u8 cellCount;                               /* Active cell count */
 
     /* --- Dynamic mode data --- */
@@ -1416,7 +1416,6 @@ typedef struct GaugePart
    ----------
    1. Allocate:
         static Gauge myGauge;
-        static GaugePart myParts[2];  // user-allocated array
 
    2. Initialize:
         Gauge_init(&myGauge, &config);  // sets up logic, no rendering yet
@@ -1425,9 +1424,9 @@ typedef struct GaugePart
         Gauge_setValueAnim(&myGauge, 1, 4);   // enable smooth value changes
         Gauge_setTrailAnim(&myGauge, 1, 4, 3); // enable trail effect
 
-   4. Add parts (each call allocates VRAM and sets up rendering):
-        Gauge_addPart(&myGauge, &myParts[0], &layout, x, y);
-        Gauge_addPart(&myGauge, &myParts[1], &layout, x, y+1); // 2-lane
+   4. Add parts (each call allocates part + VRAM and sets up rendering):
+        Gauge_addPart(&myGauge, &layout, x, y);
+        Gauge_addPart(&myGauge, &layout, x, y+1); // 2-lane
 
    5. Game loop:
         Gauge_update(&myGauge);  // call once per frame (tick + render)
@@ -1467,9 +1466,10 @@ struct Gauge
     GaugeLogic logic;
 
     /* --- Parts (rendering units) --- */
-    GaugePart *parts;           /* Array of parts (user-allocated) */
+    GaugePart **parts;          /* Dynamically allocated array of part pointers */
     GaugeTickAndRenderHandler *tickAndRenderHandler; /* Resolved update path */
     u8 partCount;               /* Number of active parts */
+    u8 partCapacity;            /* Allocated part pointer capacity */
 
     /* --- VRAM allocation --- */
     u16 vramBase;                   /* Base VRAM tile index */
@@ -1492,12 +1492,10 @@ struct Gauge
  *                  Values above GAUGE_LUT_CAPACITY are clamped at init.
  *   layout:        Main layout (must be fully configured before Gauge_init).
  *                  maxFillPixels is derived as layout->length * GAUGE_PIXELS_PER_TILE.
- *                  If maxValue != maxFillPixels, a LUT is auto-generated in the
- *                  embedded array to map between them (e.g., 100 HP -> 128 pixels).
+ *                  If maxValue != maxFillPixels, a LUT is auto-generated at init
+ *                  to map between them (e.g., 100 HP -> 128 pixels).
  *                  Override with Gauge_setMaxFillPixels() after init if needed.
  *   initialValue:  Starting value (e.g., maxValue for "full health").
- *   parts:         Pointer to a user-allocated GaugePart array.
- *                  Example: static GaugePart myParts[2];
  *   vramBase:      First VRAM tile index reserved for this gauge.
  *                  Parts will be allocated sequentially from this base.
  *   vramMode:      Default VRAM mode for all parts added to this gauge.
@@ -1510,7 +1508,6 @@ typedef struct
 {
     u16 maxValue;                /* Maximum logical value (clamped to GAUGE_LUT_CAPACITY at init) */
     u16 initialValue;            /* Starting value (clamped to maxValue) */
-    GaugePart *parts;            /* User-allocated GaugePart array */
     const GaugeLayout *layout;   /* Main layout (maxFillPixels = length * 8) */
     u16 vramBase;                /* First VRAM tile index for this gauge */
     GaugeVramMode vramMode;      /* GAUGE_VRAM_FIXED or GAUGE_VRAM_DYNAMIC */
@@ -1518,9 +1515,20 @@ typedef struct
 } GaugeInit;
 
 /**
+ * Retain a layout reference (increments refcount).
+ */
+void GaugeLayout_retain(GaugeLayout *layout);
+
+/**
+ * Release a layout reference (decrements refcount and frees dynamic buffers at 0).
+ */
+void GaugeLayout_release(GaugeLayout *layout);
+
+/**
  * Initialize gauge from GaugeInit configuration.
  * Trail and value animation are disabled by default.
  * Use Gauge_setTrailAnim() and Gauge_setValueAnim() to configure animations.
+ * Call Gauge_release() before re-initializing an already-used Gauge.
  */
 void Gauge_init(Gauge *gauge, const GaugeInit *init);
 
@@ -1562,36 +1570,38 @@ void Gauge_setMaxFillPixels(Gauge *gauge, u16 maxFillPixels);
  * VRAM is allocated automatically from gauge's vramBase.
  *
  * @param gauge     Parent gauge
- * @param part      Part to add (must be in gauge's parts array)
- * @param layout    Layout configuration (copied, includes visual properties)
+ * @param layout    Layout configuration (retained via refCount)
  * @param originX   Tilemap X position
  * @param originY   Tilemap Y position
  */
-void Gauge_addPart(Gauge *gauge,
-                   GaugePart *part,
-                   const GaugeLayout *layout,
-                   u16 originX,
-                   u16 originY);
+u8 Gauge_addPart(Gauge *gauge,
+                 GaugeLayout *layout,
+                 u16 originX,
+                 u16 originY);
 
 /**
  * Add a part with custom VRAM configuration.
  * Use when you need specific VRAM placement or different VRAM mode.
  *
  * @param gauge     Parent gauge
- * @param part      Part to add
- * @param layout    Layout configuration (copied)
+ * @param layout    Layout configuration (retained via refCount)
  * @param originX   Tilemap X position
  * @param originY   Tilemap Y position
  * @param vramBase  Custom VRAM base tile index
  * @param vramMode  Custom VRAM mode (overrides gauge default)
  */
-void Gauge_addPartEx(Gauge *gauge,
-                     GaugePart *part,
-                     const GaugeLayout *layout,
-                     u16 originX,
-                     u16 originY,
-                     u16 vramBase,
-                     GaugeVramMode vramMode);
+u8 Gauge_addPartEx(Gauge *gauge,
+                   GaugeLayout *layout,
+                   u16 originX,
+                   u16 originY,
+                   u16 vramBase,
+                   GaugeVramMode vramMode);
+
+/**
+ * Release all allocations owned by the gauge (parts, buffers, retained layouts, LUTs).
+ * Safe to call multiple times.
+ */
+void Gauge_release(Gauge *gauge);
 
 /**
  * Update gauge: tick logic + render all parts.

@@ -70,6 +70,26 @@
 #define CALC_ANIM_STEP(diff, shift)   ((u16)(((diff) >> (shift)) + 1))  /* Animation step: distance/2^shift + 1 (always >= 1) */
 #define FILL_IDX_TO_OFFSET(idx)       (((u16)(idx)) << 3)              /* fillIndex * 8 = pixel offset (each cell = 8 px) */
 
+/* Simple zero-init allocator wrappers (SGDK MEM_alloc / MEM_free). */
+static void *gauge_alloc_bytes(u16 bytes)
+{
+    if (bytes == 0)
+        return NULL;
+    void *ptr = MEM_alloc(bytes);
+    if (ptr)
+        memset(ptr, 0, bytes);
+    return ptr;
+}
+
+static void gauge_free_ptr(void **ptr)
+{
+    if (ptr && *ptr)
+    {
+        MEM_free(*ptr);
+        *ptr = NULL;
+    }
+}
+
 /* PIP compact strip state ordering */
 #define PIP_STATE_EMPTY      0
 #define PIP_STATE_VALUE      1
@@ -81,6 +101,23 @@
 #define STRIP_INDEX_EMPTY       0   /* s_tileIndexByValueTrail[0][0] : value=0, trail=0 */
 #define STRIP_INDEX_FULL_TRAIL  8   /* s_tileIndexByValueTrail[0][8] : value=0, trail=8 */
 #define STRIP_INDEX_FULL       44   /* s_tileIndexByValueTrail[8][8] : value=8, trail=8 */
+
+/* Shared sentinel arrays for optional per-segment fields (no per-layout heap cost). */
+static const u32 *s_nullSegmentTilesets[GAUGE_MAX_SEGMENTS] = {0};
+static const u8 s_zeroSegmentFlags[GAUGE_MAX_SEGMENTS] = {0};
+static const u8 s_oneSegmentFlags[GAUGE_MAX_SEGMENTS] = {
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+};
+static const u8 s_zeroCellFlags[GAUGE_MAX_LENGTH] = {0};
+static const u8 s_oneCellFlags[GAUGE_MAX_LENGTH] = {
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+};
+static const u8 s_invalidCellIndexes[GAUGE_MAX_LENGTH] = {
+    CACHE_INVALID_U8, CACHE_INVALID_U8, CACHE_INVALID_U8, CACHE_INVALID_U8,
+    CACHE_INVALID_U8, CACHE_INVALID_U8, CACHE_INVALID_U8, CACHE_INVALID_U8,
+    CACHE_INVALID_U8, CACHE_INVALID_U8, CACHE_INVALID_U8, CACHE_INVALID_U8,
+    CACHE_INVALID_U8, CACHE_INVALID_U8, CACHE_INVALID_U8, CACHE_INVALID_U8
+};
 
 /**
  * Trail mode (internal state machine state).
@@ -944,7 +981,7 @@ static inline u8 layout_has_blink_off_mode(const GaugeLayout *layout, u8 trailMo
 {
     if (trailMode == GAUGE_TRAIL_GAIN)
     {
-        for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
+        for (u8 i = 0; i < layout->segmentCount; i++)
         {
             if (layout->gainBlinkOffTilesetBySegment[i] ||
                 layout->gainBlinkOffTilesetEndBySegment[i] ||
@@ -961,7 +998,7 @@ static inline u8 layout_has_blink_off_mode(const GaugeLayout *layout, u8 trailMo
         return 0;
     }
 
-    for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
+    for (u8 i = 0; i < layout->segmentCount; i++)
     {
         if (layout->blinkOffTilesetBySegment[i] ||
             layout->blinkOffTilesetEndBySegment[i] ||
@@ -1013,6 +1050,67 @@ static inline void upload_fill_tile(const u32 *strip, u8 fillIndex, u16 vramTile
     VDP_loadTileData(src, vramTile, 1, dmaMode);
 }
 
+static inline u8 segment_tileset_array_has_any(const u32 * const *tilesetsBySegment,
+                                               u8 segmentCount)
+{
+    if (!tilesetsBySegment)
+        return 0;
+
+    for (u8 segmentId = 0; segmentId < segmentCount; segmentId++)
+    {
+        if (tilesetsBySegment[segmentId] != NULL)
+            return 1;
+    }
+    return 0;
+}
+
+static inline u8 segment_flag_array_has_any(const u8 *flagsBySegment,
+                                            u8 segmentCount)
+{
+    if (!flagsBySegment)
+        return 0;
+
+    for (u8 segmentId = 0; segmentId < segmentCount; segmentId++)
+    {
+        if (flagsBySegment[segmentId] != 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* Layout lazy-allocation helpers (defined later in GaugeLayout section). */
+static u8 layout_ensure_segment_tileset_storage(const u32 ***segmentTilesetsBySegment,
+                                                u8 segmentCount);
+static u8 layout_ensure_segment_flag_storage(u8 **segmentFlags,
+                                             u8 segmentCount,
+                                             const u8 *defaultView,
+                                             u8 defaultValue);
+static u8 layout_ensure_cell_flag_storage(u8 **cellFlags,
+                                          u8 cellCount,
+                                          const u8 *defaultView,
+                                          u8 defaultValue);
+static void layout_free_optional_ptr(void **ptr,
+                                     const void *defaultViewA,
+                                     const void *defaultViewB,
+                                     const void *defaultViewC);
+static u8 layout_sync_optional_segment_tilesets_by_usage(u8 hasAny,
+                                                         const u32 ***segmentTilesetsBySegment,
+                                                         u8 segmentCount,
+                                                         char *allocErrorLog);
+static u8 layout_sync_optional_segment_flags_by_usage(u8 hasAny,
+                                                      u8 **segmentFlags,
+                                                      u8 segmentCount,
+                                                      const u8 *defaultView,
+                                                      u8 defaultValue,
+                                                      char *allocErrorLog);
+static void layout_copy_segment_tilesets(const u32 **destinationTilesets,
+                                         const u32 * const *sourceTilesets,
+                                         u8 segmentCount);
+static void layout_copy_segment_bool_flags(u8 *destinationFlags,
+                                           const u8 *sourceFlags,
+                                           u8 segmentCount,
+                                           const u8 *defaultView);
+
 /**
  * Build bridge/break lookup tables (by fillIndex).
  *
@@ -1035,7 +1133,46 @@ static inline void upload_fill_tile(const u32 *strip, u8 fillIndex, u16 vramTile
  */
 static void build_bridge_luts(GaugeLayout *layout)
 {
-    for (u8 i = 0; i < GAUGE_MAX_LENGTH; i++)
+    const u8 hasBaseBridge =
+        segment_tileset_array_has_any(layout->tilesetBridgeBySegment, layout->segmentCount);
+    const u8 hasGainBridge =
+        segment_tileset_array_has_any(layout->gainTilesetBridgeBySegment, layout->segmentCount);
+
+    if (!hasBaseBridge && !hasGainBridge)
+    {
+        layout_free_optional_ptr((void **)&layout->bridgeEndByFillIndex, s_zeroCellFlags, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->bridgeBreakByFillIndex, s_zeroCellFlags, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->bridgeBreakBoundaryByFillIndex, s_zeroCellFlags, NULL, NULL);
+        layout->bridgeEndByFillIndex = (u8 *)s_zeroCellFlags;
+        layout->bridgeBreakByFillIndex = (u8 *)s_zeroCellFlags;
+        layout->bridgeBreakBoundaryByFillIndex = (u8 *)s_zeroCellFlags;
+        return;
+    }
+
+    if (!layout_ensure_cell_flag_storage(&layout->bridgeEndByFillIndex,
+                                         layout->length,
+                                         s_zeroCellFlags,
+                                         0) ||
+        !layout_ensure_cell_flag_storage(&layout->bridgeBreakByFillIndex,
+                                         layout->length,
+                                         s_zeroCellFlags,
+                                         0) ||
+        !layout_ensure_cell_flag_storage(&layout->bridgeBreakBoundaryByFillIndex,
+                                         layout->length,
+                                         s_zeroCellFlags,
+                                         0))
+    {
+        KLog("Gauge bridge LUT alloc failed");
+        layout_free_optional_ptr((void **)&layout->bridgeEndByFillIndex, s_zeroCellFlags, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->bridgeBreakByFillIndex, s_zeroCellFlags, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->bridgeBreakBoundaryByFillIndex, s_zeroCellFlags, NULL, NULL);
+        layout->bridgeEndByFillIndex = (u8 *)s_zeroCellFlags;
+        layout->bridgeBreakByFillIndex = (u8 *)s_zeroCellFlags;
+        layout->bridgeBreakBoundaryByFillIndex = (u8 *)s_zeroCellFlags;
+        return;
+    }
+
+    for (u8 i = 0; i < layout->length; i++)
     {
         layout->bridgeEndByFillIndex[i] = 0;
         layout->bridgeBreakByFillIndex[i] = 0;
@@ -1091,6 +1228,351 @@ static void build_bridge_luts(GaugeLayout *layout)
    GaugeLayout implementation
    ============================================================================= */
 
+static void layout_zero_optional_flags(GaugeLayout *layout)
+{
+    layout->hasBlinkOff = 0;
+    layout->hasGainBlinkOff = 0;
+    layout->capStartEnabled = 0;
+    layout->capEndEnabled = 0;
+}
+
+static void layout_set_optional_views_to_defaults(GaugeLayout *layout)
+{
+    layout->tilesetEndBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->tilesetTrailBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->tilesetBridgeBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->tilesetCapStartBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->tilesetCapEndBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->tilesetCapStartBreakBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->tilesetCapStartTrailBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->capEndBySegment = (u8 *)s_zeroSegmentFlags;
+
+    layout->gainTilesetBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->gainTilesetEndBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->gainTilesetTrailBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->gainTilesetBridgeBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->gainTilesetCapStartBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->gainTilesetCapEndBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->gainTilesetCapStartBreakBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->gainTilesetCapStartTrailBySegment = (const u32 **)s_nullSegmentTilesets;
+
+    layout->blinkOffTilesetBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->blinkOffTilesetEndBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->blinkOffTilesetTrailBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->blinkOffTilesetBridgeBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->blinkOffTilesetCapStartBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->blinkOffTilesetCapEndBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->blinkOffTilesetCapStartBreakBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->blinkOffTilesetCapStartTrailBySegment = (const u32 **)s_nullSegmentTilesets;
+
+    layout->gainBlinkOffTilesetBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->gainBlinkOffTilesetEndBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->gainBlinkOffTilesetTrailBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->gainBlinkOffTilesetBridgeBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->gainBlinkOffTilesetCapStartBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->gainBlinkOffTilesetCapEndBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->gainBlinkOffTilesetCapStartBreakBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->gainBlinkOffTilesetCapStartTrailBySegment = (const u32 **)s_nullSegmentTilesets;
+
+    layout->pipTilesetBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->pipWidthBySegment = (u8 *)s_oneSegmentFlags;
+
+    layout->pipIndexByFillIndex = (u8 *)s_invalidCellIndexes;
+    layout->pipLocalTileByFillIndex = (u8 *)s_zeroCellFlags;
+    layout->pipWidthByPipIndex = (u8 *)s_oneCellFlags;
+
+    layout->bridgeEndByFillIndex = (u8 *)s_zeroCellFlags;
+    layout->bridgeBreakByFillIndex = (u8 *)s_zeroCellFlags;
+    layout->bridgeBreakBoundaryByFillIndex = (u8 *)s_zeroCellFlags;
+}
+
+static void layout_free_optional_ptr(void **ptr,
+                                     const void *defaultViewA,
+                                     const void *defaultViewB,
+                                     const void *defaultViewC)
+{
+    if (!ptr || !*ptr)
+        return;
+
+    if (*ptr != defaultViewA &&
+        *ptr != defaultViewB &&
+        *ptr != defaultViewC)
+    {
+        MEM_free(*ptr);
+    }
+    *ptr = NULL;
+}
+
+static u8 layout_ensure_segment_tileset_storage(const u32 ***segmentTilesetsBySegment,
+                                                u8 segmentCount)
+{
+    if (!segmentTilesetsBySegment)
+        return 0;
+
+    if (*segmentTilesetsBySegment != NULL &&
+        *segmentTilesetsBySegment != s_nullSegmentTilesets)
+    {
+        return 1;
+    }
+
+    const u32 **allocatedTilesets = (const u32 **)gauge_alloc_bytes(
+        (u16)(segmentCount * (u8)sizeof(const u32 *)));
+    if (!allocatedTilesets)
+    {
+        *segmentTilesetsBySegment = (const u32 **)s_nullSegmentTilesets;
+        return 0;
+    }
+
+    *segmentTilesetsBySegment = allocatedTilesets;
+    return 1;
+}
+
+static u8 layout_ensure_segment_flag_storage(u8 **segmentFlags,
+                                             u8 segmentCount,
+                                             const u8 *defaultView,
+                                             u8 defaultValue)
+{
+    if (!segmentFlags)
+        return 0;
+
+    if (*segmentFlags != NULL && *segmentFlags != defaultView)
+        return 1;
+
+    u8 *allocatedFlags = (u8 *)gauge_alloc_bytes((u16)segmentCount);
+    if (!allocatedFlags)
+    {
+        *segmentFlags = (u8 *)defaultView;
+        return 0;
+    }
+
+    *segmentFlags = allocatedFlags;
+
+    if (defaultValue == 0)
+    {
+        memset(*segmentFlags, 0, segmentCount);
+    }
+    else
+    {
+        for (u8 i = 0; i < segmentCount; i++)
+            (*segmentFlags)[i] = defaultValue;
+    }
+    return 1;
+}
+
+static u8 layout_ensure_cell_flag_storage(u8 **cellFlags,
+                                          u8 cellCount,
+                                          const u8 *defaultView,
+                                          u8 defaultValue)
+{
+    if (!cellFlags)
+        return 0;
+
+    if (*cellFlags != NULL && *cellFlags != defaultView)
+        return 1;
+
+    u8 *allocatedFlags = (u8 *)gauge_alloc_bytes((u16)cellCount);
+    if (!allocatedFlags)
+    {
+        *cellFlags = (u8 *)defaultView;
+        return 0;
+    }
+
+    *cellFlags = allocatedFlags;
+
+    if (defaultValue == 0)
+    {
+        memset(*cellFlags, 0, cellCount);
+    }
+    else if (defaultValue == CACHE_INVALID_U8)
+    {
+        memset(*cellFlags, CACHE_INVALID_U8, cellCount);
+    }
+    else
+    {
+        for (u8 i = 0; i < cellCount; i++)
+            (*cellFlags)[i] = defaultValue;
+    }
+    return 1;
+}
+
+static u8 layout_sync_optional_segment_tilesets_by_usage(u8 hasAny,
+                                                         const u32 ***segmentTilesetsBySegment,
+                                                         u8 segmentCount,
+                                                         char *allocErrorLog)
+{
+    if (!segmentTilesetsBySegment)
+        return 0;
+
+    if (!hasAny)
+    {
+        layout_free_optional_ptr((void **)segmentTilesetsBySegment, s_nullSegmentTilesets, NULL, NULL);
+        *segmentTilesetsBySegment = (const u32 **)s_nullSegmentTilesets;
+        return 1;
+    }
+
+    if (!layout_ensure_segment_tileset_storage(segmentTilesetsBySegment, segmentCount))
+    {
+        if (allocErrorLog)
+            KLog(allocErrorLog);
+        *segmentTilesetsBySegment = (const u32 **)s_nullSegmentTilesets;
+        return 0;
+    }
+
+    return 1;
+}
+
+static u8 layout_sync_optional_segment_flags_by_usage(u8 hasAny,
+                                                      u8 **segmentFlags,
+                                                      u8 segmentCount,
+                                                      const u8 *defaultView,
+                                                      u8 defaultValue,
+                                                      char *allocErrorLog)
+{
+    if (!segmentFlags)
+        return 0;
+
+    if (!hasAny)
+    {
+        layout_free_optional_ptr((void **)segmentFlags, defaultView, NULL, NULL);
+        *segmentFlags = (u8 *)defaultView;
+        return 1;
+    }
+
+    if (!layout_ensure_segment_flag_storage(segmentFlags,
+                                            segmentCount,
+                                            defaultView,
+                                            defaultValue))
+    {
+        if (allocErrorLog)
+            KLog(allocErrorLog);
+        *segmentFlags = (u8 *)defaultView;
+        return 0;
+    }
+
+    return 1;
+}
+
+static void layout_copy_segment_tilesets(const u32 **destinationTilesets,
+                                         const u32 * const *sourceTilesets,
+                                         u8 segmentCount)
+{
+    if (!destinationTilesets || destinationTilesets == s_nullSegmentTilesets)
+        return;
+
+    for (u8 segmentId = 0; segmentId < segmentCount; segmentId++)
+    {
+        destinationTilesets[segmentId] = sourceTilesets ? sourceTilesets[segmentId] : NULL;
+    }
+}
+
+static void layout_copy_segment_bool_flags(u8 *destinationFlags,
+                                           const u8 *sourceFlags,
+                                           u8 segmentCount,
+                                           const u8 *defaultView)
+{
+    if (!destinationFlags || destinationFlags == defaultView)
+        return;
+
+    for (u8 segmentId = 0; segmentId < segmentCount; segmentId++)
+    {
+        destinationFlags[segmentId] = sourceFlags ? (sourceFlags[segmentId] ? 1 : 0) : 0;
+    }
+}
+
+static void layout_free_buffers(GaugeLayout *layout)
+{
+    if (!layout)
+        return;
+
+    gauge_free_ptr((void **)&layout->segmentIdByCell);
+    gauge_free_ptr((void **)&layout->fillIndexByCell);
+    gauge_free_ptr((void **)&layout->cellIndexByFillIndex);
+    gauge_free_ptr((void **)&layout->tilemapPosByCell);
+
+    gauge_free_ptr((void **)&layout->tilesetBySegment);
+
+    layout_free_optional_ptr((void **)&layout->tilesetEndBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->tilesetTrailBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->tilesetBridgeBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->tilesetCapStartBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->tilesetCapEndBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->tilesetCapStartBreakBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->tilesetCapStartTrailBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->capEndBySegment, s_zeroSegmentFlags, NULL, NULL);
+
+    layout_free_optional_ptr((void **)&layout->gainTilesetBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->gainTilesetEndBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->gainTilesetTrailBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->gainTilesetBridgeBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->gainTilesetCapStartBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->gainTilesetCapEndBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->gainTilesetCapStartBreakBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->gainTilesetCapStartTrailBySegment, s_nullSegmentTilesets, NULL, NULL);
+
+    layout_free_optional_ptr((void **)&layout->blinkOffTilesetBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->blinkOffTilesetEndBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->blinkOffTilesetTrailBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->blinkOffTilesetBridgeBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->blinkOffTilesetCapStartBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->blinkOffTilesetCapEndBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->blinkOffTilesetCapStartBreakBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->blinkOffTilesetCapStartTrailBySegment, s_nullSegmentTilesets, NULL, NULL);
+
+    layout_free_optional_ptr((void **)&layout->gainBlinkOffTilesetBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->gainBlinkOffTilesetEndBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->gainBlinkOffTilesetTrailBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->gainBlinkOffTilesetBridgeBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->gainBlinkOffTilesetCapStartBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->gainBlinkOffTilesetCapEndBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->gainBlinkOffTilesetCapStartBreakBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->gainBlinkOffTilesetCapStartTrailBySegment, s_nullSegmentTilesets, NULL, NULL);
+
+    layout_free_optional_ptr((void **)&layout->pipTilesetBySegment, s_nullSegmentTilesets, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->pipWidthBySegment, s_oneSegmentFlags, NULL, NULL);
+
+    layout_free_optional_ptr((void **)&layout->pipIndexByFillIndex, s_invalidCellIndexes, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->pipLocalTileByFillIndex, s_zeroCellFlags, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->pipWidthByPipIndex, s_oneCellFlags, NULL, NULL);
+
+    layout_free_optional_ptr((void **)&layout->bridgeEndByFillIndex, s_zeroCellFlags, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->bridgeBreakByFillIndex, s_zeroCellFlags, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->bridgeBreakBoundaryByFillIndex, s_zeroCellFlags, NULL, NULL);
+
+    layout->length = 0;
+    layout->segmentCount = 0;
+    layout->pipCount = 0;
+    layout_set_optional_views_to_defaults(layout);
+    layout_zero_optional_flags(layout);
+}
+
+static u8 layout_alloc_buffers(GaugeLayout *layout, u8 length, u8 segmentCount)
+{
+    const u16 cellBytes = (u16)length;
+    const u16 segPtrBytes = (u16)(segmentCount * (u8)sizeof(const u32 *));
+
+    layout->segmentIdByCell = (u8 *)gauge_alloc_bytes(cellBytes);
+    layout->fillIndexByCell = (u8 *)gauge_alloc_bytes(cellBytes);
+    layout->cellIndexByFillIndex = (u8 *)gauge_alloc_bytes(cellBytes);
+    layout->tilemapPosByCell = (Vect2D_u16 *)gauge_alloc_bytes((u16)(length * (u8)sizeof(Vect2D_u16)));
+
+    layout->tilesetBySegment = (const u32 **)gauge_alloc_bytes(segPtrBytes);
+
+    if (!layout->segmentIdByCell || !layout->fillIndexByCell || !layout->cellIndexByFillIndex ||
+        !layout->tilemapPosByCell || !layout->tilesetBySegment)
+    {
+        layout_free_buffers(layout);
+        KLog("Gauge layout alloc failed");
+        return 0;
+    }
+
+    layout->length = length;
+    layout->segmentCount = segmentCount;
+    layout->pipCount = 0;
+    layout_set_optional_views_to_defaults(layout);
+
+    return 1;
+}
+
 void GaugeLayout_initEx(GaugeLayout *layout,
                         u8 length,
                         GaugeFillDirection fillDirection,
@@ -1112,63 +1594,67 @@ void GaugeLayout_initEx(GaugeLayout *layout,
     if (length == 0) length = 1;
     if (length > GAUGE_MAX_LENGTH) length = GAUGE_MAX_LENGTH;
 
-    layout->length = length;
-    layout->fillOffset = 0;
+    /* Segment count = highest segment id present in cell map + 1 */
+    u8 maxSegmentId = 0;
+    if (segmentIdByCell)
+    {
+        for (u8 i = 0; i < length; i++)
+        {
+            if (segmentIdByCell[i] > maxSegmentId)
+                maxSegmentId = segmentIdByCell[i];
+        }
+    }
+    if (maxSegmentId >= GAUGE_MAX_SEGMENTS)
+        maxSegmentId = (u8)(GAUGE_MAX_SEGMENTS - 1);
+    const u8 segmentCount = (u8)(maxSegmentId + 1);
 
-    /* Copy tilesets (NULL-safe) */
-    for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
+    /* Rebuild dynamic buffers (layout must not be retained while rebuilt). */
+    if (layout->refCount != 0)
+    {
+        KLog_U1("GaugeLayout_initEx refused, refCount: ", layout->refCount);
+        return;
+    }
+    layout_free_buffers(layout);
+    if (!layout_alloc_buffers(layout, length, segmentCount))
+        return;
+
+    layout->fillOffset = 0;
+    layout->refCount = 0;
+
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(endTilesets, layout->segmentCount),
+        &layout->tilesetEndBySegment,
+        layout->segmentCount,
+        "Gauge layout optional alloc failed: end");
+
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(trailTilesets, layout->segmentCount),
+        &layout->tilesetTrailBySegment,
+        layout->segmentCount,
+        "Gauge layout optional alloc failed: trail");
+
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(bridgeTilesets, layout->segmentCount),
+        &layout->tilesetBridgeBySegment,
+        layout->segmentCount,
+        "Gauge layout optional alloc failed: bridge");
+
+    /* Copy mandatory BODY tilesets. */
+    for (u8 i = 0; i < layout->segmentCount; i++)
     {
         layout->tilesetBySegment[i] = bodyTilesets ? bodyTilesets[i] : NULL;
-        layout->tilesetEndBySegment[i] = endTilesets ? endTilesets[i] : NULL;
-        layout->tilesetTrailBySegment[i] = trailTilesets ? trailTilesets[i] : NULL;
-        layout->tilesetBridgeBySegment[i] = bridgeTilesets ? bridgeTilesets[i] : NULL;
-        layout->tilesetCapStartBySegment[i] = NULL;
-        layout->tilesetCapEndBySegment[i] = NULL;
-        layout->tilesetCapStartBreakBySegment[i] = NULL;
-        layout->tilesetCapStartTrailBySegment[i] = NULL;
-        layout->capEndBySegment[i] = 0;
-
-        layout->blinkOffTilesetBySegment[i] = NULL;
-        layout->blinkOffTilesetEndBySegment[i] = NULL;
-        layout->blinkOffTilesetTrailBySegment[i] = NULL;
-        layout->blinkOffTilesetBridgeBySegment[i] = NULL;
-        layout->blinkOffTilesetCapStartBySegment[i] = NULL;
-        layout->blinkOffTilesetCapEndBySegment[i] = NULL;
-        layout->blinkOffTilesetCapStartBreakBySegment[i] = NULL;
-        layout->blinkOffTilesetCapStartTrailBySegment[i] = NULL;
-
-        layout->gainTilesetBySegment[i] = NULL;
-        layout->gainTilesetEndBySegment[i] = NULL;
-        layout->gainTilesetTrailBySegment[i] = NULL;
-        layout->gainTilesetBridgeBySegment[i] = NULL;
-        layout->gainTilesetCapStartBySegment[i] = NULL;
-        layout->gainTilesetCapEndBySegment[i] = NULL;
-        layout->gainTilesetCapStartBreakBySegment[i] = NULL;
-        layout->gainTilesetCapStartTrailBySegment[i] = NULL;
-
-        layout->gainBlinkOffTilesetBySegment[i] = NULL;
-        layout->gainBlinkOffTilesetEndBySegment[i] = NULL;
-        layout->gainBlinkOffTilesetTrailBySegment[i] = NULL;
-        layout->gainBlinkOffTilesetBridgeBySegment[i] = NULL;
-        layout->gainBlinkOffTilesetCapStartBySegment[i] = NULL;
-        layout->gainBlinkOffTilesetCapEndBySegment[i] = NULL;
-        layout->gainBlinkOffTilesetCapStartBreakBySegment[i] = NULL;
-        layout->gainBlinkOffTilesetCapStartTrailBySegment[i] = NULL;
-
-        layout->pipTilesetBySegment[i] = NULL;
-        layout->pipWidthBySegment[i] = 1;
     }
+    layout_copy_segment_tilesets(layout->tilesetEndBySegment, endTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->tilesetTrailBySegment, trailTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->tilesetBridgeBySegment, bridgeTilesets, layout->segmentCount);
 
-    /* Copy segment IDs per cell (NULL = all segment 0) */
-    for (u8 i = 0; i < length; i++)
+    /* Copy segment IDs per cell (NULL = all segment 0). */
+    for (u8 i = 0; i < layout->length; i++)
     {
-        layout->segmentIdByCell[i] = segmentIdByCell ? segmentIdByCell[i] : 0;
-    }
-
-    /* Clear unused cells */
-    for (u8 i = length; i < GAUGE_MAX_LENGTH; i++)
-    {
-        layout->segmentIdByCell[i] = 0;
+        u8 segmentId = segmentIdByCell ? segmentIdByCell[i] : 0;
+        if (segmentId >= layout->segmentCount)
+            segmentId = 0;
+        layout->segmentIdByCell[i] = segmentId;
     }
 
     /* Set fill direction */
@@ -1185,10 +1671,7 @@ void GaugeLayout_initEx(GaugeLayout *layout,
     layout->horizontalFlip = horizontalFlip ? 1 : 0;
 
     /* Initialize cached flags (computed later by setters/build) */
-    layout->hasBlinkOff = 0;
-    layout->hasGainBlinkOff = 0;
-    layout->capStartEnabled = 0;
-    layout->capEndEnabled = 0;
+    layout_zero_optional_flags(layout);
 }
 
 void GaugeLayout_init(GaugeLayout *layout,
@@ -1260,59 +1743,66 @@ void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src)
     if (!dst || !src)
         return;
 
-    dst->length = src->length;
-    dst->fillOffset = src->fillOffset;
-
-    /* Reverse segment order */
+    /* Rebuild target layout with reversed segment map and same segment arrays. */
+    u8 reversedSegmentIds[GAUGE_MAX_LENGTH];
     for (u8 c = 0; c < src->length; c++)
     {
         const u8 srcCell = (u8)(src->length - 1 - c);
-        dst->segmentIdByCell[c] = src->segmentIdByCell[srcCell];
+        reversedSegmentIds[c] = src->segmentIdByCell[srcCell];
     }
 
-    /* Copy tilesets */
-    for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
-    {
-        dst->tilesetBySegment[i] = src->tilesetBySegment[i];
-        dst->tilesetEndBySegment[i] = src->tilesetEndBySegment[i];
-        dst->tilesetTrailBySegment[i] = src->tilesetTrailBySegment[i];
-        dst->tilesetBridgeBySegment[i] = src->tilesetBridgeBySegment[i];
-        dst->tilesetCapStartBySegment[i] = src->tilesetCapStartBySegment[i];
-        dst->tilesetCapEndBySegment[i] = src->tilesetCapEndBySegment[i];
-        dst->tilesetCapStartBreakBySegment[i] = src->tilesetCapStartBreakBySegment[i];
-        dst->tilesetCapStartTrailBySegment[i] = src->tilesetCapStartTrailBySegment[i];
-        dst->capEndBySegment[i] = src->capEndBySegment[i];
+    GaugeLayout_initEx(dst,
+                       src->length,
+                       (src->fillIndexByCell[0] == 0) ? GAUGE_FILL_REVERSE : GAUGE_FILL_FORWARD,
+                       src->tilesetBySegment,
+                       src->tilesetEndBySegment,
+                       src->tilesetTrailBySegment,
+                       src->tilesetBridgeBySegment,
+                       reversedSegmentIds,
+                       src->orientation,
+                       src->palette,
+                       src->priority,
+                       src->verticalFlip,
+                       src->horizontalFlip);
+    dst->fillOffset = src->fillOffset;
 
-        dst->blinkOffTilesetBySegment[i] = src->blinkOffTilesetBySegment[i];
-        dst->blinkOffTilesetEndBySegment[i] = src->blinkOffTilesetEndBySegment[i];
-        dst->blinkOffTilesetTrailBySegment[i] = src->blinkOffTilesetTrailBySegment[i];
-        dst->blinkOffTilesetBridgeBySegment[i] = src->blinkOffTilesetBridgeBySegment[i];
-        dst->blinkOffTilesetCapStartBySegment[i] = src->blinkOffTilesetCapStartBySegment[i];
-        dst->blinkOffTilesetCapEndBySegment[i] = src->blinkOffTilesetCapEndBySegment[i];
-        dst->blinkOffTilesetCapStartBreakBySegment[i] = src->blinkOffTilesetCapStartBreakBySegment[i];
-        dst->blinkOffTilesetCapStartTrailBySegment[i] = src->blinkOffTilesetCapStartTrailBySegment[i];
-
-        dst->gainTilesetBySegment[i] = src->gainTilesetBySegment[i];
-        dst->gainTilesetEndBySegment[i] = src->gainTilesetEndBySegment[i];
-        dst->gainTilesetTrailBySegment[i] = src->gainTilesetTrailBySegment[i];
-        dst->gainTilesetBridgeBySegment[i] = src->gainTilesetBridgeBySegment[i];
-        dst->gainTilesetCapStartBySegment[i] = src->gainTilesetCapStartBySegment[i];
-        dst->gainTilesetCapEndBySegment[i] = src->gainTilesetCapEndBySegment[i];
-        dst->gainTilesetCapStartBreakBySegment[i] = src->gainTilesetCapStartBreakBySegment[i];
-        dst->gainTilesetCapStartTrailBySegment[i] = src->gainTilesetCapStartTrailBySegment[i];
-
-        dst->gainBlinkOffTilesetBySegment[i] = src->gainBlinkOffTilesetBySegment[i];
-        dst->gainBlinkOffTilesetEndBySegment[i] = src->gainBlinkOffTilesetEndBySegment[i];
-        dst->gainBlinkOffTilesetTrailBySegment[i] = src->gainBlinkOffTilesetTrailBySegment[i];
-        dst->gainBlinkOffTilesetBridgeBySegment[i] = src->gainBlinkOffTilesetBridgeBySegment[i];
-        dst->gainBlinkOffTilesetCapStartBySegment[i] = src->gainBlinkOffTilesetCapStartBySegment[i];
-        dst->gainBlinkOffTilesetCapEndBySegment[i] = src->gainBlinkOffTilesetCapEndBySegment[i];
-        dst->gainBlinkOffTilesetCapStartBreakBySegment[i] = src->gainBlinkOffTilesetCapStartBreakBySegment[i];
-        dst->gainBlinkOffTilesetCapStartTrailBySegment[i] = src->gainBlinkOffTilesetCapStartTrailBySegment[i];
-
-        dst->pipTilesetBySegment[i] = src->pipTilesetBySegment[i];
-        dst->pipWidthBySegment[i] = src->pipWidthBySegment[i];
-    }
+    /* Copy optional style groups through public setters (lazy allocations). */
+    GaugeLayout_setCaps(dst,
+                        src->tilesetCapStartBySegment,
+                        src->tilesetCapEndBySegment,
+                        src->tilesetCapStartBreakBySegment,
+                        src->tilesetCapStartTrailBySegment,
+                        src->capEndBySegment);
+    GaugeLayout_setBlinkOff(dst,
+                            src->blinkOffTilesetBySegment,
+                            src->blinkOffTilesetEndBySegment,
+                            src->blinkOffTilesetTrailBySegment,
+                            src->blinkOffTilesetBridgeBySegment,
+                            src->blinkOffTilesetCapStartBySegment,
+                            src->blinkOffTilesetCapEndBySegment,
+                            src->blinkOffTilesetCapStartBreakBySegment,
+                            src->blinkOffTilesetCapStartTrailBySegment);
+    GaugeLayout_setGainTrail(dst,
+                             src->gainTilesetBySegment,
+                             src->gainTilesetEndBySegment,
+                             src->gainTilesetTrailBySegment,
+                             src->gainTilesetBridgeBySegment,
+                             src->gainTilesetCapStartBySegment,
+                             src->gainTilesetCapEndBySegment,
+                             src->gainTilesetCapStartBreakBySegment,
+                             src->gainTilesetCapStartTrailBySegment);
+    GaugeLayout_setGainBlinkOff(dst,
+                                src->gainBlinkOffTilesetBySegment,
+                                src->gainBlinkOffTilesetEndBySegment,
+                                src->gainBlinkOffTilesetTrailBySegment,
+                                src->gainBlinkOffTilesetBridgeBySegment,
+                                src->gainBlinkOffTilesetCapStartBySegment,
+                                src->gainBlinkOffTilesetCapEndBySegment,
+                                src->gainBlinkOffTilesetCapStartBreakBySegment,
+                                src->gainBlinkOffTilesetCapStartTrailBySegment);
+    GaugeLayout_setPipStyles(dst,
+                             src->pipTilesetBySegment,
+                             src->pipWidthBySegment);
 
     /* Opposite fill direction from source */
     if (src->fillIndexByCell[0] == 0)
@@ -1338,11 +1828,25 @@ void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src)
         dst->verticalFlip = 1;
     }
 
-    /* Copy cached flags */
-    dst->hasBlinkOff = src->hasBlinkOff;
-    dst->hasGainBlinkOff = src->hasGainBlinkOff;
-    dst->capStartEnabled = src->capStartEnabled;
-    dst->capEndEnabled = src->capEndEnabled;
+}
+
+void GaugeLayout_retain(GaugeLayout *layout)
+{
+    if (!layout)
+        return;
+    layout->refCount++;
+}
+
+void GaugeLayout_release(GaugeLayout *layout)
+{
+    if (!layout)
+        return;
+
+    if (layout->refCount > 0)
+        layout->refCount--;
+
+    if (layout->refCount == 0)
+        layout_free_buffers(layout);
 }
 
 void GaugeLayout_setCaps(GaugeLayout *layout,
@@ -1355,16 +1859,42 @@ void GaugeLayout_setCaps(GaugeLayout *layout,
     if (!layout)
         return;
 
-    for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
-    {
-        layout->tilesetCapStartBySegment[i] = capStartTilesets ? capStartTilesets[i] : NULL;
-        layout->tilesetCapEndBySegment[i] = capEndTilesets ? capEndTilesets[i] : NULL;
-        layout->tilesetCapStartBreakBySegment[i] =
-            capStartBreakTilesets ? capStartBreakTilesets[i] : NULL;
-        layout->tilesetCapStartTrailBySegment[i] =
-            capStartTrailTilesets ? capStartTrailTilesets[i] : NULL;
-        layout->capEndBySegment[i] = capEndBySegment ? (capEndBySegment[i] ? 1 : 0) : 0;
-    }
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(capStartTilesets, layout->segmentCount),
+        &layout->tilesetCapStartBySegment,
+        layout->segmentCount,
+        "Gauge capStart alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(capEndTilesets, layout->segmentCount),
+        &layout->tilesetCapEndBySegment,
+        layout->segmentCount,
+        "Gauge capEnd alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(capStartBreakTilesets, layout->segmentCount),
+        &layout->tilesetCapStartBreakBySegment,
+        layout->segmentCount,
+        "Gauge capStartBreak alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(capStartTrailTilesets, layout->segmentCount),
+        &layout->tilesetCapStartTrailBySegment,
+        layout->segmentCount,
+        "Gauge capStartTrail alloc failed");
+    layout_sync_optional_segment_flags_by_usage(
+        segment_flag_array_has_any(capEndBySegment, layout->segmentCount),
+        &layout->capEndBySegment,
+        layout->segmentCount,
+        s_zeroSegmentFlags,
+        0,
+        "Gauge capEnd flags alloc failed");
+
+    layout_copy_segment_tilesets(layout->tilesetCapStartBySegment, capStartTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->tilesetCapEndBySegment, capEndTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->tilesetCapStartBreakBySegment, capStartBreakTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->tilesetCapStartTrailBySegment, capStartTrailTilesets, layout->segmentCount);
+    layout_copy_segment_bool_flags(layout->capEndBySegment,
+                                   capEndBySegment,
+                                   layout->segmentCount,
+                                   s_zeroSegmentFlags);
 
     /* Update cached cap flags */
     detect_caps_enabled(layout, &layout->capStartEnabled, &layout->capEndEnabled);
@@ -1383,26 +1913,57 @@ void GaugeLayout_setBlinkOff(GaugeLayout *layout,
     if (!layout)
         return;
 
-    for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
-    {
-        layout->blinkOffTilesetBySegment[i] =
-            blinkOffBodyTilesets ? blinkOffBodyTilesets[i] : NULL;
-        layout->blinkOffTilesetEndBySegment[i] =
-            blinkOffEndTilesets ? blinkOffEndTilesets[i] : NULL;
-        layout->blinkOffTilesetTrailBySegment[i] =
-            blinkOffTrailTilesets ? blinkOffTrailTilesets[i] : NULL;
-        layout->blinkOffTilesetBridgeBySegment[i] =
-            blinkOffBridgeTilesets ? blinkOffBridgeTilesets[i] : NULL;
-        layout->blinkOffTilesetCapStartBySegment[i] =
-            blinkOffCapStartTilesets ? blinkOffCapStartTilesets[i] : NULL;
-        layout->blinkOffTilesetCapEndBySegment[i] =
-            blinkOffCapEndTilesets ? blinkOffCapEndTilesets[i] : NULL;
-        layout->blinkOffTilesetCapStartBreakBySegment[i] =
-            blinkOffCapStartBreakTilesets ? blinkOffCapStartBreakTilesets[i] : NULL;
-        layout->blinkOffTilesetCapStartTrailBySegment[i] =
-            blinkOffCapStartTrailTilesets ? blinkOffCapStartTrailTilesets[i] : NULL;
-    }
-    layout->hasBlinkOff = 1;
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(blinkOffBodyTilesets, layout->segmentCount),
+        &layout->blinkOffTilesetBySegment,
+        layout->segmentCount,
+        "Gauge blink-off BODY alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(blinkOffEndTilesets, layout->segmentCount),
+        &layout->blinkOffTilesetEndBySegment,
+        layout->segmentCount,
+        "Gauge blink-off END alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(blinkOffTrailTilesets, layout->segmentCount),
+        &layout->blinkOffTilesetTrailBySegment,
+        layout->segmentCount,
+        "Gauge blink-off TRAIL alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(blinkOffBridgeTilesets, layout->segmentCount),
+        &layout->blinkOffTilesetBridgeBySegment,
+        layout->segmentCount,
+        "Gauge blink-off BRIDGE alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(blinkOffCapStartTilesets, layout->segmentCount),
+        &layout->blinkOffTilesetCapStartBySegment,
+        layout->segmentCount,
+        "Gauge blink-off CAP START alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(blinkOffCapEndTilesets, layout->segmentCount),
+        &layout->blinkOffTilesetCapEndBySegment,
+        layout->segmentCount,
+        "Gauge blink-off CAP END alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(blinkOffCapStartBreakTilesets, layout->segmentCount),
+        &layout->blinkOffTilesetCapStartBreakBySegment,
+        layout->segmentCount,
+        "Gauge blink-off CAP START BREAK alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(blinkOffCapStartTrailTilesets, layout->segmentCount),
+        &layout->blinkOffTilesetCapStartTrailBySegment,
+        layout->segmentCount,
+        "Gauge blink-off CAP START TRAIL alloc failed");
+
+    layout_copy_segment_tilesets(layout->blinkOffTilesetBySegment, blinkOffBodyTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->blinkOffTilesetEndBySegment, blinkOffEndTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->blinkOffTilesetTrailBySegment, blinkOffTrailTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->blinkOffTilesetBridgeBySegment, blinkOffBridgeTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->blinkOffTilesetCapStartBySegment, blinkOffCapStartTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->blinkOffTilesetCapEndBySegment, blinkOffCapEndTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->blinkOffTilesetCapStartBreakBySegment, blinkOffCapStartBreakTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->blinkOffTilesetCapStartTrailBySegment, blinkOffCapStartTrailTilesets, layout->segmentCount);
+
+    layout->hasBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_DAMAGE);
 }
 
 
@@ -1501,9 +2062,48 @@ static void GaugeLogic_initWithAnim(GaugeLogic *logic,
  */
 static void build_pip_luts(GaugeLayout *layout)
 {
+    const u8 hasPipStyles =
+        segment_tileset_array_has_any(layout->pipTilesetBySegment, layout->segmentCount);
+
+    if (!hasPipStyles)
+    {
+        layout->pipCount = 0;
+        layout_free_optional_ptr((void **)&layout->pipIndexByFillIndex, s_invalidCellIndexes, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipLocalTileByFillIndex, s_zeroCellFlags, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipWidthByPipIndex, s_oneCellFlags, NULL, NULL);
+        layout->pipIndexByFillIndex = (u8 *)s_invalidCellIndexes;
+        layout->pipLocalTileByFillIndex = (u8 *)s_zeroCellFlags;
+        layout->pipWidthByPipIndex = (u8 *)s_oneCellFlags;
+        return;
+    }
+
+    if (!layout_ensure_cell_flag_storage(&layout->pipIndexByFillIndex,
+                                         layout->length,
+                                         s_invalidCellIndexes,
+                                         CACHE_INVALID_U8) ||
+        !layout_ensure_cell_flag_storage(&layout->pipLocalTileByFillIndex,
+                                         layout->length,
+                                         s_zeroCellFlags,
+                                         0) ||
+        !layout_ensure_cell_flag_storage(&layout->pipWidthByPipIndex,
+                                         layout->length,
+                                         s_oneCellFlags,
+                                         1))
+    {
+        KLog("Gauge pip LUT alloc failed");
+        layout->pipCount = 0;
+        layout_free_optional_ptr((void **)&layout->pipIndexByFillIndex, s_invalidCellIndexes, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipLocalTileByFillIndex, s_zeroCellFlags, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipWidthByPipIndex, s_oneCellFlags, NULL, NULL);
+        layout->pipIndexByFillIndex = (u8 *)s_invalidCellIndexes;
+        layout->pipLocalTileByFillIndex = (u8 *)s_zeroCellFlags;
+        layout->pipWidthByPipIndex = (u8 *)s_oneCellFlags;
+        return;
+    }
+
     layout->pipCount = 0;
 
-    for (u8 i = 0; i < GAUGE_MAX_LENGTH; i++)
+    for (u8 i = 0; i < layout->length; i++)
     {
         layout->pipIndexByFillIndex[i] = CACHE_INVALID_U8;
         layout->pipLocalTileByFillIndex[i] = 0;
@@ -1511,7 +2111,7 @@ static void build_pip_luts(GaugeLayout *layout)
     }
 
     u8 fillIndex = 0;
-    while (fillIndex < layout->length && layout->pipCount < GAUGE_MAX_LENGTH)
+    while (fillIndex < layout->length && layout->pipCount < layout->length)
     {
         const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
         const u8 segmentId = layout->segmentIdByCell[cellIndex];
@@ -1533,7 +2133,7 @@ static void build_pip_luts(GaugeLayout *layout)
 
         /* Split the run into logical pips of styleWidth cells. */
         u8 remaining = runLength;
-        while (remaining > 0 && layout->pipCount < GAUGE_MAX_LENGTH)
+        while (remaining > 0 && layout->pipCount < layout->length)
         {
             const u8 pipWidth = (remaining >= styleWidth) ? styleWidth : remaining;
             layout->pipWidthByPipIndex[layout->pipCount] = pipWidth;
@@ -1751,16 +2351,56 @@ static void GaugeLogic_tick(GaugeLogic *logic)
  * @param vramBase     Base VRAM tile index
  * @param trailEnabled Whether trail rendering is active
  */
-static void init_dynamic_vram(GaugeDynamic *dyn, const GaugeLayout *layout, u16 vramBase, u8 trailEnabled)
+static void free_dynamic_buffers(GaugeDynamic *dyn)
+{
+    if (!dyn)
+        return;
+    gauge_free_ptr((void **)&dyn->vramTileEmpty);
+    gauge_free_ptr((void **)&dyn->vramTileFullValue);
+    gauge_free_ptr((void **)&dyn->vramTileFullTrail);
+    gauge_free_ptr((void **)&dyn->vramTileBridge);
+    gauge_free_ptr((void **)&dyn->cachedFillIndexBridge);
+    gauge_free_ptr((void **)&dyn->cellCurrentTileIndex);
+    gauge_free_ptr((void **)&dyn->cellValid);
+    dyn->segmentCount = 0;
+    dyn->cellCount = 0;
+}
+
+static u8 alloc_dynamic_buffers(GaugeDynamic *dyn, u8 segmentCount, u8 cellCount)
+{
+    free_dynamic_buffers(dyn);
+    dyn->vramTileEmpty = (u16 *)gauge_alloc_bytes((u16)(segmentCount * (u8)sizeof(u16)));
+    dyn->vramTileFullValue = (u16 *)gauge_alloc_bytes((u16)(segmentCount * (u8)sizeof(u16)));
+    dyn->vramTileFullTrail = (u16 *)gauge_alloc_bytes((u16)(segmentCount * (u8)sizeof(u16)));
+    dyn->vramTileBridge = (u16 *)gauge_alloc_bytes((u16)(segmentCount * (u8)sizeof(u16)));
+    dyn->cachedFillIndexBridge = (u8 *)gauge_alloc_bytes(segmentCount);
+    dyn->cellCurrentTileIndex = (u16 *)gauge_alloc_bytes((u16)(cellCount * (u8)sizeof(u16)));
+    dyn->cellValid = (u8 *)gauge_alloc_bytes(cellCount);
+    if (!dyn->vramTileEmpty || !dyn->vramTileFullValue || !dyn->vramTileFullTrail ||
+        !dyn->vramTileBridge || !dyn->cachedFillIndexBridge ||
+        !dyn->cellCurrentTileIndex || !dyn->cellValid)
+    {
+        free_dynamic_buffers(dyn);
+        KLog("Gauge dynamic alloc failed");
+        return 0;
+    }
+    dyn->segmentCount = segmentCount;
+    dyn->cellCount = cellCount;
+    return 1;
+}
+
+static u8 init_dynamic_vram(GaugeDynamic *dyn, const GaugeLayout *layout, u16 vramBase, u8 trailEnabled)
 {
     u16 nextVram = vramBase;
     u8 hasEndTileset = 0;
-    u8 bridgeCount = 0;
     u8 capStartEnabled = 0;
     u8 capEndEnabled = 0;
 
+    if (!alloc_dynamic_buffers(dyn, layout->segmentCount, layout->length))
+        return 0;
+
     /* Initialize cache to invalid */
-    for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
+    for (u8 i = 0; i < dyn->segmentCount; i++)
     {
         dyn->vramTileEmpty[i] = 0;
         dyn->vramTileFullValue[i] = 0;
@@ -1786,7 +2426,7 @@ static void init_dynamic_vram(GaugeDynamic *dyn, const GaugeLayout *layout, u16 
     dyn->loadedCapStartUsesTrail = CACHE_INVALID_U8;
 
     /* Initialize tilemap cache */
-    for (u8 i = 0; i < GAUGE_MAX_LENGTH; i++)
+    for (u8 i = 0; i < dyn->cellCount; i++)
     {
         dyn->cellCurrentTileIndex[i] = CACHE_INVALID_U16;
     }
@@ -1803,14 +2443,11 @@ static void init_dynamic_vram(GaugeDynamic *dyn, const GaugeLayout *layout, u16 
     }
 
     /* Determine if any used segment has END tiles */
-    for (u8 segmentId = 0; segmentId < GAUGE_MAX_SEGMENTS; segmentId++)
+    for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
     {
         if (segmentUsed[segmentId] &&
             (layout->tilesetEndBySegment[segmentId] || layout->gainTilesetEndBySegment[segmentId]))
             hasEndTileset = 1;
-        if (segmentUsed[segmentId] &&
-            (layout->tilesetBridgeBySegment[segmentId] || layout->gainTilesetBridgeBySegment[segmentId]))
-            bridgeCount++;
     }
 
     /* Read cached cap flags */
@@ -1818,7 +2455,7 @@ static void init_dynamic_vram(GaugeDynamic *dyn, const GaugeLayout *layout, u16 
     capEndEnabled = layout->capEndEnabled;
 
     /* Allocate standard tiles for each used segment */
-    for (u8 segmentId = 0; segmentId < GAUGE_MAX_SEGMENTS; segmentId++)
+    for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
     {
         if (!segmentUsed[segmentId])
             continue;
@@ -1892,6 +2529,8 @@ static void init_dynamic_vram(GaugeDynamic *dyn, const GaugeLayout *layout, u16 
         dyn->vramTileCapEnd = nextVram;
         nextVram++;
     }
+
+    return 1;
 }
 
 /**
@@ -1911,7 +2550,7 @@ static void preload_dynamic_standard_tiles(GaugeDynamic *dyn, const GaugeLayout 
     const u8 fullTrailIndexBody = STRIP_INDEX_FULL_TRAIL;
     const u8 fullTrailIndexTrail = s_trailTileIndexByValueTrail[0][8]; /* value=0, trail=8 */
 
-    for (u8 segmentId = 0; segmentId < GAUGE_MAX_SEGMENTS; segmentId++)
+    for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
     {
         const u32 *bodyStrip = select_base_strip(layout->tilesetBySegment[segmentId],
                                                  layout->gainTilesetBySegment[segmentId],
@@ -1966,25 +2605,55 @@ void GaugeLayout_setGainTrail(GaugeLayout *layout,
     if (!layout)
         return;
 
-    for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
-    {
-        layout->gainTilesetBySegment[i] =
-            gainBodyTilesets ? gainBodyTilesets[i] : NULL;
-        layout->gainTilesetEndBySegment[i] =
-            gainEndTilesets ? gainEndTilesets[i] : NULL;
-        layout->gainTilesetTrailBySegment[i] =
-            gainTrailTilesets ? gainTrailTilesets[i] : NULL;
-        layout->gainTilesetBridgeBySegment[i] =
-            gainBridgeTilesets ? gainBridgeTilesets[i] : NULL;
-        layout->gainTilesetCapStartBySegment[i] =
-            gainCapStartTilesets ? gainCapStartTilesets[i] : NULL;
-        layout->gainTilesetCapEndBySegment[i] =
-            gainCapEndTilesets ? gainCapEndTilesets[i] : NULL;
-        layout->gainTilesetCapStartBreakBySegment[i] =
-            gainCapStartBreakTilesets ? gainCapStartBreakTilesets[i] : NULL;
-        layout->gainTilesetCapStartTrailBySegment[i] =
-            gainCapStartTrailTilesets ? gainCapStartTrailTilesets[i] : NULL;
-    }
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(gainBodyTilesets, layout->segmentCount),
+        &layout->gainTilesetBySegment,
+        layout->segmentCount,
+        "Gauge gain BODY alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(gainEndTilesets, layout->segmentCount),
+        &layout->gainTilesetEndBySegment,
+        layout->segmentCount,
+        "Gauge gain END alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(gainTrailTilesets, layout->segmentCount),
+        &layout->gainTilesetTrailBySegment,
+        layout->segmentCount,
+        "Gauge gain TRAIL alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(gainBridgeTilesets, layout->segmentCount),
+        &layout->gainTilesetBridgeBySegment,
+        layout->segmentCount,
+        "Gauge gain BRIDGE alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(gainCapStartTilesets, layout->segmentCount),
+        &layout->gainTilesetCapStartBySegment,
+        layout->segmentCount,
+        "Gauge gain CAP START alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(gainCapEndTilesets, layout->segmentCount),
+        &layout->gainTilesetCapEndBySegment,
+        layout->segmentCount,
+        "Gauge gain CAP END alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(gainCapStartBreakTilesets, layout->segmentCount),
+        &layout->gainTilesetCapStartBreakBySegment,
+        layout->segmentCount,
+        "Gauge gain CAP START BREAK alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(gainCapStartTrailTilesets, layout->segmentCount),
+        &layout->gainTilesetCapStartTrailBySegment,
+        layout->segmentCount,
+        "Gauge gain CAP START TRAIL alloc failed");
+
+    layout_copy_segment_tilesets(layout->gainTilesetBySegment, gainBodyTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->gainTilesetEndBySegment, gainEndTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->gainTilesetTrailBySegment, gainTrailTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->gainTilesetBridgeBySegment, gainBridgeTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->gainTilesetCapStartBySegment, gainCapStartTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->gainTilesetCapEndBySegment, gainCapEndTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->gainTilesetCapStartBreakBySegment, gainCapStartBreakTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->gainTilesetCapStartTrailBySegment, gainCapStartTrailTilesets, layout->segmentCount);
 
     /* Gain bridges can affect bridge LUTs */
     build_bridge_luts(layout);
@@ -2003,26 +2672,57 @@ void GaugeLayout_setGainBlinkOff(GaugeLayout *layout,
     if (!layout)
         return;
 
-    for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
-    {
-        layout->gainBlinkOffTilesetBySegment[i] =
-            gainBlinkOffBodyTilesets ? gainBlinkOffBodyTilesets[i] : NULL;
-        layout->gainBlinkOffTilesetEndBySegment[i] =
-            gainBlinkOffEndTilesets ? gainBlinkOffEndTilesets[i] : NULL;
-        layout->gainBlinkOffTilesetTrailBySegment[i] =
-            gainBlinkOffTrailTilesets ? gainBlinkOffTrailTilesets[i] : NULL;
-        layout->gainBlinkOffTilesetBridgeBySegment[i] =
-            gainBlinkOffBridgeTilesets ? gainBlinkOffBridgeTilesets[i] : NULL;
-        layout->gainBlinkOffTilesetCapStartBySegment[i] =
-            gainBlinkOffCapStartTilesets ? gainBlinkOffCapStartTilesets[i] : NULL;
-        layout->gainBlinkOffTilesetCapEndBySegment[i] =
-            gainBlinkOffCapEndTilesets ? gainBlinkOffCapEndTilesets[i] : NULL;
-        layout->gainBlinkOffTilesetCapStartBreakBySegment[i] =
-            gainBlinkOffCapStartBreakTilesets ? gainBlinkOffCapStartBreakTilesets[i] : NULL;
-        layout->gainBlinkOffTilesetCapStartTrailBySegment[i] =
-            gainBlinkOffCapStartTrailTilesets ? gainBlinkOffCapStartTrailTilesets[i] : NULL;
-    }
-    layout->hasGainBlinkOff = 1;
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(gainBlinkOffBodyTilesets, layout->segmentCount),
+        &layout->gainBlinkOffTilesetBySegment,
+        layout->segmentCount,
+        "Gauge gain blink-off BODY alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(gainBlinkOffEndTilesets, layout->segmentCount),
+        &layout->gainBlinkOffTilesetEndBySegment,
+        layout->segmentCount,
+        "Gauge gain blink-off END alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(gainBlinkOffTrailTilesets, layout->segmentCount),
+        &layout->gainBlinkOffTilesetTrailBySegment,
+        layout->segmentCount,
+        "Gauge gain blink-off TRAIL alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(gainBlinkOffBridgeTilesets, layout->segmentCount),
+        &layout->gainBlinkOffTilesetBridgeBySegment,
+        layout->segmentCount,
+        "Gauge gain blink-off BRIDGE alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(gainBlinkOffCapStartTilesets, layout->segmentCount),
+        &layout->gainBlinkOffTilesetCapStartBySegment,
+        layout->segmentCount,
+        "Gauge gain blink-off CAP START alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(gainBlinkOffCapEndTilesets, layout->segmentCount),
+        &layout->gainBlinkOffTilesetCapEndBySegment,
+        layout->segmentCount,
+        "Gauge gain blink-off CAP END alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(gainBlinkOffCapStartBreakTilesets, layout->segmentCount),
+        &layout->gainBlinkOffTilesetCapStartBreakBySegment,
+        layout->segmentCount,
+        "Gauge gain blink-off CAP START BREAK alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(
+        segment_tileset_array_has_any(gainBlinkOffCapStartTrailTilesets, layout->segmentCount),
+        &layout->gainBlinkOffTilesetCapStartTrailBySegment,
+        layout->segmentCount,
+        "Gauge gain blink-off CAP START TRAIL alloc failed");
+
+    layout_copy_segment_tilesets(layout->gainBlinkOffTilesetBySegment, gainBlinkOffBodyTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->gainBlinkOffTilesetEndBySegment, gainBlinkOffEndTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->gainBlinkOffTilesetTrailBySegment, gainBlinkOffTrailTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->gainBlinkOffTilesetBridgeBySegment, gainBlinkOffBridgeTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->gainBlinkOffTilesetCapStartBySegment, gainBlinkOffCapStartTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->gainBlinkOffTilesetCapEndBySegment, gainBlinkOffCapEndTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->gainBlinkOffTilesetCapStartBreakBySegment, gainBlinkOffCapStartBreakTilesets, layout->segmentCount);
+    layout_copy_segment_tilesets(layout->gainBlinkOffTilesetCapStartTrailBySegment, gainBlinkOffCapStartTrailTilesets, layout->segmentCount);
+
+    layout->hasGainBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_GAIN);
 }
 
 void GaugeLayout_setPipStyles(GaugeLayout *layout,
@@ -2032,10 +2732,44 @@ void GaugeLayout_setPipStyles(GaugeLayout *layout,
     if (!layout)
         return;
 
-    for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
+    const u8 hasPipStyles = segment_tileset_array_has_any(pipTilesets, layout->segmentCount);
+    u8 hasCustomWidths = 0;
+
+    if (hasPipStyles && pipWidthBySegment)
     {
-        layout->pipTilesetBySegment[i] = pipTilesets ? pipTilesets[i] : NULL;
-        layout->pipWidthBySegment[i] = pipWidthBySegment ? pipWidthBySegment[i] : 1;
+        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
+        {
+            if (pipWidthBySegment[segmentId] > 1)
+            {
+                hasCustomWidths = 1;
+                break;
+            }
+        }
+    }
+
+    layout_sync_optional_segment_tilesets_by_usage(
+        hasPipStyles,
+        &layout->pipTilesetBySegment,
+        layout->segmentCount,
+        "Gauge pip tileset alloc failed");
+    layout_sync_optional_segment_flags_by_usage(
+        hasPipStyles && hasCustomWidths,
+        &layout->pipWidthBySegment,
+        layout->segmentCount,
+        s_oneSegmentFlags,
+        1,
+        "Gauge pip width alloc failed");
+
+    layout_copy_segment_tilesets(layout->pipTilesetBySegment, pipTilesets, layout->segmentCount);
+    if (layout->pipWidthBySegment != s_oneSegmentFlags)
+    {
+        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
+        {
+            u8 widthInTiles = pipWidthBySegment ? pipWidthBySegment[segmentId] : 1;
+            if (widthInTiles == 0)
+                widthInTiles = 1;
+            layout->pipWidthBySegment[segmentId] = widthInTiles;
+        }
     }
 
     build_pip_luts(layout);
@@ -2065,80 +2799,296 @@ void GaugeLayout_build(GaugeLayout *layout, const GaugeLayoutInit *init)
                        init->verticalFlip,
                        init->horizontalFlip);
 
-    /* Apply segment styles directly (no large stack temporaries). */
+    /* Apply segment styles directly with lazy optional allocations. */
     if (init->segmentStyles)
     {
-        for (u8 segmentId = 0; segmentId < GAUGE_MAX_SEGMENTS; segmentId++)
+        u8 hasBaseEnd = 0;
+        u8 hasBaseTrail = 0;
+        u8 hasBaseBridge = 0;
+        u8 hasCapStart = 0;
+        u8 hasCapEnd = 0;
+        u8 hasCapStartBreak = 0;
+        u8 hasCapStartTrail = 0;
+        u8 hasCapEndFlags = 0;
+
+        u8 hasGainBody = 0;
+        u8 hasGainEnd = 0;
+        u8 hasGainTrail = 0;
+        u8 hasGainBridge = 0;
+        u8 hasGainCapStart = 0;
+        u8 hasGainCapEnd = 0;
+        u8 hasGainCapStartBreak = 0;
+        u8 hasGainCapStartTrail = 0;
+
+        u8 hasBlinkBody = 0;
+        u8 hasBlinkEnd = 0;
+        u8 hasBlinkTrail = 0;
+        u8 hasBlinkBridge = 0;
+        u8 hasBlinkCapStart = 0;
+        u8 hasBlinkCapEnd = 0;
+        u8 hasBlinkCapStartBreak = 0;
+        u8 hasBlinkCapStartTrail = 0;
+
+        u8 hasGainBlinkBody = 0;
+        u8 hasGainBlinkEnd = 0;
+        u8 hasGainBlinkTrail = 0;
+        u8 hasGainBlinkBridge = 0;
+        u8 hasGainBlinkCapStart = 0;
+        u8 hasGainBlinkCapEnd = 0;
+        u8 hasGainBlinkCapStartBreak = 0;
+        u8 hasGainBlinkCapStartTrail = 0;
+
+        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
+        {
+            const GaugeSegmentStyle *style = &init->segmentStyles[segmentId];
+            hasBaseEnd |= (style->base.end != NULL);
+            hasBaseTrail |= (style->base.trail != NULL);
+            hasBaseBridge |= (style->base.bridge != NULL);
+            hasCapStart |= (style->base.capStart != NULL);
+            hasCapEnd |= (style->base.capEnd != NULL);
+            hasCapStartBreak |= (style->base.capStartBreak != NULL);
+            hasCapStartTrail |= (style->base.capStartTrail != NULL);
+            hasCapEndFlags |= (style->capEndEnabled != 0);
+
+            hasGainBody |= (style->gain.body != NULL);
+            hasGainEnd |= (style->gain.end != NULL);
+            hasGainTrail |= (style->gain.trail != NULL);
+            hasGainBridge |= (style->gain.bridge != NULL);
+            hasGainCapStart |= (style->gain.capStart != NULL);
+            hasGainCapEnd |= (style->gain.capEnd != NULL);
+            hasGainCapStartBreak |= (style->gain.capStartBreak != NULL);
+            hasGainCapStartTrail |= (style->gain.capStartTrail != NULL);
+
+            hasBlinkBody |= (style->blinkOff.body != NULL);
+            hasBlinkEnd |= (style->blinkOff.end != NULL);
+            hasBlinkTrail |= (style->blinkOff.trail != NULL);
+            hasBlinkBridge |= (style->blinkOff.bridge != NULL);
+            hasBlinkCapStart |= (style->blinkOff.capStart != NULL);
+            hasBlinkCapEnd |= (style->blinkOff.capEnd != NULL);
+            hasBlinkCapStartBreak |= (style->blinkOff.capStartBreak != NULL);
+            hasBlinkCapStartTrail |= (style->blinkOff.capStartTrail != NULL);
+
+            hasGainBlinkBody |= (style->gainBlinkOff.body != NULL);
+            hasGainBlinkEnd |= (style->gainBlinkOff.end != NULL);
+            hasGainBlinkTrail |= (style->gainBlinkOff.trail != NULL);
+            hasGainBlinkBridge |= (style->gainBlinkOff.bridge != NULL);
+            hasGainBlinkCapStart |= (style->gainBlinkOff.capStart != NULL);
+            hasGainBlinkCapEnd |= (style->gainBlinkOff.capEnd != NULL);
+            hasGainBlinkCapStartBreak |= (style->gainBlinkOff.capStartBreak != NULL);
+            hasGainBlinkCapStartTrail |= (style->gainBlinkOff.capStartTrail != NULL);
+        }
+
+        layout_sync_optional_segment_tilesets_by_usage(hasBaseEnd,
+                                                       &layout->tilesetEndBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build base END alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasBaseTrail,
+                                                       &layout->tilesetTrailBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build base TRAIL alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasBaseBridge,
+                                                       &layout->tilesetBridgeBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build base BRIDGE alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasCapStart,
+                                                       &layout->tilesetCapStartBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build base CAP START alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasCapEnd,
+                                                       &layout->tilesetCapEndBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build base CAP END alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasCapStartBreak,
+                                                       &layout->tilesetCapStartBreakBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build base CAP START BREAK alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasCapStartTrail,
+                                                       &layout->tilesetCapStartTrailBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build base CAP START TRAIL alloc failed");
+        layout_sync_optional_segment_flags_by_usage(hasCapEndFlags,
+                                                    &layout->capEndBySegment,
+                                                    layout->segmentCount,
+                                                    s_zeroSegmentFlags,
+                                                    0,
+                                                    "Gauge build capEnd flags alloc failed");
+
+        layout_sync_optional_segment_tilesets_by_usage(hasGainBody,
+                                                       &layout->gainTilesetBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build gain BODY alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasGainEnd,
+                                                       &layout->gainTilesetEndBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build gain END alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasGainTrail,
+                                                       &layout->gainTilesetTrailBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build gain TRAIL alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasGainBridge,
+                                                       &layout->gainTilesetBridgeBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build gain BRIDGE alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasGainCapStart,
+                                                       &layout->gainTilesetCapStartBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build gain CAP START alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasGainCapEnd,
+                                                       &layout->gainTilesetCapEndBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build gain CAP END alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasGainCapStartBreak,
+                                                       &layout->gainTilesetCapStartBreakBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build gain CAP START BREAK alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasGainCapStartTrail,
+                                                       &layout->gainTilesetCapStartTrailBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build gain CAP START TRAIL alloc failed");
+
+        layout_sync_optional_segment_tilesets_by_usage(hasBlinkBody,
+                                                       &layout->blinkOffTilesetBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build blink BODY alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasBlinkEnd,
+                                                       &layout->blinkOffTilesetEndBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build blink END alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasBlinkTrail,
+                                                       &layout->blinkOffTilesetTrailBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build blink TRAIL alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasBlinkBridge,
+                                                       &layout->blinkOffTilesetBridgeBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build blink BRIDGE alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasBlinkCapStart,
+                                                       &layout->blinkOffTilesetCapStartBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build blink CAP START alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasBlinkCapEnd,
+                                                       &layout->blinkOffTilesetCapEndBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build blink CAP END alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasBlinkCapStartBreak,
+                                                       &layout->blinkOffTilesetCapStartBreakBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build blink CAP START BREAK alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasBlinkCapStartTrail,
+                                                       &layout->blinkOffTilesetCapStartTrailBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build blink CAP START TRAIL alloc failed");
+
+        layout_sync_optional_segment_tilesets_by_usage(hasGainBlinkBody,
+                                                       &layout->gainBlinkOffTilesetBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build gain blink BODY alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasGainBlinkEnd,
+                                                       &layout->gainBlinkOffTilesetEndBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build gain blink END alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasGainBlinkTrail,
+                                                       &layout->gainBlinkOffTilesetTrailBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build gain blink TRAIL alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasGainBlinkBridge,
+                                                       &layout->gainBlinkOffTilesetBridgeBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build gain blink BRIDGE alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasGainBlinkCapStart,
+                                                       &layout->gainBlinkOffTilesetCapStartBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build gain blink CAP START alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasGainBlinkCapEnd,
+                                                       &layout->gainBlinkOffTilesetCapEndBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build gain blink CAP END alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasGainBlinkCapStartBreak,
+                                                       &layout->gainBlinkOffTilesetCapStartBreakBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build gain blink CAP START BREAK alloc failed");
+        layout_sync_optional_segment_tilesets_by_usage(hasGainBlinkCapStartTrail,
+                                                       &layout->gainBlinkOffTilesetCapStartTrailBySegment,
+                                                       layout->segmentCount,
+                                                       "Gauge build gain blink CAP START TRAIL alloc failed");
+
+        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
         {
             const GaugeSegmentStyle *style = &init->segmentStyles[segmentId];
 
             layout->tilesetBySegment[segmentId] = style->base.body;
-            layout->tilesetEndBySegment[segmentId] = style->base.end;
-            layout->tilesetTrailBySegment[segmentId] = style->base.trail;
-            layout->tilesetBridgeBySegment[segmentId] = style->base.bridge;
-            layout->tilesetCapStartBySegment[segmentId] = style->base.capStart;
-            layout->tilesetCapEndBySegment[segmentId] = style->base.capEnd;
-            layout->tilesetCapStartBreakBySegment[segmentId] = style->base.capStartBreak;
-            layout->tilesetCapStartTrailBySegment[segmentId] = style->base.capStartTrail;
-            layout->capEndBySegment[segmentId] = style->capEndEnabled ? 1 : 0;
+            if (layout->tilesetEndBySegment != s_nullSegmentTilesets)
+                layout->tilesetEndBySegment[segmentId] = style->base.end;
+            if (layout->tilesetTrailBySegment != s_nullSegmentTilesets)
+                layout->tilesetTrailBySegment[segmentId] = style->base.trail;
+            if (layout->tilesetBridgeBySegment != s_nullSegmentTilesets)
+                layout->tilesetBridgeBySegment[segmentId] = style->base.bridge;
+            if (layout->tilesetCapStartBySegment != s_nullSegmentTilesets)
+                layout->tilesetCapStartBySegment[segmentId] = style->base.capStart;
+            if (layout->tilesetCapEndBySegment != s_nullSegmentTilesets)
+                layout->tilesetCapEndBySegment[segmentId] = style->base.capEnd;
+            if (layout->tilesetCapStartBreakBySegment != s_nullSegmentTilesets)
+                layout->tilesetCapStartBreakBySegment[segmentId] = style->base.capStartBreak;
+            if (layout->tilesetCapStartTrailBySegment != s_nullSegmentTilesets)
+                layout->tilesetCapStartTrailBySegment[segmentId] = style->base.capStartTrail;
+            if (layout->capEndBySegment != s_zeroSegmentFlags)
+                layout->capEndBySegment[segmentId] = style->capEndEnabled ? 1 : 0;
 
-            layout->gainTilesetBySegment[segmentId] = style->gain.body;
-            layout->gainTilesetEndBySegment[segmentId] = style->gain.end;
-            layout->gainTilesetTrailBySegment[segmentId] = style->gain.trail;
-            layout->gainTilesetBridgeBySegment[segmentId] = style->gain.bridge;
-            layout->gainTilesetCapStartBySegment[segmentId] = style->gain.capStart;
-            layout->gainTilesetCapEndBySegment[segmentId] = style->gain.capEnd;
-            layout->gainTilesetCapStartBreakBySegment[segmentId] = style->gain.capStartBreak;
-            layout->gainTilesetCapStartTrailBySegment[segmentId] = style->gain.capStartTrail;
+            if (layout->gainTilesetBySegment != s_nullSegmentTilesets)
+                layout->gainTilesetBySegment[segmentId] = style->gain.body;
+            if (layout->gainTilesetEndBySegment != s_nullSegmentTilesets)
+                layout->gainTilesetEndBySegment[segmentId] = style->gain.end;
+            if (layout->gainTilesetTrailBySegment != s_nullSegmentTilesets)
+                layout->gainTilesetTrailBySegment[segmentId] = style->gain.trail;
+            if (layout->gainTilesetBridgeBySegment != s_nullSegmentTilesets)
+                layout->gainTilesetBridgeBySegment[segmentId] = style->gain.bridge;
+            if (layout->gainTilesetCapStartBySegment != s_nullSegmentTilesets)
+                layout->gainTilesetCapStartBySegment[segmentId] = style->gain.capStart;
+            if (layout->gainTilesetCapEndBySegment != s_nullSegmentTilesets)
+                layout->gainTilesetCapEndBySegment[segmentId] = style->gain.capEnd;
+            if (layout->gainTilesetCapStartBreakBySegment != s_nullSegmentTilesets)
+                layout->gainTilesetCapStartBreakBySegment[segmentId] = style->gain.capStartBreak;
+            if (layout->gainTilesetCapStartTrailBySegment != s_nullSegmentTilesets)
+                layout->gainTilesetCapStartTrailBySegment[segmentId] = style->gain.capStartTrail;
 
-            layout->blinkOffTilesetBySegment[segmentId] = style->blinkOff.body;
-            layout->blinkOffTilesetEndBySegment[segmentId] = style->blinkOff.end;
-            layout->blinkOffTilesetTrailBySegment[segmentId] = style->blinkOff.trail;
-            layout->blinkOffTilesetBridgeBySegment[segmentId] = style->blinkOff.bridge;
-            layout->blinkOffTilesetCapStartBySegment[segmentId] = style->blinkOff.capStart;
-            layout->blinkOffTilesetCapEndBySegment[segmentId] = style->blinkOff.capEnd;
-            layout->blinkOffTilesetCapStartBreakBySegment[segmentId] = style->blinkOff.capStartBreak;
-            layout->blinkOffTilesetCapStartTrailBySegment[segmentId] = style->blinkOff.capStartTrail;
+            if (layout->blinkOffTilesetBySegment != s_nullSegmentTilesets)
+                layout->blinkOffTilesetBySegment[segmentId] = style->blinkOff.body;
+            if (layout->blinkOffTilesetEndBySegment != s_nullSegmentTilesets)
+                layout->blinkOffTilesetEndBySegment[segmentId] = style->blinkOff.end;
+            if (layout->blinkOffTilesetTrailBySegment != s_nullSegmentTilesets)
+                layout->blinkOffTilesetTrailBySegment[segmentId] = style->blinkOff.trail;
+            if (layout->blinkOffTilesetBridgeBySegment != s_nullSegmentTilesets)
+                layout->blinkOffTilesetBridgeBySegment[segmentId] = style->blinkOff.bridge;
+            if (layout->blinkOffTilesetCapStartBySegment != s_nullSegmentTilesets)
+                layout->blinkOffTilesetCapStartBySegment[segmentId] = style->blinkOff.capStart;
+            if (layout->blinkOffTilesetCapEndBySegment != s_nullSegmentTilesets)
+                layout->blinkOffTilesetCapEndBySegment[segmentId] = style->blinkOff.capEnd;
+            if (layout->blinkOffTilesetCapStartBreakBySegment != s_nullSegmentTilesets)
+                layout->blinkOffTilesetCapStartBreakBySegment[segmentId] = style->blinkOff.capStartBreak;
+            if (layout->blinkOffTilesetCapStartTrailBySegment != s_nullSegmentTilesets)
+                layout->blinkOffTilesetCapStartTrailBySegment[segmentId] = style->blinkOff.capStartTrail;
 
-            layout->gainBlinkOffTilesetBySegment[segmentId] = style->gainBlinkOff.body;
-            layout->gainBlinkOffTilesetEndBySegment[segmentId] = style->gainBlinkOff.end;
-            layout->gainBlinkOffTilesetTrailBySegment[segmentId] = style->gainBlinkOff.trail;
-            layout->gainBlinkOffTilesetBridgeBySegment[segmentId] = style->gainBlinkOff.bridge;
-            layout->gainBlinkOffTilesetCapStartBySegment[segmentId] = style->gainBlinkOff.capStart;
-            layout->gainBlinkOffTilesetCapEndBySegment[segmentId] = style->gainBlinkOff.capEnd;
-            layout->gainBlinkOffTilesetCapStartBreakBySegment[segmentId] = style->gainBlinkOff.capStartBreak;
-            layout->gainBlinkOffTilesetCapStartTrailBySegment[segmentId] = style->gainBlinkOff.capStartTrail;
+            if (layout->gainBlinkOffTilesetBySegment != s_nullSegmentTilesets)
+                layout->gainBlinkOffTilesetBySegment[segmentId] = style->gainBlinkOff.body;
+            if (layout->gainBlinkOffTilesetEndBySegment != s_nullSegmentTilesets)
+                layout->gainBlinkOffTilesetEndBySegment[segmentId] = style->gainBlinkOff.end;
+            if (layout->gainBlinkOffTilesetTrailBySegment != s_nullSegmentTilesets)
+                layout->gainBlinkOffTilesetTrailBySegment[segmentId] = style->gainBlinkOff.trail;
+            if (layout->gainBlinkOffTilesetBridgeBySegment != s_nullSegmentTilesets)
+                layout->gainBlinkOffTilesetBridgeBySegment[segmentId] = style->gainBlinkOff.bridge;
+            if (layout->gainBlinkOffTilesetCapStartBySegment != s_nullSegmentTilesets)
+                layout->gainBlinkOffTilesetCapStartBySegment[segmentId] = style->gainBlinkOff.capStart;
+            if (layout->gainBlinkOffTilesetCapEndBySegment != s_nullSegmentTilesets)
+                layout->gainBlinkOffTilesetCapEndBySegment[segmentId] = style->gainBlinkOff.capEnd;
+            if (layout->gainBlinkOffTilesetCapStartBreakBySegment != s_nullSegmentTilesets)
+                layout->gainBlinkOffTilesetCapStartBreakBySegment[segmentId] = style->gainBlinkOff.capStartBreak;
+            if (layout->gainBlinkOffTilesetCapStartTrailBySegment != s_nullSegmentTilesets)
+                layout->gainBlinkOffTilesetCapStartTrailBySegment[segmentId] = style->gainBlinkOff.capStartTrail;
         }
     }
 
-    /* Compute cached blink-off flags from assigned tilesets */
-    layout->hasBlinkOff = 0;
-    layout->hasGainBlinkOff = 0;
-    for (u8 s = 0; s < GAUGE_MAX_SEGMENTS; s++)
-    {
-        if (layout->blinkOffTilesetBySegment[s] ||
-            layout->blinkOffTilesetEndBySegment[s] ||
-            layout->blinkOffTilesetTrailBySegment[s] ||
-            layout->blinkOffTilesetBridgeBySegment[s] ||
-            layout->blinkOffTilesetCapStartBySegment[s] ||
-            layout->blinkOffTilesetCapEndBySegment[s] ||
-            layout->blinkOffTilesetCapStartBreakBySegment[s] ||
-            layout->blinkOffTilesetCapStartTrailBySegment[s])
-        {
-            layout->hasBlinkOff = 1;
-        }
-        if (layout->gainBlinkOffTilesetBySegment[s] ||
-            layout->gainBlinkOffTilesetEndBySegment[s] ||
-            layout->gainBlinkOffTilesetTrailBySegment[s] ||
-            layout->gainBlinkOffTilesetBridgeBySegment[s] ||
-            layout->gainBlinkOffTilesetCapStartBySegment[s] ||
-            layout->gainBlinkOffTilesetCapEndBySegment[s] ||
-            layout->gainBlinkOffTilesetCapStartBreakBySegment[s] ||
-            layout->gainBlinkOffTilesetCapStartTrailBySegment[s])
-        {
-            layout->hasGainBlinkOff = 1;
-        }
-    }
+    layout->hasBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_DAMAGE);
+    layout->hasGainBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_GAIN);
 
     /* Compute cached cap flags */
     detect_caps_enabled(layout, &layout->capStartEnabled, &layout->capEndEnabled);
@@ -2171,7 +3121,7 @@ static void reset_dynamic_blink_cache(GaugeDynamic *dyn)
     dyn->loadedCapStartUsesBreak = CACHE_INVALID_U8;
     dyn->loadedCapStartUsesTrail = CACHE_INVALID_U8;
 
-    for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
+    for (u8 i = 0; i < dyn->segmentCount; i++)
     {
         dyn->cachedFillIndexBridge[i] = CACHE_INVALID_U8;
     }
@@ -2197,7 +3147,7 @@ static void reload_dynamic_full_trail_tiles(GaugeDynamic *dyn,
     const u8 fullTrailIndexBody = STRIP_INDEX_FULL_TRAIL;
     const u8 fullTrailIndexTrail = s_trailTileIndexByValueTrail[0][8];
 
-    for (u8 segmentId = 0; segmentId < GAUGE_MAX_SEGMENTS; segmentId++)
+    for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
     {
         const u16 vramTile = dyn->vramTileFullTrail[segmentId];
         if (vramTile == 0)
@@ -2239,7 +3189,7 @@ static void reload_dynamic_full_body_tiles(GaugeDynamic *dyn,
     const u8 fullValueIndex = STRIP_INDEX_FULL;
     const u8 emptyIndex = STRIP_INDEX_EMPTY;
 
-    for (u8 segmentId = 0; segmentId < GAUGE_MAX_SEGMENTS; segmentId++)
+    for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
     {
         const u32 *bodyStrip = select_base_strip(layout->tilesetBySegment[segmentId],
                                                  layout->gainTilesetBySegment[segmentId],
@@ -2267,7 +3217,7 @@ static void reload_dynamic_full_body_tiles(GaugeDynamic *dyn,
  */
 static void init_dynamic_tilemap(GaugePart *part)
 {
-    GaugeLayout *layout = &part->layout;
+    const GaugeLayout *layout = part->layout;
     GaugeDynamic *dyn = &part->dyn;
 
     /* Pre-calculate tilemap positions and cell validity for each cell */
@@ -2314,7 +3264,7 @@ static void init_dynamic_tilemap(GaugePart *part)
  */
 static void write_tilemap_pip_init(GaugePart *part)
 {
-    const GaugeLayout *layout = &part->layout;
+    const GaugeLayout *layout = part->layout;
     part->cellCount = 0;
 
     for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
@@ -2324,7 +3274,7 @@ static void write_tilemap_pip_init(GaugePart *part)
         if (!pipStrip)
             continue;
 
-        if (part->cellCount >= GAUGE_MAX_LENGTH)
+        if (part->cellCount >= layout->length)
             break;
 
         const u16 vramTile = (u16)(part->vramBase + part->cellCount);
@@ -2371,7 +3321,7 @@ static void write_tilemap_pip_init(GaugePart *part)
  */
 static void write_tilemap_fixed_init(GaugePart *part)
 {
-    const GaugeLayout *layout = &part->layout;
+    const GaugeLayout *layout = part->layout;
     part->cellCount = 0;
 
     for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
@@ -2383,7 +3333,7 @@ static void write_tilemap_fixed_init(GaugePart *part)
         if (!bodyStrip && !gainBodyStrip)
             continue;
 
-        if (part->cellCount >= GAUGE_MAX_LENGTH)
+        if (part->cellCount >= layout->length)
             break;
 
         const u16 vramTile = (u16)(part->vramBase + part->cellCount);
@@ -2527,7 +3477,7 @@ static void process_fixed_mode(GaugePart *part,
                                u8 blinkOffActive,
                                u8 trailMode)
 {
-    const GaugeLayout *layout = &part->layout;
+    const GaugeLayout *layout = part->layout;
 
     /* --- Break zone computation ---
      * breakInfo: used for normal cell classification (trail with blink applied)
@@ -2935,7 +3885,7 @@ static void process_dynamic_mode(GaugePart *part,
                                  u8 trailModeChanged)
 {
     GaugeDynamic *dyn = &part->dyn;
-    const GaugeLayout *layout = &part->layout;
+    const GaugeLayout *layout = part->layout;
 
     /* Pre-compute tilemap attribute base (without tile index) */
     const u16 attrBase = TILE_ATTR_FULL(layout->palette, layout->priority,
@@ -3529,7 +4479,7 @@ static void process_pip_mode(GaugePart *part,
                              u8 blinkOffActive,
                              u8 trailMode)
 {
-    const GaugeLayout *layout = &part->layout;
+    const GaugeLayout *layout = part->layout;
 
     for (u8 i = 0; i < part->cellCount; i++)
     {
@@ -3662,37 +4612,58 @@ static GaugeTickAndRenderHandler *resolve_tick_and_render_handler(GaugeValueMode
 /**
  * Initialize a GaugePart with all parameters.
  */
-static void GaugePart_initInternal(GaugePart *part,
-                                   const Gauge *gauge,
-                                   const GaugeLayout *layout,
-                                   u16 originX, u16 originY,
-                                   u16 vramBase,
-                                   GaugeVramMode vramMode)
+static u8 GaugePart_initInternal(GaugePart *part,
+                                 const Gauge *gauge,
+                                 GaugeLayout *layout,
+                                 u16 originX, u16 originY,
+                                 u16 vramBase,
+                                 GaugeVramMode vramMode)
 {
+    if (!part || !gauge || !layout || layout->length == 0)
+        return 0;
+
     part->originX = originX;
     part->originY = originY;
     part->vramBase = vramBase;
     part->vramMode = vramMode;
     part->renderHandler = resolve_part_render_handler(gauge->valueMode, vramMode);
+    part->layout = layout;
+    part->cells = NULL;
+    part->cellCount = 0;
+    part->dyn.segmentCount = 0;
+    part->dyn.cellCount = 0;
 
-    /* Copy layout (includes visual properties) */
-    part->layout = *layout;
-    if (part->layout.length == 0) part->layout.length = 1;
-    if (part->layout.length > GAUGE_MAX_LENGTH) part->layout.length = GAUGE_MAX_LENGTH;
+    GaugeLayout_retain(layout);
+
+    if (gauge->valueMode == GAUGE_VALUE_MODE_PIP || vramMode == GAUGE_VRAM_FIXED)
+    {
+        part->cells = (GaugeStreamCell *)gauge_alloc_bytes(
+            (u16)(layout->length * (u8)sizeof(GaugeStreamCell)));
+        if (!part->cells)
+        {
+            GaugeLayout_release(layout);
+            return 0;
+        }
+    }
 
     if (gauge->valueMode == GAUGE_VALUE_MODE_PIP)
     {
         /* Compact PIP renderer uses per-cell streaming for both VRAM modes. */
         write_tilemap_pip_init(part);
-        return;
+        return 1;
     }
 
     /* Initialize based on VRAM mode */
     if (part->vramMode == GAUGE_VRAM_DYNAMIC)
     {
         /* Dynamic mode initialization */
-        init_dynamic_vram(&part->dyn, &part->layout, part->vramBase, gauge->logic.trailEnabled);
-        preload_dynamic_standard_tiles(&part->dyn, &part->layout, gauge->logic.trailEnabled);
+        if (!init_dynamic_vram(&part->dyn, part->layout, part->vramBase, gauge->logic.trailEnabled))
+        {
+            gauge_free_ptr((void **)&part->cells);
+            GaugeLayout_release(layout);
+            return 0;
+        }
+        preload_dynamic_standard_tiles(&part->dyn, part->layout, gauge->logic.trailEnabled);
         init_dynamic_tilemap(part);
     }
     else
@@ -3700,6 +4671,51 @@ static void GaugePart_initInternal(GaugePart *part,
         /* Fixed mode */
         write_tilemap_fixed_init(part);
     }
+
+    return 1;
+}
+
+static void GaugePart_releaseInternal(GaugePart *part)
+{
+    if (!part)
+        return;
+
+    if (part->layout)
+    {
+        GaugeLayout_release((GaugeLayout *)part->layout);
+        part->layout = NULL;
+    }
+
+    gauge_free_ptr((void **)&part->cells);
+    free_dynamic_buffers(&part->dyn);
+    part->cellCount = 0;
+}
+
+static u8 ensure_part_capacity(Gauge *gauge, u8 requiredCount)
+{
+    if (requiredCount <= gauge->partCapacity)
+        return 1;
+
+    u8 newCapacity = (gauge->partCapacity == 0) ? 2 : gauge->partCapacity;
+    while (newCapacity < requiredCount && newCapacity < GAUGE_MAX_PARTS)
+        newCapacity = (u8)(newCapacity << 1);
+    if (newCapacity > GAUGE_MAX_PARTS)
+        newCapacity = GAUGE_MAX_PARTS;
+    if (newCapacity < requiredCount)
+        return 0;
+
+    GaugePart **newParts = (GaugePart **)gauge_alloc_bytes(
+        (u16)(newCapacity * (u8)sizeof(GaugePart *)));
+    if (!newParts)
+        return 0;
+
+    for (u8 i = 0; i < gauge->partCount; i++)
+        newParts[i] = gauge->parts[i];
+
+    gauge_free_ptr((void **)&gauge->parts);
+    gauge->parts = newParts;
+    gauge->partCapacity = newCapacity;
+    return 1;
 }
 
 
@@ -3850,14 +4866,17 @@ static void fill_pip_value_lut(u16 *dest, u16 maxValue, const GaugeLayout *layou
  * init->layout->length * GAUGE_PIXELS_PER_TILE.
  *
  * If maxValue != maxFillPixels (FILL mode) or PIP mode, a value-to-pixels
- * LUT is built into the embedded array (no heap allocation).
+ * LUT is built into gauge->logic.valueToPixelsData (heap allocated).
  *
  * Trail and value animation are disabled by default.
  */
 void Gauge_init(Gauge *gauge, const GaugeInit *init)
 {
-    if (!gauge || !init || !init->layout || !init->parts)
+    if (!gauge || !init || !init->layout)
         return;
+
+    /* Gauge_init expects a fresh Gauge (or one previously released). */
+    memset(gauge, 0, sizeof(*gauge));
 
     u16 maxValue = init->maxValue;
     const u16 maxFillPixels = (u16)(init->layout->length * GAUGE_PIXELS_PER_TILE);
@@ -3872,6 +4891,7 @@ void Gauge_init(Gauge *gauge, const GaugeInit *init)
 
     if (valueMode != GAUGE_VALUE_MODE_PIP)
         valueMode = GAUGE_VALUE_MODE_FILL;
+    gauge->logic.valueToPixelsData = NULL;
 
     /* Build value-to-pixels LUT BEFORE GaugeLogic_init so that
      * initial pixel positions are computed correctly.
@@ -3883,6 +4903,13 @@ void Gauge_init(Gauge *gauge, const GaugeInit *init)
     const u16 *lut = NULL;
     if (valueMode == GAUGE_VALUE_MODE_FILL && maxValue != maxFillPixels)
     {
+        gauge->logic.valueToPixelsData = (u16 *)gauge_alloc_bytes(
+            (u16)((maxValue + 1) * (u8)sizeof(u16)));
+        if (!gauge->logic.valueToPixelsData)
+        {
+            KLog("Gauge init alloc failed: valueToPixelsData");
+            return;
+        }
         fill_value_to_pixels_lut(gauge->logic.valueToPixelsData, maxValue, maxFillPixels);
         lut = gauge->logic.valueToPixelsData;
     }
@@ -3902,6 +4929,14 @@ void Gauge_init(Gauge *gauge, const GaugeInit *init)
             maxValue = validatedPipCount;
         }
 
+        gauge->logic.valueToPixelsData = (u16 *)gauge_alloc_bytes(
+            (u16)((maxValue + 1) * (u8)sizeof(u16)));
+        if (!gauge->logic.valueToPixelsData)
+        {
+            KLog("Gauge init alloc failed: PIP LUT");
+            return;
+        }
+
         fill_pip_value_lut(gauge->logic.valueToPixelsData, maxValue, init->layout);
         lut = gauge->logic.valueToPixelsData;
     }
@@ -3911,9 +4946,10 @@ void Gauge_init(Gauge *gauge, const GaugeInit *init)
     GaugeLogic_init(&gauge->logic, maxValue, maxFillPixels, lut,
                     0, init->initialValue);
 
-    /* Store gaugePart array reference */
-    gauge->parts = init->parts;
+    /* Initialize part storage (grown on demand by Gauge_addPart). */
+    gauge->parts = NULL;
     gauge->partCount = 0;
+    gauge->partCapacity = 0;
 
     /* Runtime dispatch state */
     gauge->valueMode = valueMode;
@@ -3968,10 +5004,24 @@ void Gauge_setMaxFillPixels(Gauge *gauge, u16 maxFillPixels)
 
     logic->maxFillPixels = maxFillPixels;
 
-    /* Rebuild LUT into embedded array (or clear if 1:1) */
+    /* Rebuild LUT buffer (or clear LUT pointer if 1:1). */
     if (gauge->valueMode == GAUGE_VALUE_MODE_FILL && logic->maxValue != maxFillPixels)
     {
+        if (!logic->valueToPixelsData)
+        {
+            logic->valueToPixelsData = (u16 *)gauge_alloc_bytes(
+                (u16)((logic->maxValue + 1) * (u8)sizeof(u16)));
+            if (!logic->valueToPixelsData)
+            {
+                KLog("Gauge setMaxFillPixels alloc failed");
+                return;
+            }
+        }
         fill_value_to_pixels_lut(logic->valueToPixelsData, logic->maxValue, maxFillPixels);
+        logic->valueToPixelsLUT = logic->valueToPixelsData;
+    }
+    else if (gauge->valueMode == GAUGE_VALUE_MODE_PIP && logic->valueToPixelsData)
+    {
         logic->valueToPixelsLUT = logic->valueToPixelsData;
     }
     else
@@ -3996,72 +5046,88 @@ void Gauge_setMaxFillPixels(Gauge *gauge, u16 maxFillPixels)
     logic->needUpdate = 1;
 }
 
-void Gauge_addPart(Gauge *gauge,
-                   GaugePart *part,
-                   const GaugeLayout *layout,
-                   u16 originX,
-                   u16 originY)
+u8 Gauge_addPart(Gauge *gauge,
+                 GaugeLayout *layout,
+                 u16 originX,
+                 u16 originY)
 {
-    if (!gauge || !part || !layout || !gauge->parts)
-        return;
+    if (!gauge || !layout)
+        return 0;
 
-    if (gauge->partCount >= GAUGE_MAX_PARTS) return;
-
-    if (gauge->valueMode == GAUGE_VALUE_MODE_PIP)
-    {
-        if (!validate_pip_layout(&gauge->logic, layout))
-            return;
-        /* PIP LUT already built in Gauge_init */
-    }
-
-    /* Compute VRAM size for this layout */
     const u16 vramSize = compute_vram_size_for_layout(layout,
                                                       gauge->vramMode,
                                                       gauge->logic.trailEnabled,
                                                       gauge->valueMode);
-
-    /* Allocate VRAM from gauge's pool */
     const u16 vramBase = (u16)(gauge->vramBase + gauge->vramNextOffset);
+
+    if (!Gauge_addPartEx(gauge, layout, originX, originY, vramBase, gauge->vramMode))
+        return 0;
+
     gauge->vramNextOffset = (u16)(gauge->vramNextOffset + vramSize);
-
-    /* Initialize part */
-    GaugePart_initInternal(part, gauge, layout, originX, originY, vramBase, gauge->vramMode);
-
-    /* Force next update to render (new part needs initial draw) */
-    gauge->logic.lastValuePixels = CACHE_INVALID_U16;
-    gauge->logic.needUpdate = 1;
-
-    gauge->partCount++;
+    return 1;
 }
 
-void Gauge_addPartEx(Gauge *gauge,
-                     GaugePart *part,
-                     const GaugeLayout *layout,
-                     u16 originX,
-                     u16 originY,
-                     u16 vramBase,
-                     GaugeVramMode vramMode)
+u8 Gauge_addPartEx(Gauge *gauge,
+                   GaugeLayout *layout,
+                   u16 originX,
+                   u16 originY,
+                   u16 vramBase,
+                   GaugeVramMode vramMode)
 {
-    if (!gauge || !part || !layout || !gauge->parts)
-        return;
+    if (!gauge || !layout)
+        return 0;
 
-    if (gauge->partCount >= GAUGE_MAX_PARTS) return;
+    if (gauge->partCount >= GAUGE_MAX_PARTS)
+        return 0;
 
     if (gauge->valueMode == GAUGE_VALUE_MODE_PIP)
     {
         if (!validate_pip_layout(&gauge->logic, layout))
-            return;
-        /* PIP LUT already built in Gauge_init */
+            return 0;
     }
 
-    /* Initialize part with custom VRAM settings */
-    GaugePart_initInternal(part, gauge, layout, originX, originY, vramBase, vramMode);
+    if (!ensure_part_capacity(gauge, (u8)(gauge->partCount + 1)))
+        return 0;
+
+    GaugePart *part = (GaugePart *)gauge_alloc_bytes((u16)sizeof(GaugePart));
+    if (!part)
+        return 0;
+
+    if (!GaugePart_initInternal(part, gauge, layout, originX, originY, vramBase, vramMode))
+    {
+        gauge_free_ptr((void **)&part);
+        return 0;
+    }
+
+    gauge->parts[gauge->partCount] = part;
+    gauge->partCount++;
 
     /* Force next update to render */
     gauge->logic.lastValuePixels = CACHE_INVALID_U16;
     gauge->logic.needUpdate = 1;
 
-    gauge->partCount++;
+    return 1;
+}
+
+void Gauge_release(Gauge *gauge)
+{
+    if (!gauge)
+        return;
+
+    for (u8 i = 0; i < gauge->partCount; i++)
+    {
+        GaugePart *part = (gauge->parts != NULL) ? gauge->parts[i] : NULL;
+        if (!part)
+            continue;
+
+        GaugePart_releaseInternal(part);
+        gauge_free_ptr((void **)&part);
+        gauge->parts[i] = NULL;
+    }
+
+    gauge_free_ptr((void **)&gauge->parts);
+    gauge_free_ptr((void **)&gauge->logic.valueToPixelsData);
+    memset(gauge, 0, sizeof(*gauge));
 }
 
 /**
@@ -4202,7 +5268,9 @@ static void gauge_tick_and_render_fill(Gauge *gauge)
     u8 i = gauge->partCount;
     while (i--)
     {
-        GaugePart *part = &gauge->parts[i];
+        GaugePart *part = gauge->parts[i];
+        if (!part)
+            continue;
         part->renderHandler(part, valuePixels, trailPixelsRendered, trailPixels,
                             bs.blinkOffActive, bs.blinkOnChanged,
                             bs.trailMode, bs.trailModeChanged);
@@ -4280,7 +5348,9 @@ static void gauge_tick_and_render_pip(Gauge *gauge)
     u8 i = gauge->partCount;
     while (i--)
     {
-        GaugePart *part = &gauge->parts[i];
+        GaugePart *part = gauge->parts[i];
+        if (!part)
+            continue;
         part->renderHandler(part, valuePixels, trailPixelsRendered, trailPixels,
                             bs.blinkOffActive, bs.blinkOnChanged,
                             bs.trailMode, bs.trailModeChanged);
@@ -4493,7 +5563,7 @@ static u16 compute_vram_size_for_layout(const GaugeLayout *layout,
         }
     }
 
-    for (u8 segmentId = 0; segmentId < GAUGE_MAX_SEGMENTS; segmentId++)
+    for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
     {
         if (segmentUsed[segmentId] &&
             (layout->tilesetEndBySegment[segmentId] || layout->gainTilesetEndBySegment[segmentId]))

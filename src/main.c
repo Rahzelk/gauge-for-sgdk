@@ -123,16 +123,6 @@ static Gauge g_gaugeSample7;        /* Has 2 parts: Part1 + Part2 */
 static Gauge g_gaugeSample7Pip;     /* Independent mini PIP gauge */
 static Gauge g_gaugeSample4;
 
-/* --- Parts arrays (visual instances) --- */
-static GaugePart g_partsSample1[1];
-static GaugePart g_partsSample2[1];
-static GaugePart g_partsSample3[1];
-static GaugePart g_partsSample5[1];
-static GaugePart g_partsSample6[1];
-static GaugePart g_partsSample7[2];         /* Part1 + Part2 share same gauge */
-static GaugePart g_partsSample7Pip[1];
-static GaugePart g_partsSample4[1];
-
 /* --- Input state --- */
 static u16 g_prevPad = 0;
 static u8 g_selectedGauge = 0;          /* Currently controlled gauge (0-6) */
@@ -203,6 +193,12 @@ static void logVramUsage(const char* name, u16 vramBase, u16 tileCount)
 static void logDynamicVramTiles(const char* name, const GaugePart* part)
 {
     KLog((char*)name);
+    if (!part || part->dyn.segmentCount == 0)
+    {
+        KLog("  part unavailable");
+        return;
+    }
+
     KLog_U1("  partial V=", part->dyn.vramTilePartialValue);
     KLog_U1("  partial T=", part->dyn.vramTilePartialTrail);
     KLog_U1("  partial E=", part->dyn.vramTilePartialEnd);
@@ -210,12 +206,18 @@ static void logDynamicVramTiles(const char* name, const GaugePart* part)
     KLog_U3("  seg0 E=", part->dyn.vramTileEmpty[0],
             " F=", part->dyn.vramTileFullValue[0],
             " T=", part->dyn.vramTileFullTrail[0]);
-    KLog_U3("  seg1 E=", part->dyn.vramTileEmpty[1],
-            " F=", part->dyn.vramTileFullValue[1],
-            " T=", part->dyn.vramTileFullTrail[1]);
-    KLog_U3("  seg2 E=", part->dyn.vramTileEmpty[2],
-            " F=", part->dyn.vramTileFullValue[2],
-            " T=", part->dyn.vramTileFullTrail[2]);
+    if (part->dyn.segmentCount > 1)
+    {
+        KLog_U3("  seg1 E=", part->dyn.vramTileEmpty[1],
+                " F=", part->dyn.vramTileFullValue[1],
+                " T=", part->dyn.vramTileFullTrail[1]);
+    }
+    if (part->dyn.segmentCount > 2)
+    {
+        KLog_U3("  seg2 E=", part->dyn.vramTileEmpty[2],
+                " F=", part->dyn.vramTileFullValue[2],
+                " T=", part->dyn.vramTileFullTrail[2]);
+    }
 }
 
 /* =============================================================================
@@ -316,7 +318,6 @@ static void initSample1(u16 *nextVram)
     Gauge_init(&g_gaugeSample1, &(GaugeInit){
         .maxValue = sample1MaxPixels,
         .initialValue = sample1MaxPixels,
-        .parts = g_partsSample1,
         .layout = &s_layoutSample1,
         .vramBase = vramBase,
         .vramMode = GAUGE_VRAM_DYNAMIC,
@@ -327,7 +328,7 @@ static void initSample1(u16 *nextVram)
     Gauge_setTrailAnim(&g_gaugeSample1, 1, 0, 0);   /* enabled, default speeds */
  
     /* Step 7: Add the visual part at screen position */
-    Gauge_addPart(&g_gaugeSample1, &g_partsSample1[0],
+    Gauge_addPart(&g_gaugeSample1,
                   &s_layoutSample1,
                   SAMPLE1_X, SAMPLE1_Y);
 
@@ -376,7 +377,6 @@ static void initSample1(u16 *nextVram)
     Gauge_init(&g_gaugeSample2, &(GaugeInit){
         .maxValue = 7,
         .initialValue = 7,
-        .parts = g_partsSample2,
         .layout = &s_layoutSample2,
         .vramBase = vramBase,
         .vramMode = GAUGE_VRAM_DYNAMIC,
@@ -386,7 +386,7 @@ static void initSample1(u16 *nextVram)
     Gauge_setValueAnim(&g_gaugeSample2, 1, 2);
     Gauge_setTrailAnim(&g_gaugeSample2, 1, 0, 0);
 
-    Gauge_addPart(&g_gaugeSample2, &g_partsSample2[0],
+    Gauge_addPart(&g_gaugeSample2,
                   &s_layoutSample2,
                   SAMPLE2_X, SAMPLE2_Y);
 
@@ -447,7 +447,6 @@ static void initSample3(u16 *nextVram)
     Gauge_init(&g_gaugeSample3, &(GaugeInit){
         .maxValue = sample3MaxPixels,
         .initialValue = sample3MaxPixels,
-        .parts = g_partsSample3,
         .layout = &s_layoutSample3,
         .vramBase = vramBase,
         .vramMode = GAUGE_VRAM_DYNAMIC,
@@ -457,7 +456,7 @@ static void initSample3(u16 *nextVram)
     Gauge_setTrailAnim(&g_gaugeSample3, 1, 0, 0);
 
     /* Step 5: Add part */
-    Gauge_addPart(&g_gaugeSample3, &g_partsSample3[0],
+    Gauge_addPart(&g_gaugeSample3,
                   &s_layoutSample3,
                   SAMPLE3_X, SAMPLE3_Y);
 
@@ -556,7 +555,6 @@ static void initSample5(u16 *nextVram)
     Gauge_init(&g_gaugeSample5, &(GaugeInit){
         .maxValue = 100,
         .initialValue = 100,
-        .parts = g_partsSample5,
         .layout = &s_layoutSample5,
         .vramBase = vramBase,
         .vramMode = GAUGE_VRAM_DYNAMIC,
@@ -568,7 +566,7 @@ static void initSample5(u16 *nextVram)
     Gauge_setTrailAnim(&g_gaugeSample5, 1, 3, 2);   /* enabled, default speeds */
 
     /* Step 7: Add part */
-    Gauge_addPart(&g_gaugeSample5, &g_partsSample5[0],
+    Gauge_addPart(&g_gaugeSample5,
                   &s_layoutSample5,
                   SAMPLE5_X, SAMPLE5_Y);
 
@@ -634,7 +632,6 @@ static void initSample6(u16 *nextVram)
     Gauge_init(&g_gaugeSample6, &(GaugeInit){
         .maxValue = sample6MaxPixels,
         .initialValue = sample6MaxPixels,
-        .parts = g_partsSample6,
         .layout = &s_layoutSample6,
         .vramBase = vramBase,
         .vramMode = GAUGE_VRAM_FIXED,
@@ -644,7 +641,7 @@ static void initSample6(u16 *nextVram)
     Gauge_setTrailAnim(&g_gaugeSample6, 1, 0, 0);
 
     /* Step 5: Add part */
-    Gauge_addPart(&g_gaugeSample6, &g_partsSample6[0],
+    Gauge_addPart(&g_gaugeSample6,
                   &s_layoutSample6,
                   SAMPLE6_X, SAMPLE6_Y);
 
@@ -806,7 +803,6 @@ static void initSample7(u16 *nextVram)
     Gauge_init(&g_gaugeSample7, &(GaugeInit){
         .maxValue = sample7MaxPixels,
         .initialValue = sample7MaxPixels,
-        .parts = g_partsSample7,
         .layout = &s_layoutSample7Part1,
         .vramBase = vramBase,
         .vramMode = GAUGE_VRAM_DYNAMIC,
@@ -816,12 +812,13 @@ static void initSample7(u16 *nextVram)
     Gauge_setTrailAnim(&g_gaugeSample7, 1, 0, 0);
 
     /* Step 5: Add Part1 (main 12-tile gauge) */
-    Gauge_addPart(&g_gaugeSample7, &g_partsSample7[0],
+    Gauge_addPart(&g_gaugeSample7,
                   &s_layoutSample7Part1,
                   SAMPLE7_X, SAMPLE7_Y);
 
     /* Debug: log dynamic VRAM tiles to detect overlaps */
-    logDynamicVramTiles("Sample 7 multi part ", &g_partsSample7[0]);
+    logDynamicVramTiles("Sample 7 multi part ",
+                        (g_gaugeSample7.partCount > 0) ? g_gaugeSample7.parts[0] : NULL);
     vramSize = Gauge_getVramSize(&g_gaugeSample7, &s_layoutSample7Part1);
     logVramUsage("Sample 7 top part gauge", vramBase, vramSize);
     vramBase = (u16)(vramBase + vramSize);
@@ -829,12 +826,13 @@ static void initSample7(u16 *nextVram)
     /* Step 6: Add Part2 (3-tile secondary display)
        - Shares the same gauge logic as Part1
        - Value changes are synchronized */
-    Gauge_addPart(&g_gaugeSample7, &g_partsSample7[1],
+    Gauge_addPart(&g_gaugeSample7,
                   &s_layoutSample7Part2,
                   SAMPLE7_PART2_X, SAMPLE7_PART2_Y);
 
     /* Debug: log dynamic VRAM tiles to detect overlaps */
-    logDynamicVramTiles("Sample 7 part2 dyn tiles", &g_partsSample7[1]);
+    logDynamicVramTiles("Sample 7 part2 dyn tiles",
+                        (g_gaugeSample7.partCount > 1) ? g_gaugeSample7.parts[1] : NULL);
     vramSize = Gauge_getVramSize(&g_gaugeSample7, &s_layoutSample7Part2);
     logVramUsage("Sample 7 bottom part gauge", vramBase, vramSize);
     *nextVram = (u16)(vramBase + vramSize);
@@ -871,7 +869,6 @@ static void initSample7(u16 *nextVram)
     Gauge_init(&g_gaugeSample7Pip, &(GaugeInit){
         .maxValue = 4,
         .initialValue = 0,
-        .parts = g_partsSample7Pip,
         .layout = &s_layoutSample7Pip,
         .vramBase = vramBase,
         .vramMode = GAUGE_VRAM_DYNAMIC,
@@ -880,7 +877,7 @@ static void initSample7(u16 *nextVram)
 
     /* Keep this mini bar simple: no trail animation. */
 
-    Gauge_addPart(&g_gaugeSample7Pip, &g_partsSample7Pip[0],
+    Gauge_addPart(&g_gaugeSample7Pip,
                   &s_layoutSample7Pip,
                   SAMPLE7_PIP_X, SAMPLE7_PIP_Y);
 
@@ -1065,7 +1062,6 @@ static void initSample4(u16 *nextVram)
     Gauge_init(&g_gaugeSample4, &(GaugeInit){
         .maxValue = sample4MaxPixels,
         .initialValue = sample4MaxPixels,
-        .parts = g_partsSample4,
         .layout = &s_layoutSample4,
         .vramBase = vramBase,
         .vramMode = GAUGE_VRAM_DYNAMIC,
@@ -1075,7 +1071,7 @@ static void initSample4(u16 *nextVram)
     Gauge_setTrailAnim(&g_gaugeSample4, 1, 0, 0);
 
     /* Step 6: Add part */
-    Gauge_addPart(&g_gaugeSample4, &g_partsSample4[0],
+    Gauge_addPart(&g_gaugeSample4,
                   &s_layoutSample4Mirror,
                   SAMPLE4_X, SAMPLE4_Y);
 
