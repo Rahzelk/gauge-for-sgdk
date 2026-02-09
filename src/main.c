@@ -400,7 +400,7 @@ static void initSample1(u16 *nextVram)
 
 
 /* =============================================================================
-   SAMPLE 3: 16-tile gauge with cap+border
+   SAMPLE 3: 15-tile gauge with cap+border
    ============================================================================= */
 
 static void initSample3(u16 *nextVram)
@@ -666,7 +666,7 @@ static void initSample6(u16 *nextVram)
    This sample shows:
    - Bevel styles from Sample 5 bridge set (lightblue -> blue -> yellow)
    - Part1: 4 lightblue + 4 blue + 4 yellow
-   - Part2: 4 lightblue
+   - Part2: 3 lightblue
    - Two parts sharing the same gauge logic (synchronized value)
    - Independent mini PIP gauge with auto-wrap demo
 */
@@ -677,7 +677,7 @@ static void initSample7(u16 *nextVram)
     u16 vramSize;
 
     /* -------------------------------------------------------------------------
-       SAMPLE 7A: Multi-segment bevel gauge (Part1 = 12 tiles, Part2 = 4 tiles)
+       SAMPLE 7A: Multi-segment bevel gauge (Part1 = 12 tiles, Part2 = 3 tiles)
        ------------------------------------------------------------------------- */
 
     /* Step 1: Define bevel segment styles (same family as Sample 5 bridge demo). */
@@ -1162,8 +1162,8 @@ static void handleInput(u16 pressed, u16 held)
  */
 static void tickBlueAutoWrap(void)
 {
-    /* Increment every 2 frames (~3.3 seconds per full cycle at 60fps) */
-    if ((g_frameCount & 55) == 0)
+    /* Increment every 32 frames (~2.7 seconds per full cycle at 60fps). */
+    if ((g_frameCount & 31) == 0)
     {
         g_sample7PipValue++;
         if (g_sample7PipValue > 4)
@@ -1222,11 +1222,11 @@ int main(bool hardReset)
     KLog("=== GAUGE MODULE DEMO - VRAM ALLOCATION ===");
 
     initSample1(&nextVram);    /* Sample 1 + Sample 2 PIP */
-    initSample3(&nextVram);    /* Sample 3 (cap+border) */
+    initSample3(&nextVram);    /* Sample 3 (bevel) */
     initSample4(&nextVram);    /* Sample 4 (cap start/end) */
     initSample5(&nextVram);    /* Sample 5 (multi-bridge) */
     initSample6(&nextVram);    /* Sample 6 (vertical, FIXED mode) */
-    initSample7(&nextVram);    /* Sample 7 (multi-segment + blue) */
+    initSample7(&nextVram);    /* Sample 7 (multi-part + mini PIP) */
 
     KLog_U1("Total tiles used in VRAM: ", (u16)(nextVram - VRAM_BASE));
     KLog("============================================");
@@ -1246,7 +1246,7 @@ int main(bool hardReset)
         /* Handle input */
         handleInput(pressed, padState);
 
-        /* Blue gauge auto-wrap demo */
+        /* Mini PIP gauge auto-wrap demo */
         tickBlueAutoWrap();
 
         /* Update all gauges (tick + render) */

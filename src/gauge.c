@@ -1,7 +1,7 @@
 #include "gauge.h"
 
 /* =============================================================================
-   gauge.c ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Simplified single-lane HUD gauge implementation for SGDK
+   gauge.c - Simplified single-lane HUD gauge implementation for SGDK
    =============================================================================
  
    TILE STRIP SYSTEM:
@@ -195,7 +195,7 @@ static inline u8 clamp_to_tile_size(s16 v)
     /* Branchless lower clamp: zero if negative.
      * v >> 15 is SIGNED (arithmetic) shift: gives -1 (0xFFFF) if v < 0, 0 otherwise.
      * ~(-1) = 0 zeroes v; ~0 = 0xFFFF preserves v.
-     * IMPORTANT: must NOT cast v to u16 before shift Ã¢â‚¬â€ that would make it unsigned
+     * IMPORTANT: must NOT cast v to u16 before shift - that would make it unsigned
      * and give 0 or 1 instead of 0 or 0xFFFF, breaking the mask. */
     u16 clamped = (u16)(v & ~(v >> 15));
     /* Upper clamp: cap at 8 (rare case, only at break cells) */
@@ -360,7 +360,7 @@ static inline void compute_tile_xy(u8 orient,
 
 
 /* =============================================================================
-   GaugeBreakInfo Ã¢â‚¬â€ Pre-computed break/transition zone data
+   GaugeBreakInfo - Pre-computed break/transition zone data
 
    Visual notation (single cell):
    F = BODY full   (value=8, trail=8)
@@ -601,10 +601,10 @@ static inline u8 is_cell_in_trail_zone(const GaugeBreakInfo *breakInfo, u8 cellF
    - capStartTrailStrip: cap while trail zone is visible (trail break/full)
 
    Priority rules for tileset + fill index selection:
-   1. Cell is END (E)             Ã¢â€ â€™ capStartStrip + endIndex
-   2. Cell is TRAIL (break/full)  Ã¢â€ â€™ capStartTrailStrip + trail LUT
-   3. Next cell is END (E)        Ã¢â€ â€™ capStartBreakStrip + endIndex (aligned to E)
-   4. Else (cell is FULL)         Ã¢â€ â€™ capStartBreakStrip + index 44 (full)
+   1. Cell is END (E)             -> capStartStrip + endIndex
+   2. Cell is TRAIL (break/full)  -> capStartTrailStrip + trail LUT
+   3. Next cell is END (E)        -> capStartBreakStrip + endIndex (aligned to E)
+   4. Else (cell is FULL)         -> capStartBreakStrip + index 44 (full)
 
    ============================================================================= */
 typedef struct
@@ -788,13 +788,13 @@ static inline u8 compute_bridge_strip_index(const GaugeLayout *layout,
 {
     const u8 nextFillIndex = (u8)(cellFillIndex + 1);
 
-    /* Case 1: next cell is END Ã¢â€ â€™ use END fill index */
+    /* Case 1: next cell is END -> use END fill index */
     if (breakInfo->endFillIndex == nextFillIndex)
     {
         return s_tileIndexByValueTrail[breakInfo->endValuePxInTile][breakInfo->endTrailPxInTile];
     }
 
-    /* Case 2: next cell is trail break #1 Ã¢â€ â€™ compute its fill */
+    /* Case 2: next cell is trail break #1 -> compute its fill */
     if (breakInfo->trailBreakActive && nextFillIndex == breakInfo->trailBreakFillIndex)
     {
         u8 nextValuePx = 0;
@@ -1020,10 +1020,10 @@ static inline void upload_fill_tile(const u32 *strip, u8 fillIndex, u16 vramTile
  * (where segmentId changes between adjacent cells), applies these rules:
  *
  * - If outgoing segment has a BRIDGE tileset:
- *     Ã¢â€ â€™ last cell of the segment is flagged as bridgeEnd (shows bridge tile)
- *     Ã¢â€ â€™ cell before that is flagged as bridgeBreak (forced BREAK, index 44)
+ *     -> last cell of the segment is flagged as bridgeEnd (shows bridge tile)
+ *     -> cell before that is flagged as bridgeBreak (forced BREAK, index 44)
  * - If outgoing segment has NO BRIDGE tileset:
- *     Ã¢â€ â€™ last cell of the segment is flagged as bridgeBreak (forced BREAK)
+ *     -> last cell of the segment is flagged as bridgeBreak (forced BREAK)
  *
  * Example with segments A (has bridge) and B (no bridge):
  *   fillIndex:   0   1   2   3   4   5   6   7
@@ -1105,6 +1105,9 @@ void GaugeLayout_initEx(GaugeLayout *layout,
                         u8 verticalFlip,
                         u8 horizontalFlip)
 {
+    if (!layout)
+        return;
+
     /* Validate and clamp length */
     if (length == 0) length = 1;
     if (length > GAUGE_MAX_LENGTH) length = GAUGE_MAX_LENGTH;
@@ -1207,6 +1210,9 @@ void GaugeLayout_init(GaugeLayout *layout,
 /** Set fill direction to forward: cell 0 fills first (left-to-right / top-to-bottom). */
 void GaugeLayout_setFillForward(GaugeLayout *layout)
 {
+    if (!layout)
+        return;
+
     for (u8 c = 0; c < layout->length; c++)
     {
         layout->fillIndexByCell[c] = c;
@@ -1229,6 +1235,9 @@ void GaugeLayout_setFillOffset(GaugeLayout *layout, u16 fillOffsetPixels)
 /** Set fill direction to reverse: last cell fills first (right-to-left / bottom-to-top). */
 void GaugeLayout_setFillReverse(GaugeLayout *layout)
 {
+    if (!layout)
+        return;
+
     for (u8 c = 0; c < layout->length; c++)
     {
         const u8 fillIdx = (u8)(layout->length - 1 - c);
@@ -1248,6 +1257,9 @@ void GaugeLayout_setFillReverse(GaugeLayout *layout)
  */
 void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src)
 {
+    if (!dst || !src)
+        return;
+
     dst->length = src->length;
     dst->fillOffset = src->fillOffset;
 
@@ -1340,6 +1352,9 @@ void GaugeLayout_setCaps(GaugeLayout *layout,
                          const u32 * const *capStartTrailTilesets,
                          const u8 *capEndBySegment)
 {
+    if (!layout)
+        return;
+
     for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
     {
         layout->tilesetCapStartBySegment[i] = capStartTilesets ? capStartTilesets[i] : NULL;
@@ -1365,6 +1380,9 @@ void GaugeLayout_setBlinkOff(GaugeLayout *layout,
                              const u32 * const *blinkOffCapStartBreakTilesets,
                              const u32 * const *blinkOffCapStartTrailTilesets)
 {
+    if (!layout)
+        return;
+
     for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
     {
         layout->blinkOffTilesetBySegment[i] =
@@ -1707,22 +1725,22 @@ static void GaugeLogic_tick(GaugeLogic *logic)
  *
  *   Per used segment (repeated for each segment with a body tileset):
  *   +-------------------+
- *   | Empty tile (0,0)  |  1 tile  Ã¢â‚¬â€ value=0, trail=0
+ *   | Empty tile (0,0)  |  1 tile  - value=0, trail=0
  *   +-------------------+
- *   | Full value (8,8)  |  1 tile  Ã¢â‚¬â€ value=8, trail=8
+ *   | Full value (8,8)  |  1 tile  - value=8, trail=8
  *   +-------------------+
- *   | Full trail (0,8)  |  1 tile  Ã¢â‚¬â€ value=0, trail=8  (only if trailEnabled)
+ *   | Full trail (0,8)  |  1 tile  - value=0, trail=8  (only if trailEnabled)
  *   +-------------------+
  *
  *   Partial tiles (1 per GaugePart, shared across all segments):
  *   +-------------------+
- *   | Partial value     |  1 tile  Ã¢â‚¬â€ streamed on demand (also "both" case)
+ *   | Partial value     |  1 tile  - streamed on demand (also "both" case)
  *   +-------------------+
- *   | Partial trail     |  1 tile  Ã¢â‚¬â€ streamed on demand (only if trailEnabled)
+ *   | Partial trail     |  1 tile  - streamed on demand (only if trailEnabled)
  *   +-------------------+
- *   | Partial END       |  1 tile  Ã¢â‚¬â€ cap tile (only if any segment has END)
+ *   | Partial END       |  1 tile  - cap tile (only if any segment has END)
  *   +-------------------+
- *   | Partial trail 2nd |  1 tile  Ã¢â‚¬â€ 2nd trail break (only if trail + END)
+ *   | Partial trail 2nd |  1 tile  - 2nd trail break (only if trail + END)
  *   +-------------------+
  *
  * Standard tiles are pre-loaded once at init (preload_dynamic_standard_tiles).
@@ -1945,6 +1963,9 @@ void GaugeLayout_setGainTrail(GaugeLayout *layout,
                               const u32 * const *gainCapStartBreakTilesets,
                               const u32 * const *gainCapStartTrailTilesets)
 {
+    if (!layout)
+        return;
+
     for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
     {
         layout->gainTilesetBySegment[i] =
@@ -1979,6 +2000,9 @@ void GaugeLayout_setGainBlinkOff(GaugeLayout *layout,
                                  const u32 * const *gainBlinkOffCapStartBreakTilesets,
                                  const u32 * const *gainBlinkOffCapStartTrailTilesets)
 {
+    if (!layout)
+        return;
+
     for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
     {
         layout->gainBlinkOffTilesetBySegment[i] =
@@ -2005,6 +2029,9 @@ void GaugeLayout_setPipStyles(GaugeLayout *layout,
                               const u32 * const *pipTilesets,
                               const u8 *pipWidthBySegment)
 {
+    if (!layout)
+        return;
+
     for (u8 i = 0; i < GAUGE_MAX_SEGMENTS; i++)
     {
         layout->pipTilesetBySegment[i] = pipTilesets ? pipTilesets[i] : NULL;
@@ -3829,12 +3856,19 @@ static void fill_pip_value_lut(u16 *dest, u16 maxValue, const GaugeLayout *layou
  */
 void Gauge_init(Gauge *gauge, const GaugeInit *init)
 {
-    if (!gauge || !init || !init->layout)
+    if (!gauge || !init || !init->layout || !init->parts)
         return;
 
-    const u16 maxValue = init->maxValue;
+    u16 maxValue = init->maxValue;
     const u16 maxFillPixels = (u16)(init->layout->length * GAUGE_PIXELS_PER_TILE);
     GaugeValueMode valueMode = init->valueMode;
+
+    if (maxValue > GAUGE_LUT_CAPACITY)
+    {
+        KLog_U2("Gauge init maxValue: ", maxValue,
+                " clamped to: ", GAUGE_LUT_CAPACITY);
+        maxValue = GAUGE_LUT_CAPACITY;
+    }
 
     if (valueMode != GAUGE_VALUE_MODE_PIP)
         valueMode = GAUGE_VALUE_MODE_FILL;
@@ -3854,6 +3888,20 @@ void Gauge_init(Gauge *gauge, const GaugeInit *init)
     }
     else if (valueMode == GAUGE_VALUE_MODE_PIP)
     {
+        u16 validatedPipCount = init->layout->pipCount;
+        if (validatedPipCount > GAUGE_LUT_CAPACITY)
+        {
+            KLog_U2("Gauge PIP pipCount: ", validatedPipCount,
+                    " clamped to: ", GAUGE_LUT_CAPACITY);
+            validatedPipCount = GAUGE_LUT_CAPACITY;
+        }
+        if (maxValue != validatedPipCount)
+        {
+            KLog_U2("Gauge PIP maxValue: ", maxValue,
+                    " adjusted to pipCount: ", validatedPipCount);
+            maxValue = validatedPipCount;
+        }
+
         fill_pip_value_lut(gauge->logic.valueToPixelsData, maxValue, init->layout);
         lut = gauge->logic.valueToPixelsData;
     }
@@ -3880,6 +3928,9 @@ void Gauge_init(Gauge *gauge, const GaugeInit *init)
 /** Configure value animation (0=instant changes, 1=animated transitions). */
 void Gauge_setValueAnim(Gauge *gauge, u8 enabled, u8 shift)
 {
+    if (!gauge)
+        return;
+
     GaugeLogic *logic = &gauge->logic;
     logic->valueAnimEnabled = enabled ? 1 : 0;
     logic->valueAnimShift = (shift == 0) ? GAUGE_DEFAULT_VALUE_ANIM_SHIFT : shift;
@@ -3888,6 +3939,9 @@ void Gauge_setValueAnim(Gauge *gauge, u8 enabled, u8 shift)
 /** Configure trail animation (0=no trail, 1=hold+blink+shrink trail effect). */
 void Gauge_setTrailAnim(Gauge *gauge, u8 enabled, u8 shift, u8 blinkShift)
 {
+    if (!gauge)
+        return;
+
     GaugeLogic *logic = &gauge->logic;
     logic->trailEnabled = enabled ? 1 : 0;
     logic->trailAnimShift = (shift == 0) ? GAUGE_DEFAULT_TRAIL_ANIM_SHIFT : shift;
@@ -3948,6 +4002,9 @@ void Gauge_addPart(Gauge *gauge,
                    u16 originX,
                    u16 originY)
 {
+    if (!gauge || !part || !layout || !gauge->parts)
+        return;
+
     if (gauge->partCount >= GAUGE_MAX_PARTS) return;
 
     if (gauge->valueMode == GAUGE_VALUE_MODE_PIP)
@@ -3985,6 +4042,9 @@ void Gauge_addPartEx(Gauge *gauge,
                      u16 vramBase,
                      GaugeVramMode vramMode)
 {
+    if (!gauge || !part || !layout || !gauge->parts)
+        return;
+
     if (gauge->partCount >= GAUGE_MAX_PARTS) return;
 
     if (gauge->valueMode == GAUGE_VALUE_MODE_PIP)
@@ -4009,12 +4069,12 @@ void Gauge_addPartEx(Gauge *gauge,
  * Call once per frame in the game loop.
  *
  * Execution flow:
- * 1. GaugeLogic_tick() Ã¢â‚¬â€ advance value/trail animations
+ * 1. GaugeLogic_tick() - advance value/trail animations
  * 2. Compute render state (valuePixels, trailPixelsRendered, blinkOn)
  * 3. Change detection: compare against lastValuePixels, lastTrailPixelsRendered,
  *    lastBlinkOn, and check if value animation is still converging
- * 4. If nothing changed Ã¢â€ â€™ early return (zero CPU cost after initial comparison)
- * 5. If changed Ã¢â€ â€™ render all parts via part->renderHandler
+ * 4. If nothing changed -> early return (zero CPU cost after initial comparison)
+ * 5. If changed -> render all parts via part->renderHandler
  *
  * The change detection cache (lastValuePixels, lastTrailPixelsRendered, lastBlinkOn)
  * is initialized to CACHE_INVALID_U16/U8 to force the first render.
@@ -4239,6 +4299,9 @@ void Gauge_update(Gauge *gauge)
 /** Set gauge value instantly (no trail, no animation). Resets all trail state. */
 void Gauge_setValue(Gauge *gauge, u16 newValue)
 {
+    if (!gauge)
+        return;
+
     GaugeLogic *logic = &gauge->logic;
     logic->needUpdate = 1;
 
@@ -4265,6 +4328,9 @@ void Gauge_setValue(Gauge *gauge, u16 newValue)
  */
 void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
 {
+    if (!gauge)
+        return;
+
     GaugeLogic *logic = &gauge->logic;
     logic->needUpdate = 1;
 
@@ -4320,6 +4386,9 @@ void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
  */
 void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
 {
+    if (!gauge)
+        return;
+
     GaugeLogic *logic = &gauge->logic;
     logic->needUpdate = 1;
 
@@ -4462,6 +4531,9 @@ static u16 compute_vram_size_for_layout(const GaugeLayout *layout,
 u16 Gauge_getVramSize(const Gauge *gauge,
                       const GaugeLayout *layout)
 {
+    if (!gauge || !layout)
+        return 0;
+
     return compute_vram_size_for_layout(layout,
                                         gauge->vramMode,
                                         gauge->logic.trailEnabled,

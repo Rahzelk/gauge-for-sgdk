@@ -1489,7 +1489,7 @@ struct Gauge
  *
  * KEY FIELDS:
  *   maxValue:      The maximum logical value (e.g., 100 for "100 HP").
- *                  Must be <= GAUGE_LUT_CAPACITY.
+ *                  Values above GAUGE_LUT_CAPACITY are clamped at init.
  *   layout:        Main layout (must be fully configured before Gauge_init).
  *                  maxFillPixels is derived as layout->length * GAUGE_PIXELS_PER_TILE.
  *                  If maxValue != maxFillPixels, a LUT is auto-generated in the
@@ -1503,10 +1503,12 @@ struct Gauge
  *   vramMode:      Default VRAM mode for all parts added to this gauge.
  *                  Can be overridden per-part with Gauge_addPartEx().
  *   valueMode:     FILL (continuous) or PIP (discrete).
+ *                  In PIP mode, maxValue is expected to equal layout pipCount;
+ *                  Gauge_init adjusts and logs if mismatch.
  */
 typedef struct
 {
-    u16 maxValue;                /* Maximum logical value (<= GAUGE_LUT_CAPACITY) */
+    u16 maxValue;                /* Maximum logical value (clamped to GAUGE_LUT_CAPACITY at init) */
     u16 initialValue;            /* Starting value (clamped to maxValue) */
     GaugePart *parts;            /* User-allocated GaugePart array */
     const GaugeLayout *layout;   /* Main layout (maxFillPixels = length * 8) */
