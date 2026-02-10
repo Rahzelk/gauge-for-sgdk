@@ -205,16 +205,19 @@
 
    GaugeLayout -- "What does the gauge look like?"
    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-   Static visual configuration, set once at init time. Describes:
+   Visual configuration that describes:
    - How many cells (tiles) the gauge has
    - Which segment each cell belongs to (for tileset selection)
    - All tileset pointers (body, end, trail, bridge, caps, blink-off, gain)
    - Visual properties (orientation, palette, flip flags, priority)
    - Fill direction (forward or reverse)
+   - Optional feature buffers (allocated lazily when configured)
 
    You typically create one GaugeLayout per gauge visual design, then pass
-   it to Gauge_addPart(). The layout is retained by each part (refcounted),
-   so rebuild/reconfigure only after all referencing gauges are released.
+   it to Gauge_addPart(). The layout is retained by each part (refcounted).
+   Rebuilding geometry with GaugeLayout_init* / GaugeLayout_build requires
+   refCount == 0. Optional style setters can still be used while retained
+   and apply to all attached parts.
 
 
    GaugeLogic -- "What is the gauge's current value?"
@@ -485,8 +488,9 @@ typedef void GaugePartRenderHandler(GaugePart *part,
    GaugeLayout -- Geometry + visual configuration
    =============================================================================
 
-   A GaugeLayout describes what a gauge looks like. It is a static configuration
-   set once at init time and never modified at runtime.
+   A GaugeLayout describes what a gauge looks like.
+   Geometry is initialized once, and optional feature sets can be updated
+   through dedicated setters.
 
    It contains:
    - How many cells the gauge has
@@ -541,25 +545,25 @@ typedef void GaugePartRenderHandler(GaugePart *part,
          Y=23  Part1: [cell0|cell1|cell2|cell3|cell4|...|cell11]
          Y=24  Part2: [cell0|cell1|cell2]
 
-       How Part2 samples the gauge value (fillOffset=8):
-         Part2 cell 0 → pixels  8..15 (same range as Part1 cell 1)
-         Part2 cell 1 → pixels 16..23 (same range as Part1 cell 2)
-         Part2 cell 2 → pixels 24..31 (same range as Part1 cell 3)
+        How Part2 samples the gauge value (fillOffset=8):
+          Part2 cell 0 -> pixels  8..15 (same range as Part1 cell 1)
+          Part2 cell 1 -> pixels 16..23 (same range as Part1 cell 2)
+          Part2 cell 2 -> pixels 24..31 (same range as Part1 cell 3)
 
        When value = 96 (full):
          Part1: [FULL |FULL |FULL |FULL |FULL |...|FULL ]
-         Part2: [FULL |FULL |FULL ]    (all cells > 31px → full)
+          Part2: [FULL |FULL |FULL ]    (all cells > 31px -> full)
 
        When value = 20:
          Part1: [FULL |FULL |##..|....|....|...|....]
          Part2: [FULL |##..|....]
                    ^      ^
                    |      Part2 cell1: clamp(20 - 16) = 4px
-                   Part2 cell0: clamp(20 - 8) = 8px → full
+                   Part2 cell0: clamp(20 - 8) = 8px -> full
 
        When value = 5:
          Part1: [#####|....|....|....|....|...|....]
-         Part2: [....|....|....]   (all cells < 8px → empty)
+          Part2: [....|....|....]   (all cells < 8px -> empty)
 
      The formula to calculate fillOffset for a bottom row:
        fillOffset = triggerPixel - (partLength * 8)
@@ -660,7 +664,7 @@ typedef struct
     /* --- Geometry (u16 first for 68000 word alignment) --- */
     u16 fillOffset;                              /* Pixel offset for fill calc */
     u8 length;                                   /* Number of cells (1..16) */
-    u8 segmentCount;                             /* Number of segment entries actually allocated */
+    u8 segmentCount;                             /* Number of active segment styles for this layout */
 
     u8 *segmentIdByCell;                         /* [length] Segment style per cell */
     u8 *fillIndexByCell;                         /* [length] Fill order per cell */
@@ -669,7 +673,11 @@ typedef struct
     /* --- Tilemap positions --- */
     Vect2D_u16 *tilemapPosByCell;                /* [length] Tilemap X,Y coordinates per cell */
  
-    /* --- Tilesets --- */
+    /* --- Tilesets ---
+     * Optional arrays can either:
+     * - point to heap buffers owned by the layout, or
+     * - point to shared read-only sentinel views when feature is disabled.
+     */
     const u32 **tilesetBySegment;                 /* [segmentCount] BODY: 45-tile strips */
     const u32 **tilesetEndBySegment;              /* [segmentCount] END: optional 45-tile strips */
     const u32 **tilesetTrailBySegment;            /* [segmentCount] TRAIL: optional 64-tile strips */
@@ -905,7 +913,7 @@ typedef struct
 
 /**
  * Build a layout from an initialization config.
- * This is a convenience wrapper around GaugeLayout_initEx + optional setters.
+ * Equivalent in behavior to GaugeLayout_initEx + optional style configuration.
  */
 void GaugeLayout_build(GaugeLayout *layout, const GaugeLayoutInit *init);
 
@@ -915,8 +923,8 @@ void GaugeLayout_build(GaugeLayout *layout, const GaugeLayoutInit *init);
  * @param layout        Layout to initialize
  * @param length        Number of cells (1..GAUGE_MAX_LENGTH)
  * @param fillDirection       GAUGE_FILL_FORWARD or GAUGE_FILL_REVERSE
- * @param tilesets      Array of GAUGE_MAX_SEGMENTS tileset pointers (45-tile strips)
- *                      Can be NULL, tiles will be set from this array
+ * @param tilesets      Array indexed by segmentId (at least segmentCount entries),
+ *                      BODY tileset pointers (45-tile strips), or NULL
  * @param segmentIdByCell Array of length elements specifying segment ID per cell
  *                      Can be NULL, all cells will use segment 0
  * @param orientation   GAUGE_ORIENT_HORIZONTAL or GAUGE_ORIENT_VERTICAL
@@ -937,7 +945,7 @@ void GaugeLayout_init(GaugeLayout *layout,
                       u8 horizontalFlip);
 
 /**
- * Initialize layout with BODY + optional END tilesets.
+ * Initialize layout with BODY + optional END/TRAIL/BRIDGE tilesets.
  *
  * Fallback rules:
  * - If END tileset is NULL for a segment, BODY is used everywhere.
@@ -946,10 +954,11 @@ void GaugeLayout_init(GaugeLayout *layout,
  * @param layout        Layout to initialize
  * @param length        Number of cells (1..GAUGE_MAX_LENGTH)
  * @param fillDirection       GAUGE_FILL_FORWARD or GAUGE_FILL_REVERSE
- * @param bodyTilesets  Array of GAUGE_MAX_SEGMENTS BODY tileset pointers (45-tile strips)
- * @param endTilesets   Array of GAUGE_MAX_SEGMENTS END tileset pointers (optional, can be NULL)
- * @param trailTilesets Array of GAUGE_MAX_SEGMENTS TRAIL tileset pointers (optional, can be NULL)
- * @param bridgeTilesets Array of GAUGE_MAX_SEGMENTS BRIDGE tileset pointers (optional, can be NULL)
+ * @param bodyTilesets  Array indexed by segmentId (at least segmentCount entries),
+ *                      BODY tileset pointers (45-tile strips)
+ * @param endTilesets   Array indexed by segmentId (optional, can be NULL)
+ * @param trailTilesets Array indexed by segmentId (optional, can be NULL)
+ * @param bridgeTilesets Array indexed by segmentId (optional, can be NULL)
  * @param segmentIdByCell Array of length elements specifying segment ID per cell
  * @param orientation   GAUGE_ORIENT_HORIZONTAL or GAUGE_ORIENT_VERTICAL
  * @param palette   Palette line (0-3, typically PAL0-PAL3)
@@ -1014,8 +1023,9 @@ void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src);
 
 /**
  * Configure optional start/end cap tilesets for a layout.
- * Call AFTER GaugeLayout_init/initEx. Each parameter is an array of
- * GAUGE_MAX_SEGMENTS pointers; pass NULL for the entire array to skip,
+ * Call AFTER GaugeLayout_init/initEx. Each tileset parameter is an array
+ * indexed by segmentId (at least segmentCount entries); pass NULL for the
+ * entire array to skip
  * or set individual entries to NULL to disable caps for that segment.
  *
  * @param layout                Layout to configure (must be initialized)
@@ -1112,8 +1122,8 @@ void GaugeLayout_setGainBlinkOff(GaugeLayout *layout,
  * Call after GaugeLayout_init/initEx.
  *
  * @param layout            Layout to configure
- * @param pipTilesets       Array of GAUGE_MAX_SEGMENTS compact strips
- * @param pipWidthBySegment Array of GAUGE_MAX_SEGMENTS widths in tiles (0 => default 1)
+ * @param pipTilesets       Array indexed by segmentId (at least segmentCount entries)
+ * @param pipWidthBySegment Array indexed by segmentId, width in tiles (0 => default 1)
  */
 void GaugeLayout_setPipStyles(GaugeLayout *layout,
                               const u32 * const *pipTilesets,

@@ -1,7 +1,7 @@
 #include "gauge.h"
 
 /* =============================================================================
-   gauge.c - Simplified single-lane HUD gauge implementation for SGDK
+   gauge.c - HUD gauge implementation for SGDK (fill + pip, fixed + dynamic)
    =============================================================================
  
    TILE STRIP SYSTEM:
@@ -1238,6 +1238,8 @@ static void layout_zero_optional_flags(GaugeLayout *layout)
 
 static void layout_set_optional_views_to_defaults(GaugeLayout *layout)
 {
+    /* Optional fields point to shared sentinel views until explicitly enabled.
+     * This keeps zero-feature layouts RAM-light while preserving branch-free reads. */
     layout->tilesetEndBySegment = (const u32 **)s_nullSegmentTilesets;
     layout->tilesetTrailBySegment = (const u32 **)s_nullSegmentTilesets;
     layout->tilesetBridgeBySegment = (const u32 **)s_nullSegmentTilesets;
@@ -1291,6 +1293,7 @@ static void layout_free_optional_ptr(void **ptr,
                                      const void *defaultViewB,
                                      const void *defaultViewC)
 {
+    /* Free only real heap-backed buffers. Shared sentinel views are never freed. */
     if (!ptr || !*ptr)
         return;
 
@@ -1550,6 +1553,8 @@ static u8 layout_alloc_buffers(GaugeLayout *layout, u8 length, u8 segmentCount)
     const u16 cellBytes = (u16)length;
     const u16 segPtrBytes = (u16)(segmentCount * (u8)sizeof(const u32 *));
 
+    /* Mandatory geometry and BODY tileset bindings only.
+     * Optional features are allocated lazily by dedicated setters/build paths. */
     layout->segmentIdByCell = (u8 *)gauge_alloc_bytes(cellBytes);
     layout->fillIndexByCell = (u8 *)gauge_alloc_bytes(cellBytes);
     layout->cellIndexByFillIndex = (u8 *)gauge_alloc_bytes(cellBytes);
@@ -3374,8 +3379,8 @@ static void write_tilemap_fixed_init(GaugePart *part)
 
    Both process_fixed_mode() and process_dynamic_mode() use the same
    classification logic but differ in how they act on the result:
-   - Fixed:   selects ROM strip → DMA tile to per-cell VRAM
-   - Dynamic: selects VRAM tile → optional DMA + tilemap update
+   - Fixed:   selects ROM strip -> DMA tile to per-cell VRAM
+   - Dynamic: selects VRAM tile -> optional DMA + tilemap update
 
    ============================================================================= */
 typedef enum
@@ -3519,7 +3524,7 @@ static void process_fixed_mode(GaugePart *part,
             layout->gainBlinkOffTilesetBySegment[segmentId],
             trailMode);
         /* endStrip, trailStrip, bridgeStrip and blink-off variants are
-         * computed lazily below — only when needed (bridge or break zone).
+         * computed lazily below - only when needed (bridge or break zone).
          * Saves 6 x select calls (~6-8 cycles each) for ~70-80% trivial cells. */
 
         /* === Cap end (always uses its tileset) === */
