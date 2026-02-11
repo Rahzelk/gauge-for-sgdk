@@ -21,7 +21,7 @@
       - Fill a GaugeInit and call Gauge_init(&gauge, &gaugeInit)
       - Optionally configure animations:
         * Gauge_setValueAnim() for smooth value transitions
-        * Gauge_setTrailAnim() for damage trail effect
+        * Gauge_setTrailMode() for trail/blink behavior
 
    4. ADD PARTS TO THE GAUGE (visual representation on screen)
       - Call Gauge_addPart() for each visual instance
@@ -34,7 +34,7 @@
 
    6. MODIFY VALUES
       - Gauge_setValue(gauge, value) : instant change, no animation
-      - Gauge_increase(gauge, amount, holdFrames, blinkFrames) : gain trail if valueAnim enabled
+      - Gauge_increase(gauge, amount, holdFrames, blinkFrames) : behavior depends on trail mode
       - Gauge_decrease(gauge, amount, holdFrames, blinkFrames) : damage with trail
 
    VRAM MODES:
@@ -324,8 +324,12 @@ static void initSample1(u16 *nextVram)
         .valueMode = GAUGE_VALUE_MODE_FILL
     });
 
-    /* Step 6: Enable trail animation for damage effect */
-    Gauge_setTrailAnim(&g_gaugeSample1, 1, 0, 0);   /* enabled, default speeds */
+    /* Step 6: Static loss trail (no blink, no catch-up). */
+    Gauge_setTrailMode(&g_gaugeSample1,
+                       GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK,
+                       30,
+                       0,
+                       0);
  
     /* Step 7: Add the visual part at screen position */
     Gauge_addPart(&g_gaugeSample1,
@@ -384,7 +388,11 @@ static void initSample1(u16 *nextVram)
     });
 
     Gauge_setValueAnim(&g_gaugeSample2, 1, 2);
-    Gauge_setTrailAnim(&g_gaugeSample2, 1, 0, 0);
+    Gauge_setTrailMode(&g_gaugeSample2,
+                       GAUGE_TRAIL_MODE_FOLLOW,
+                       0,
+                       0,
+                       0);
 
     Gauge_addPart(&g_gaugeSample2,
                   &s_layoutSample2,
@@ -453,7 +461,11 @@ static void initSample3(u16 *nextVram)
         .valueMode = GAUGE_VALUE_MODE_FILL
     });
 
-    Gauge_setTrailAnim(&g_gaugeSample3, 1, 0, 0);
+    Gauge_setTrailMode(&g_gaugeSample3,
+                       GAUGE_TRAIL_MODE_CRITICAL_TRAIL_BLINK,
+                       30,
+                       0,
+                       0);
 
     /* Step 5: Add part */
     Gauge_addPart(&g_gaugeSample3,
@@ -561,9 +573,13 @@ static void initSample5(u16 *nextVram)
         .valueMode = GAUGE_VALUE_MODE_FILL
     });
 
-    /* Step 6: Enable BOTH value animation AND trail animation */
+    /* Step 6: Enable value animation + critical value blink mode. */
     Gauge_setValueAnim(&g_gaugeSample5, 1, 2);      /* enabled, default speed */
-    Gauge_setTrailAnim(&g_gaugeSample5, 1, 3, 2);   /* enabled, default speeds */
+    Gauge_setTrailMode(&g_gaugeSample5,
+                       GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK,
+                       30,
+                       3,
+                       2);
 
     /* Step 7: Add part */
     Gauge_addPart(&g_gaugeSample5,
@@ -638,7 +654,11 @@ static void initSample6(u16 *nextVram)
         .valueMode = GAUGE_VALUE_MODE_FILL
     });
 
-    Gauge_setTrailAnim(&g_gaugeSample6, 1, 0, 0);
+    Gauge_setTrailMode(&g_gaugeSample6,
+                       GAUGE_TRAIL_MODE_FOLLOW,
+                       0,
+                       0,
+                       0);
 
     /* Step 5: Add part */
     Gauge_addPart(&g_gaugeSample6,
@@ -809,7 +829,11 @@ static void initSample7(u16 *nextVram)
         .valueMode = GAUGE_VALUE_MODE_FILL
     });
 
-    Gauge_setTrailAnim(&g_gaugeSample7, 1, 0, 0);
+    Gauge_setTrailMode(&g_gaugeSample7,
+                       GAUGE_TRAIL_MODE_FOLLOW,
+                       0,
+                       0,
+                       0);
 
     /* Step 5: Add Part1 (main 12-tile gauge) */
     Gauge_addPart(&g_gaugeSample7,
@@ -875,7 +899,7 @@ static void initSample7(u16 *nextVram)
         .valueMode = GAUGE_VALUE_MODE_PIP
     });
 
-    /* Keep this mini bar simple: no trail animation. */
+    /* Keep this mini bar simple: default trail mode (disabled). */
 
     Gauge_addPart(&g_gaugeSample7Pip,
                   &s_layoutSample7Pip,
@@ -1068,7 +1092,11 @@ static void initSample4(u16 *nextVram)
         .valueMode = GAUGE_VALUE_MODE_FILL
     });
 
-    Gauge_setTrailAnim(&g_gaugeSample4, 1, 0, 0);
+    Gauge_setTrailMode(&g_gaugeSample4,
+                       GAUGE_TRAIL_MODE_FOLLOW,
+                       0,
+                       0,
+                       0);
 
     /* Step 6: Add part */
     Gauge_addPart(&g_gaugeSample4,

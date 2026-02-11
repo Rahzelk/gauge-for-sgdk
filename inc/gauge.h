@@ -458,6 +458,39 @@ typedef enum
     GAUGE_VALUE_MODE_PIP  = 1
 } GaugeValueMode;
 
+/**
+ * Gauge trail behavior mode.
+ *
+ * DISABLED:
+ *   No trail.
+ *
+ * FOLLOW:
+ *   Classic behavior (hold/blink/shrink on damage, optional gain trail).
+ *
+ * STATIC_TRAIL:
+ *   Persistent trail region. No blink, no shrink.
+ *
+ * STATIC_TRAIL_CRITICAL_BLINK:
+ *   Persistent trail region like STATIC_TRAIL.
+ *   Trail blinks continuously only when currentValue <= criticalValue.
+ *
+ * CRITICAL_TRAIL_BLINK:
+ *   No trail above criticalValue. When currentValue <= criticalValue,
+ *   trail spans max->value and blinks continuously.
+ *
+ * CRITICAL_VALUE_BLINK:
+ *   No trail. When currentValue <= criticalValue, remaining value blinks.
+ */
+typedef enum
+{
+    GAUGE_TRAIL_MODE_DISABLED             = 0,
+    GAUGE_TRAIL_MODE_FOLLOW               = 1,
+    GAUGE_TRAIL_MODE_STATIC_TRAIL         = 2,
+    GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK = 3,
+    GAUGE_TRAIL_MODE_CRITICAL_TRAIL_BLINK = 4,
+    GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK = 5
+} GaugeTrailMode;
+
 /* =============================================================================
    Forward declarations (needed for circular references)
    ============================================================================= */
@@ -1216,6 +1249,7 @@ typedef struct
     u16 valuePixels;                /* Where the value is currently displayed (animated) */
     u16 trailPixels;                /* Where the trail is currently displayed */
     u16 blinkTimer;                 /* Increments each frame during blink phase */
+    u16 criticalValue;              /* Critical threshold in logical value units */
 
     /* Render cache (for change detection -- skip rendering if nothing changed) */
     u16 lastValuePixels;            /* Value pixels from last rendered frame */
@@ -1229,10 +1263,11 @@ typedef struct
     u8 valueAnimShift;              /* Value slide speed: step = distance >> shift + 1 */
     u8 trailAnimShift;              /* Trail shrink speed: step = distance >> shift + 1 */
     u8 blinkShift;                  /* Blink rate: toggles every 2^shift frames */
-    u8 trailEnabled;                /* 0=no trail effect, 1=trail with hold/blink/shrink */
-    u8 trailMode;                   /* Current state: NONE / DAMAGE / GAIN */
+    u8 trailEnabled;                /* 0=no trail rendering, 1=trail rendering enabled */
+    u8 configuredTrailMode;         /* GaugeTrailMode (configured behavior) */
+    u8 activeTrailState;            /* Internal state: NONE / DAMAGE / GAIN */
     u8 lastBlinkOn;                 /* Blink ON/OFF state from last frame (for change detection) */
-    u8 lastTrailMode;               /* Trail mode from last frame (for change detection) */
+    u8 lastActiveTrailState;        /* Internal trail state from last frame (for change detection) */
     u8 needUpdate;                  /* 1=needs rendering, 0=fully idle (Gauge_update returns early) */
 
 } GaugeLogic;
@@ -1420,7 +1455,7 @@ typedef struct GaugePart
 
    3. Configure animations (optional):
         Gauge_setValueAnim(&myGauge, 1, 4);   // enable smooth value changes
-        Gauge_setTrailAnim(&myGauge, 1, 4, 3); // enable trail effect
+        Gauge_setTrailMode(&myGauge, GAUGE_TRAIL_MODE_FOLLOW, 0, 4, 3);
 
    4. Add parts (each call allocates part + VRAM and sets up rendering):
         Gauge_addPart(&myGauge, &layout, x, y);
@@ -1465,9 +1500,11 @@ struct Gauge
 
     /* --- Parts (rendering units) --- */
     GaugePart **parts;          /* Dynamically allocated array of part pointers */
-    GaugeTickAndRenderHandler *tickAndRenderHandler; /* Resolved update path */
+    GaugeTickAndRenderHandler *tickAndRenderHandler;       /* Active update path */
+    GaugeTickAndRenderHandler *steadyTickAndRenderHandler; /* Handler used after first update lock */
     u8 partCount;               /* Number of active parts */
     u8 partCapacity;            /* Allocated part pointer capacity */
+    u8 runtimeLocked;           /* 1 after first Gauge_update call */
 
     /* --- VRAM allocation --- */
     u16 vramBase;                   /* Base VRAM tile index */
@@ -1525,13 +1562,16 @@ void GaugeLayout_release(GaugeLayout *layout);
 /**
  * Initialize gauge from GaugeInit configuration.
  * Trail and value animation are disabled by default.
- * Use Gauge_setTrailAnim() and Gauge_setValueAnim() to configure animations.
+ * Use Gauge_setTrailMode() and Gauge_setValueAnim() to configure animations.
  * Call Gauge_release() before re-initializing an already-used Gauge.
  */
 void Gauge_init(Gauge *gauge, const GaugeInit *init);
 
 /**
  * Configure value animation.
+ *
+ * Configuration-time only:
+ * - no-op after first Gauge_update() call (runtime lock)
  *
  * @param gauge    Gauge to configure
  * @param enabled  Enable animated value changes (0=instant, 1=animated)
@@ -1540,20 +1580,30 @@ void Gauge_init(Gauge *gauge, const GaugeInit *init);
 void Gauge_setValueAnim(Gauge *gauge, u8 enabled, u8 shift);
 
 /**
- * Configure trail animation.
+ * Configure trail behavior mode and timing.
  *
- * @param gauge      Gauge to configure
- * @param enabled    Enable trail effect (0=no trail, 1=trail with hold/blink/shrink)
- * @param shift      Trail shrink speed divider (3-6 recommended, 0=use default 4)
- * @param blinkShift Blink frequency divider (2-4 recommended, 0=use default 3)
+ * Configuration-time only:
+ * - no-op once at least one part has been added
+ * - no-op after first Gauge_update() call (runtime lock)
+ *
+ * @param gauge         Gauge to configure
+ * @param mode          Trail behavior mode
+ * @param criticalValue Critical threshold in logical value units (CRITICAL_* modes)
+ * @param shift         Trail shrink speed divider (3-6 recommended, 0=use default 4)
+ * @param blinkShift    Blink frequency divider (2-4 recommended, 0=use default 3)
  */
-void Gauge_setTrailAnim(Gauge *gauge, u8 enabled, u8 shift, u8 blinkShift);
+void Gauge_setTrailMode(Gauge *gauge,
+                        GaugeTrailMode mode,
+                        u16 criticalValue,
+                        u8 shift,
+                        u8 blinkShift);
 
 /**
  * Override the maximum fill pixel count.
  * By default, maxFillPixels = layout->length * 8 (set at Gauge_init).
  * No-op if the new value equals the current maxFillPixels.
- * Can be called at any time (no ordering constraint with Gauge_addPart).
+ * Configuration-time only:
+ * - no-op after first Gauge_update() call (runtime lock)
  *
  * If maxValue != new maxFillPixels, the embedded LUT is repopulated.
  * If maxValue == new maxFillPixels, the LUT is cleared (1:1 mapping).
@@ -1566,6 +1616,7 @@ void Gauge_setMaxFillPixels(Gauge *gauge, u16 maxFillPixels);
 /**
  * Add a part to the gauge (simplified).
  * VRAM is allocated automatically from gauge's vramBase.
+ * No-op after first Gauge_update() call (runtime lock).
  *
  * @param gauge     Parent gauge
  * @param layout    Layout configuration (retained via refCount)
@@ -1580,6 +1631,7 @@ u8 Gauge_addPart(Gauge *gauge,
 /**
  * Add a part with custom VRAM configuration.
  * Use when you need specific VRAM placement or different VRAM mode.
+ * No-op after first Gauge_update() call (runtime lock).
  *
  * @param gauge     Parent gauge
  * @param layout    Layout configuration (retained via refCount)
@@ -1604,6 +1656,7 @@ void Gauge_release(Gauge *gauge);
 /**
  * Update gauge: tick logic + render all parts.
  * Call once per frame.
+ * First call locks runtime configuration APIs (trail mode, part additions, etc.).
  *
  * Performs:
  * - Value animation (if enabled)

@@ -135,10 +135,10 @@ static const u8 s_invalidCellIndexes[GAUGE_MAX_LENGTH] = {
  */
 typedef enum
 {
-    GAUGE_TRAIL_NONE   = 0,
-    GAUGE_TRAIL_DAMAGE = 1,
-    GAUGE_TRAIL_GAIN   = 2
-} GaugeTrailMode;
+    GAUGE_TRAIL_STATE_NONE   = 0,
+    GAUGE_TRAIL_STATE_DAMAGE = 1,
+    GAUGE_TRAIL_STATE_GAIN   = 2
+} GaugeActiveTrailState;
 
 
 /* =============================================================================
@@ -894,7 +894,7 @@ static inline const u32 *select_base_strip(const u32 *normalStrip,
                                            const u32 *gainStrip,
                                            u8 trailMode)
 {
-    if (trailMode == GAUGE_TRAIL_GAIN)
+    if (trailMode == GAUGE_TRAIL_STATE_GAIN)
         return gainStrip ? gainStrip : normalStrip;
     return normalStrip ? normalStrip : gainStrip;
 }
@@ -907,7 +907,7 @@ static inline const u32 *select_blink_strip(const u32 *normalBlinkStrip,
                                             const u32 *gainBlinkStrip,
                                             u8 trailMode)
 {
-    return (trailMode == GAUGE_TRAIL_GAIN) ? gainBlinkStrip : normalBlinkStrip;
+    return (trailMode == GAUGE_TRAIL_STATE_GAIN) ? gainBlinkStrip : normalBlinkStrip;
 }
 
 /**
@@ -973,12 +973,12 @@ static inline u8 apply_blink_off_overrides(
  * Called once per trail mode change to cache the result in GaugeLayout.
  *
  * @param layout    Layout to inspect
- * @param trailMode GAUGE_TRAIL_DAMAGE or GAUGE_TRAIL_GAIN
+ * @param trailMode GAUGE_TRAIL_STATE_DAMAGE or GAUGE_TRAIL_STATE_GAIN
  * @return 1 if any segment has blink-off tilesets, 0 otherwise
  */
 static inline u8 layout_has_blink_off_mode(const GaugeLayout *layout, u8 trailMode)
 {
-    if (trailMode == GAUGE_TRAIL_GAIN)
+    if (trailMode == GAUGE_TRAIL_STATE_GAIN)
     {
         for (u8 i = 0; i < layout->segmentCount; i++)
         {
@@ -1172,7 +1172,7 @@ typedef struct
  * @param trailPixelsRendered Trail pixels after blink
  * @param trailPixelsActual   Trail pixels before blink (for bridges)
  * @param blinkOffActive      1 if blink-off rendering is active
- * @param trailMode           GAUGE_TRAIL_DAMAGE/GAIN/NONE
+ * @param trailMode           GAUGE_TRAIL_STATE_DAMAGE/GAIN/NONE
  * @param ctx                 [out] Initialized loop context
  */
 static inline void init_fill_loop_context(const GaugeLayout *layout,
@@ -2737,7 +2737,7 @@ void GaugeLayout_setBlinkOff(GaugeLayout *layout,
     layout_copy_segment_tilesets(layout->blinkOffTilesetCapStartBreakBySegment, blinkOffCapStartBreakTilesets, layout->segmentCount);
     layout_copy_segment_tilesets(layout->blinkOffTilesetCapStartTrailBySegment, blinkOffCapStartTrailTilesets, layout->segmentCount);
 
-    layout->hasBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_DAMAGE);
+    layout->hasBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_STATE_DAMAGE);
 }
 
 void GaugeLayout_setGainTrail(GaugeLayout *layout,
@@ -2870,7 +2870,7 @@ void GaugeLayout_setGainBlinkOff(GaugeLayout *layout,
     layout_copy_segment_tilesets(layout->gainBlinkOffTilesetCapStartBreakBySegment, gainBlinkOffCapStartBreakTilesets, layout->segmentCount);
     layout_copy_segment_tilesets(layout->gainBlinkOffTilesetCapStartTrailBySegment, gainBlinkOffCapStartTrailTilesets, layout->segmentCount);
 
-    layout->hasGainBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_GAIN);
+    layout->hasGainBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_STATE_GAIN);
 }
 
 void GaugeLayout_setPipStyles(GaugeLayout *layout,
@@ -2944,18 +2944,6 @@ typedef struct
 } SkinSetUsageFlags;
 
 /**
- * Combined usage flags across all 4 tileset contexts.
- */
-typedef struct
-{
-    SkinSetUsageFlags base;      /* base.body is unused (always required) */
-    SkinSetUsageFlags gain;
-    SkinSetUsageFlags blinkOff;
-    SkinSetUsageFlags gainBlinkOff;
-    u8 capEndFlags;              /* 1 if any segment sets capEndEnabled */
-} SegmentStyleUsageFlags;
-
-/**
  * Scan helper: OR-combine a SkinSet's non-NULL pointers into usage flags.
  */
 static inline void scan_skin_set(const GaugeSkinSet *skin, SkinSetUsageFlags *f)
@@ -2977,23 +2965,35 @@ static inline void scan_skin_set(const GaugeSkinSet *skin, SkinSetUsageFlags *f)
  * tileset types are used by at least one segment. This drives lazy allocation:
  * arrays are only allocated for tileset types that actually appear.
  *
- * @param styles        Segment style array (one per segment)
- * @param segmentCount  Number of segments
- * @param out           [out] Collected usage flags (zero-initialized internally)
+ * @param styles         Segment style array (one per segment)
+ * @param segmentCount   Number of segments
+ * @param baseFlags      [out] Base tileset usage (body unused: always required)
+ * @param gainFlags      [out] Gain tileset usage
+ * @param blinkFlags     [out] Blink-off tileset usage
+ * @param gainBlinkFlags [out] Gain blink-off tileset usage
+ * @param capEndFlags    [out] 1 if any segment sets capEndEnabled
  */
 static void scan_segment_style_usage(const GaugeSegmentStyle *styles,
                                      u8 segmentCount,
-                                     SegmentStyleUsageFlags *out)
+                                     SkinSetUsageFlags *baseFlags,
+                                     SkinSetUsageFlags *gainFlags,
+                                     SkinSetUsageFlags *blinkFlags,
+                                     SkinSetUsageFlags *gainBlinkFlags,
+                                     u8 *capEndFlags)
 {
-    memset(out, 0, sizeof(*out));
+    memset(baseFlags, 0, sizeof(*baseFlags));
+    memset(gainFlags, 0, sizeof(*gainFlags));
+    memset(blinkFlags, 0, sizeof(*blinkFlags));
+    memset(gainBlinkFlags, 0, sizeof(*gainBlinkFlags));
+    *capEndFlags = 0;
     for (u8 i = 0; i < segmentCount; i++)
     {
         const GaugeSegmentStyle *style = &styles[i];
-        scan_skin_set(&style->base, &out->base);
-        scan_skin_set(&style->gain, &out->gain);
-        scan_skin_set(&style->blinkOff, &out->blinkOff);
-        scan_skin_set(&style->gainBlinkOff, &out->gainBlinkOff);
-        out->capEndFlags |= (style->capEndEnabled != 0);
+        scan_skin_set(&style->base, baseFlags);
+        scan_skin_set(&style->gain, gainFlags);
+        scan_skin_set(&style->blinkOff, blinkFlags);
+        scan_skin_set(&style->gainBlinkOff, gainBlinkFlags);
+        *capEndFlags |= (style->capEndEnabled != 0);
     }
 }
 
@@ -3226,8 +3226,8 @@ static void populate_gain_blink_tilesets(GaugeLayout *layout,
  */
 static void finalize_layout_derived_state(GaugeLayout *layout)
 {
-    layout->hasBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_DAMAGE);
-    layout->hasGainBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_GAIN);
+    layout->hasBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_STATE_DAMAGE);
+    layout->hasGainBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_STATE_GAIN);
     detect_caps_enabled(layout, &layout->capStartEnabled, &layout->capEndEnabled);
     build_bridge_luts(layout);
     build_pip_luts(layout);
@@ -3259,13 +3259,16 @@ void GaugeLayout_build(GaugeLayout *layout, const GaugeLayoutInit *init)
 
     if (init->segmentStyles)
     {
-        SegmentStyleUsageFlags flags;
-        scan_segment_style_usage(init->segmentStyles, layout->segmentCount, &flags);
+        SkinSetUsageFlags baseFlags, gainFlags, blinkFlags, gainBlinkFlags;
+        u8 capEndFlags;
+        scan_segment_style_usage(init->segmentStyles, layout->segmentCount,
+                                 &baseFlags, &gainFlags, &blinkFlags,
+                                 &gainBlinkFlags, &capEndFlags);
 
-        sync_base_allocations(layout, &flags.base, flags.capEndFlags);
-        sync_gain_allocations(layout, &flags.gain);
-        sync_blink_allocations(layout, &flags.blinkOff);
-        sync_gain_blink_allocations(layout, &flags.gainBlinkOff);
+        sync_base_allocations(layout, &baseFlags, capEndFlags);
+        sync_gain_allocations(layout, &gainFlags);
+        sync_blink_allocations(layout, &blinkFlags);
+        sync_gain_blink_allocations(layout, &gainBlinkFlags);
 
         populate_base_tilesets(layout, init->segmentStyles);
         populate_gain_tilesets(layout, init->segmentStyles);
@@ -3344,8 +3347,10 @@ static void GaugeLogic_initWithAnim(GaugeLogic *logic,
     logic->blinkShift = (blinkShift == 0) ? GAUGE_DEFAULT_BLINK_SHIFT : blinkShift;
 
     logic->trailEnabled = trailEnabled ? 1 : 0;
-    logic->trailMode = GAUGE_TRAIL_NONE;
-    logic->lastTrailMode = GAUGE_TRAIL_NONE;
+    logic->configuredTrailMode = GAUGE_TRAIL_MODE_DISABLED;
+    logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+    logic->lastActiveTrailState = GAUGE_TRAIL_STATE_NONE;
+    logic->criticalValue = 0;
 
     /* Initialize render cache to force first render */
     logic->lastValuePixels = CACHE_INVALID_U16;
@@ -3359,7 +3364,95 @@ static void GaugeLogic_initWithAnim(GaugeLogic *logic,
         logic->trailPixels = logic->valuePixels;
         logic->holdFramesRemaining = 0;
         logic->blinkFramesRemaining = 0;
-        logic->trailMode = GAUGE_TRAIL_NONE;
+        logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+    }
+}
+
+/* Trail mode helpers (configuration/runtime). */
+static inline u8 is_critical_mode_active(const GaugeLogic *logic)
+{
+    return (logic->currentValue <= logic->criticalValue) ? 1 : 0;
+}
+
+static inline void apply_non_follow_trail_mode_tick(GaugeLogic *logic)
+{
+    switch ((GaugeTrailMode)logic->configuredTrailMode)
+    {
+        case GAUGE_TRAIL_MODE_DISABLED:
+            logic->trailPixels = logic->valuePixels;
+            logic->holdFramesRemaining = 0;
+            logic->blinkFramesRemaining = 0;
+            logic->blinkTimer = 0;
+            logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+            break;
+
+        case GAUGE_TRAIL_MODE_STATIC_TRAIL:
+            logic->trailPixels = logic->maxFillPixels;
+            logic->holdFramesRemaining = 0;
+            logic->blinkFramesRemaining = 0;
+            logic->blinkTimer = 0;
+            logic->activeTrailState = (logic->trailPixels > logic->valuePixels)
+                ? GAUGE_TRAIL_STATE_DAMAGE
+                : GAUGE_TRAIL_STATE_NONE;
+            break;
+
+        case GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK:
+            logic->trailPixels = logic->maxFillPixels;
+            logic->holdFramesRemaining = 0;
+            logic->activeTrailState = (logic->trailPixels > logic->valuePixels)
+                ? GAUGE_TRAIL_STATE_DAMAGE
+                : GAUGE_TRAIL_STATE_NONE;
+            if (is_critical_mode_active(logic))
+            {
+                logic->blinkFramesRemaining = 1; /* continuous blink gate */
+                logic->blinkTimer++;
+            }
+            else
+            {
+                logic->blinkFramesRemaining = 0;
+                logic->blinkTimer = 0;
+            }
+            break;
+
+        case GAUGE_TRAIL_MODE_CRITICAL_TRAIL_BLINK:
+            logic->holdFramesRemaining = 0;
+            if (is_critical_mode_active(logic))
+            {
+                logic->trailPixels = logic->maxFillPixels;
+                logic->blinkFramesRemaining = 1; /* continuous blink gate */
+                logic->blinkTimer++;
+                logic->activeTrailState = (logic->trailPixels > logic->valuePixels)
+                    ? GAUGE_TRAIL_STATE_DAMAGE
+                    : GAUGE_TRAIL_STATE_NONE;
+            }
+            else
+            {
+                logic->trailPixels = logic->valuePixels;
+                logic->blinkFramesRemaining = 0;
+                logic->blinkTimer = 0;
+                logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+            }
+            break;
+
+        case GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK:
+            logic->trailPixels = logic->valuePixels;
+            logic->holdFramesRemaining = 0;
+            logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+            if (is_critical_mode_active(logic))
+            {
+                logic->blinkFramesRemaining = 1; /* continuous blink gate */
+                logic->blinkTimer++;
+            }
+            else
+            {
+                logic->blinkFramesRemaining = 0;
+                logic->blinkTimer = 0;
+            }
+            break;
+
+        case GAUGE_TRAIL_MODE_FOLLOW:
+        default:
+            break;
     }
 }
 
@@ -3402,7 +3495,8 @@ static void GaugeLogic_initWithAnim(GaugeLogic *logic,
  */
 static void GaugeLogic_tick(GaugeLogic *logic)
 {
-    const u8 gainMode = (logic->trailMode == GAUGE_TRAIL_GAIN);
+    const u8 followMode = ((GaugeTrailMode)logic->configuredTrailMode == GAUGE_TRAIL_MODE_FOLLOW);
+    const u8 gainMode = (followMode && logic->activeTrailState == GAUGE_TRAIL_STATE_GAIN);
 
     /* --- Value animation (if enabled) --- */
     if (logic->valueAnimEnabled && logic->valuePixels != logic->valueTargetPixels)
@@ -3439,12 +3533,18 @@ static void GaugeLogic_tick(GaugeLogic *logic)
     }
 
 
-    /* --- Trail handling --- */
+    /* Non-follow modes have dedicated behavior and do not use hold/blink/shrink. */
+    if (!followMode)
+    {
+        apply_non_follow_trail_mode_tick(logic);
+        return;
+    }
+
+    /* --- Trail handling (FOLLOW mode) --- */
     if (!logic->trailEnabled)
     {
-        /* Trail disabled: keep in sync with value */
         logic->trailPixels = logic->valuePixels;
-        logic->trailMode = GAUGE_TRAIL_NONE;
+        logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
         return;
     }
 
@@ -3472,7 +3572,7 @@ static void GaugeLogic_tick(GaugeLogic *logic)
         if (logic->valuePixels >= logic->valueTargetPixels)
         {
             logic->trailPixels = logic->valuePixels;
-            logic->trailMode = GAUGE_TRAIL_NONE;
+            logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
         }
         return;
     }
@@ -3516,8 +3616,8 @@ static void GaugeLogic_tick(GaugeLogic *logic)
     {
         logic->blinkFramesRemaining = 0;
         logic->blinkTimer = 0;
-        if (logic->trailMode == GAUGE_TRAIL_DAMAGE)
-            logic->trailMode = GAUGE_TRAIL_NONE;
+        if (logic->activeTrailState == GAUGE_TRAIL_STATE_DAMAGE)
+            logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
     }
 }
 
@@ -3766,7 +3866,7 @@ static void preload_dynamic_standard_tiles(GaugeDynamic *dyn, const GaugeLayout 
     {
         const u32 *bodyStrip = select_base_strip(layout->tilesetBySegment[segmentId],
                                                  layout->gainTilesetBySegment[segmentId],
-                                                 GAUGE_TRAIL_DAMAGE);
+                                                 GAUGE_TRAIL_STATE_DAMAGE);
         if (!bodyStrip)
             continue;
 
@@ -3783,7 +3883,7 @@ static void preload_dynamic_standard_tiles(GaugeDynamic *dyn, const GaugeLayout 
         {
             const u32 *trailStrip = select_base_strip(layout->tilesetTrailBySegment[segmentId],
                                                       layout->gainTilesetTrailBySegment[segmentId],
-                                                      GAUGE_TRAIL_DAMAGE);
+                                                      GAUGE_TRAIL_STATE_DAMAGE);
             if (trailStrip)
                 upload_fill_tile(trailStrip, fullTrailIndexTrail, dyn->vramTileFullTrail[segmentId], DMA_QUEUE);
             else
@@ -3798,7 +3898,7 @@ static void preload_dynamic_standard_tiles(GaugeDynamic *dyn, const GaugeLayout 
         const u8 endSegId = layout->segmentIdByCell[cellEnd];
         const u32 *capEndStrip = select_base_strip(layout->tilesetCapEndBySegment[endSegId],
                                                    layout->gainTilesetCapEndBySegment[endSegId],
-                                                   GAUGE_TRAIL_DAMAGE);
+                                                   GAUGE_TRAIL_STATE_DAMAGE);
         if (capEndStrip)
             upload_fill_tile(capEndStrip, emptyIndex, dyn->vramTileCapEnd, DMA);
     }
@@ -4160,7 +4260,7 @@ static void process_dynamic_mode(GaugePart *part,
      * 1. Invalidate partial tile caches (forces re-upload on next use)
      * 2. Re-upload full body tiles if trail mode changed (DAMAGE<->GAIN)
      * 3. Re-upload full trail tiles with the correct tileset variant */
-    const u8 layoutHasBlink = (trailMode == GAUGE_TRAIL_GAIN)
+    const u8 layoutHasBlink = (trailMode == GAUGE_TRAIL_STATE_GAIN)
                              ? layout->hasGainBlinkOff : layout->hasBlinkOff;
     if ((blinkOnChanged && layoutHasBlink) || trailModeChanged)
     {
@@ -4346,12 +4446,12 @@ static inline u8 select_pip_state_for_cell(const GaugeLayout *layout,
 
     if (blinkOffActive)
     {
-        if (trailMode == GAUGE_TRAIL_DAMAGE)
+        if (trailMode == GAUGE_TRAIL_STATE_DAMAGE)
             return PIP_STATE_BLINK_OFF;
         return PIP_STATE_EMPTY; /* Gain trail: fallback to hidden trail on blink OFF. */
     }
 
-    if (trailMode == GAUGE_TRAIL_GAIN)
+    if (trailMode == GAUGE_TRAIL_STATE_GAIN)
         return PIP_STATE_GAIN;
 
     return PIP_STATE_LOSS;
@@ -4469,6 +4569,7 @@ static GaugePartRenderHandler *resolve_part_render_handler(GaugeValueMode valueM
 
 static void gauge_tick_and_render_fill(Gauge *gauge);
 static void gauge_tick_and_render_pip(Gauge *gauge);
+static void gauge_tick_and_render_bootstrap(Gauge *gauge);
 
 /** Select the tick-and-render handler: fill (continuous) or pip (discrete). */
 static GaugeTickAndRenderHandler *resolve_tick_and_render_handler(GaugeValueMode valueMode)
@@ -4816,7 +4917,7 @@ void Gauge_init(Gauge *gauge, const GaugeInit *init)
     }
 
     /* Initialize logic with the correct LUT pointer.
-     * Trail disabled by default - use Gauge_setTrailAnim() to enable. */
+     * Trail mode defaults to GAUGE_TRAIL_MODE_DISABLED. */
     GaugeLogic_init(&gauge->logic, maxValue, maxFillPixels, lut,
                     0, init->initialValue);
 
@@ -4827,7 +4928,9 @@ void Gauge_init(Gauge *gauge, const GaugeInit *init)
 
     /* Runtime dispatch state */
     gauge->valueMode = valueMode;
-    gauge->tickAndRenderHandler = resolve_tick_and_render_handler(valueMode);
+    gauge->steadyTickAndRenderHandler = resolve_tick_and_render_handler(valueMode);
+    gauge->tickAndRenderHandler = gauge_tick_and_render_bootstrap;
+    gauge->runtimeLocked = 0;
 
     /* VRAM allocation state */
     gauge->vramBase = init->vramBase;
@@ -4835,10 +4938,11 @@ void Gauge_init(Gauge *gauge, const GaugeInit *init)
     gauge->vramMode = init->vramMode;
 }
 
-/** Configure value animation (0=instant changes, 1=animated transitions). */
+/** Configure value animation (0=instant changes, 1=animated transitions).
+ * No-op after first Gauge_update() call. */
 void Gauge_setValueAnim(Gauge *gauge, u8 enabled, u8 shift)
 {
-    if (!gauge)
+    if (!gauge || gauge->runtimeLocked)
         return;
 
     GaugeLogic *logic = &gauge->logic;
@@ -4846,30 +4950,98 @@ void Gauge_setValueAnim(Gauge *gauge, u8 enabled, u8 shift)
     logic->valueAnimShift = (shift == 0) ? GAUGE_DEFAULT_VALUE_ANIM_SHIFT : shift;
 }
 
-/** Configure trail animation (0=no trail, 1=hold+blink+shrink trail effect). */
-void Gauge_setTrailAnim(Gauge *gauge, u8 enabled, u8 shift, u8 blinkShift)
+/** Configure trail mode and timing (configuration-time only). */
+void Gauge_setTrailMode(Gauge *gauge,
+                        GaugeTrailMode mode,
+                        u16 criticalValue,
+                        u8 shift,
+                        u8 blinkShift)
 {
-    if (!gauge)
+    if (!gauge || gauge->runtimeLocked || gauge->partCount > 0)
         return;
 
+    if (mode > GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK)
+        mode = GAUGE_TRAIL_MODE_FOLLOW;
+
     GaugeLogic *logic = &gauge->logic;
-    logic->trailEnabled = enabled ? 1 : 0;
+    logic->configuredTrailMode = (u8)mode;
+    logic->criticalValue = (criticalValue > logic->maxValue) ? logic->maxValue : criticalValue;
     logic->trailAnimShift = (shift == 0) ? GAUGE_DEFAULT_TRAIL_ANIM_SHIFT : shift;
     logic->blinkShift = (blinkShift == 0) ? GAUGE_DEFAULT_BLINK_SHIFT : blinkShift;
 
-    /* If disabling trail, reset trail state to match value */
-    if (!logic->trailEnabled)
+    /* Reset runtime trail/blink state according to the configured mode. */
+    logic->holdFramesRemaining = 0;
+    logic->blinkFramesRemaining = 0;
+    logic->blinkTimer = 0;
+
+    switch (mode)
     {
-        logic->trailPixels = logic->valuePixels;
-        logic->holdFramesRemaining = 0;
-        logic->blinkFramesRemaining = 0;
+        case GAUGE_TRAIL_MODE_DISABLED:
+            logic->trailEnabled = 0;
+            logic->trailPixels = logic->valuePixels;
+            logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+            break;
+
+        case GAUGE_TRAIL_MODE_FOLLOW:
+            logic->trailEnabled = 1;
+            logic->trailPixels = logic->valuePixels;
+            logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+            break;
+
+        case GAUGE_TRAIL_MODE_STATIC_TRAIL:
+            logic->trailEnabled = 1;
+            logic->trailPixels = logic->maxFillPixels;
+            logic->activeTrailState = (logic->trailPixels > logic->valuePixels)
+                ? GAUGE_TRAIL_STATE_DAMAGE
+                : GAUGE_TRAIL_STATE_NONE;
+            break;
+
+        case GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK:
+            logic->trailEnabled = 1;
+            logic->trailPixels = logic->maxFillPixels;
+            logic->activeTrailState = (logic->trailPixels > logic->valuePixels)
+                ? GAUGE_TRAIL_STATE_DAMAGE
+                : GAUGE_TRAIL_STATE_NONE;
+            if (is_critical_mode_active(logic))
+                logic->blinkFramesRemaining = 1;
+            break;
+
+        case GAUGE_TRAIL_MODE_CRITICAL_TRAIL_BLINK:
+            logic->trailEnabled = 1;
+            if (is_critical_mode_active(logic))
+            {
+                logic->trailPixels = logic->maxFillPixels;
+                logic->blinkFramesRemaining = 1;
+                logic->activeTrailState = GAUGE_TRAIL_STATE_DAMAGE;
+            }
+            else
+            {
+                logic->trailPixels = logic->valuePixels;
+                logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+            }
+            break;
+
+        case GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK:
+            logic->trailEnabled = 1;
+            logic->trailPixels = logic->valuePixels;
+            logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+            if (is_critical_mode_active(logic))
+                logic->blinkFramesRemaining = 1;
+            break;
     }
+
+    /* Force re-render with the new mode. */
+    logic->lastValuePixels = CACHE_INVALID_U16;
+    logic->lastTrailPixelsRendered = CACHE_INVALID_U16;
+    logic->lastBlinkOn = CACHE_INVALID_U8;
+    logic->lastActiveTrailState = CACHE_INVALID_U8;
+    logic->needUpdate = 1;
 }
 
-/** Override maxFillPixels (no-op if unchanged, no ordering constraint). */
+/** Override maxFillPixels (no-op if unchanged, no-op after runtime lock). */
 void Gauge_setMaxFillPixels(Gauge *gauge, u16 maxFillPixels)
 {
-    if (!gauge) return;
+    if (!gauge || gauge->runtimeLocked) return;
     GaugeLogic *logic = &gauge->logic;
 
     /* No-op if unchanged */
@@ -4908,15 +5080,68 @@ void Gauge_setMaxFillPixels(Gauge *gauge, u16 maxFillPixels)
     if (logic->valueTargetPixels > maxFillPixels)
         logic->valueTargetPixels = maxFillPixels;
     logic->valuePixels = logic->valueTargetPixels;
-    logic->trailPixels = logic->valuePixels;
-
-    /* Reset trail and force re-render */
     logic->holdFramesRemaining = 0;
-    logic->blinkFramesRemaining = 0;
+
+    switch ((GaugeTrailMode)logic->configuredTrailMode)
+    {
+        case GAUGE_TRAIL_MODE_DISABLED:
+        case GAUGE_TRAIL_MODE_FOLLOW:
+            logic->trailPixels = logic->valuePixels;
+            logic->blinkFramesRemaining = 0;
+            logic->blinkTimer = 0;
+            logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+            break;
+
+        case GAUGE_TRAIL_MODE_STATIC_TRAIL:
+            logic->trailPixels = logic->maxFillPixels;
+            logic->blinkFramesRemaining = 0;
+            logic->blinkTimer = 0;
+            logic->activeTrailState = (logic->trailPixels > logic->valuePixels)
+                ? GAUGE_TRAIL_STATE_DAMAGE
+                : GAUGE_TRAIL_STATE_NONE;
+            break;
+
+        case GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK:
+            logic->trailPixels = logic->maxFillPixels;
+            logic->blinkFramesRemaining = is_critical_mode_active(logic) ? 1 : 0;
+            logic->blinkTimer = 0;
+            logic->activeTrailState = (logic->trailPixels > logic->valuePixels)
+                ? GAUGE_TRAIL_STATE_DAMAGE
+                : GAUGE_TRAIL_STATE_NONE;
+            break;
+
+        case GAUGE_TRAIL_MODE_CRITICAL_TRAIL_BLINK:
+            if (is_critical_mode_active(logic))
+            {
+                logic->trailPixels = logic->maxFillPixels;
+                logic->blinkFramesRemaining = 1;
+                logic->blinkTimer = 0;
+                logic->activeTrailState = (logic->trailPixels > logic->valuePixels)
+                    ? GAUGE_TRAIL_STATE_DAMAGE
+                    : GAUGE_TRAIL_STATE_NONE;
+            }
+            else
+            {
+                logic->trailPixels = logic->valuePixels;
+                logic->blinkFramesRemaining = 0;
+                logic->blinkTimer = 0;
+                logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+            }
+            break;
+
+        case GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK:
+            logic->trailPixels = logic->valuePixels;
+            logic->blinkFramesRemaining = is_critical_mode_active(logic) ? 1 : 0;
+            logic->blinkTimer = 0;
+            logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+            break;
+    }
+
+    /* Force re-render */
     logic->lastValuePixels = CACHE_INVALID_U16;
     logic->lastTrailPixelsRendered = CACHE_INVALID_U16;
     logic->lastBlinkOn = CACHE_INVALID_U8;
-    logic->lastTrailMode = CACHE_INVALID_U8;
+    logic->lastActiveTrailState = CACHE_INVALID_U8;
     logic->needUpdate = 1;
 }
 
@@ -4925,7 +5150,7 @@ u8 Gauge_addPart(Gauge *gauge,
                  u16 originX,
                  u16 originY)
 {
-    if (!gauge || !layout)
+    if (!gauge || !layout || gauge->runtimeLocked)
         return 0;
 
     const u16 vramSize = compute_vram_size_for_layout(layout,
@@ -4948,7 +5173,7 @@ u8 Gauge_addPartEx(Gauge *gauge,
                    u16 vramBase,
                    GaugeVramMode vramMode)
 {
-    if (!gauge || !layout)
+    if (!gauge || !layout || gauge->runtimeLocked)
         return 0;
 
     if (gauge->partCount >= GAUGE_MAX_PARTS)
@@ -5034,6 +5259,7 @@ typedef struct {
     u8 blinkOn;
     u8 blinkOffActive;
     u8 blinkOnChanged;
+    u8 useValueBlinkRendering;
     u8 trailMode;
     u8 trailModeChanged;
 } BlinkState;
@@ -5045,8 +5271,15 @@ typedef struct {
 static inline BlinkState compute_blink_state(const GaugeLogic *logic)
 {
     BlinkState s;
+    const GaugeTrailMode configuredMode = (GaugeTrailMode)logic->configuredTrailMode;
+    const u8 criticalModeActive =
+        ((configuredMode == GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK ||
+          configuredMode == GAUGE_TRAIL_MODE_CRITICAL_TRAIL_BLINK ||
+          configuredMode == GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK) &&
+         is_critical_mode_active(logic));
+
     s.blinkOn = 1;
-    if (logic->trailEnabled && logic->blinkFramesRemaining > 0)
+    if (logic->blinkFramesRemaining > 0)
     {
         /* Toggle blink on/off at a rate controlled by blinkShift.
          * blinkTimer increments each frame; shifting right by blinkShift
@@ -5056,9 +5289,15 @@ static inline BlinkState compute_blink_state(const GaugeLogic *logic)
         s.blinkOn = (u8)(((logic->blinkTimer >> logic->blinkShift) & 1) == 0);
     }
     s.blinkOnChanged = (logic->lastBlinkOn != s.blinkOn);
-    s.trailMode = logic->trailMode;
-    s.trailModeChanged = (logic->lastTrailMode != s.trailMode);
-    s.blinkOffActive = (logic->trailEnabled &&
+
+    s.useValueBlinkRendering =
+        (configuredMode == GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK && criticalModeActive) ? 1 : 0;
+
+    s.trailMode = logic->activeTrailState;
+    if (s.useValueBlinkRendering)
+        s.trailMode = GAUGE_TRAIL_STATE_DAMAGE;
+    s.trailModeChanged = (logic->lastActiveTrailState != s.trailMode);
+    s.blinkOffActive = ((logic->trailEnabled || s.useValueBlinkRendering) &&
                         logic->blinkFramesRemaining > 0 &&
                         s.blinkOn == 0);
     return s;
@@ -5079,6 +5318,13 @@ static inline u8 update_render_cache_and_check(
     u16 valueTargetForEarlyReturn,
     u16 valueForIdle, u16 trailForIdle)
 {
+    const GaugeTrailMode configuredMode = (GaugeTrailMode)logic->configuredTrailMode;
+    const u8 criticalModeActive =
+        ((configuredMode == GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK ||
+          configuredMode == GAUGE_TRAIL_MODE_CRITICAL_TRAIL_BLINK ||
+          configuredMode == GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK) &&
+         is_critical_mode_active(logic));
+
     if (logic->lastValuePixels == valuePixels &&
         logic->lastTrailPixelsRendered == trailPixelsRendered &&
         logic->lastBlinkOn == bs->blinkOn &&
@@ -5091,17 +5337,25 @@ static inline u8 update_render_cache_and_check(
     logic->lastValuePixels = valuePixels;
     logic->lastTrailPixelsRendered = trailPixelsRendered;
     logic->lastBlinkOn = bs->blinkOn;
-    logic->lastTrailMode = bs->trailMode;
+    logic->lastActiveTrailState = bs->trailMode;
 
-    /* Detect fully idle state: value at target, trail caught up, no timers.
+    /* Detect fully idle state: value at target and no active timed work.
      * We still render this frame, then next Gauge_update returns via needUpdate. */
-    if (valueForIdle == logic->valueTargetPixels &&
-        trailForIdle == valueForIdle &&
+    if (!criticalModeActive &&
+        valueForIdle == logic->valueTargetPixels &&
         logic->holdFramesRemaining == 0 &&
-        logic->blinkFramesRemaining == 0 &&
-        logic->trailMode == GAUGE_TRAIL_NONE)
+        logic->blinkFramesRemaining == 0)
     {
-        logic->needUpdate = 0;
+        if (configuredMode == GAUGE_TRAIL_MODE_STATIC_TRAIL ||
+            configuredMode == GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK)
+        {
+            logic->needUpdate = 0;
+        }
+        else if (trailForIdle == valueForIdle &&
+                 logic->activeTrailState == GAUGE_TRAIL_STATE_NONE)
+        {
+            logic->needUpdate = 0;
+        }
     }
 
     return 0;
@@ -5119,23 +5373,34 @@ static void gauge_tick_and_render_fill(Gauge *gauge)
     GaugeLogic_tick(logic);
     
     /* --- Compute current render state --- */
-    const u16 valuePixels = logic->valuePixels;
+    const u16 valuePixelsRaw = logic->valuePixels;
 
     /* Compute trail with blink effect.
      * trailPixels = actual trail position (clamped to at least valuePixels).
      * trailPixelsRendered = what the render loop uses:
      *   - blinkOn=1 -> show trail normally (trailPixels)
      *   - blinkOn=0 -> hide trail by collapsing it to valuePixels */
-    u16 trailPixels = logic->trailPixels;
-    if (trailPixels < valuePixels)
-        trailPixels = valuePixels;
+    u16 trailPixelsRaw = logic->trailPixels;
+    if (trailPixelsRaw < valuePixelsRaw)
+        trailPixelsRaw = valuePixelsRaw;
 
     const BlinkState bs = compute_blink_state(logic);
-    const u16 trailPixelsRendered = bs.blinkOn ? trailPixels : valuePixels;
+    u16 valuePixels = valuePixelsRaw;
+    u16 trailPixelsRendered = bs.blinkOn ? trailPixelsRaw : valuePixelsRaw;
+    u16 trailPixelsActual = trailPixelsRaw;
+    u16 valueTargetForEarlyReturn = logic->valueTargetPixels;
+
+    if (bs.useValueBlinkRendering && !bs.blinkOn)
+    {
+        valuePixels = 0;
+        trailPixelsRendered = valuePixelsRaw;
+        trailPixelsActual = valuePixelsRaw;
+        valueTargetForEarlyReturn = 0;
+    }
 
     if (update_render_cache_and_check(logic, valuePixels, trailPixelsRendered,
-                                       &bs, logic->valueTargetPixels,
-                                       valuePixels, trailPixels))
+                                       &bs, valueTargetForEarlyReturn,
+                                       valuePixelsRaw, trailPixelsRaw))
         return;
 
     /* --- Render all parts (countdown: 68000 dbra optimization) --- */
@@ -5145,7 +5410,7 @@ static void gauge_tick_and_render_fill(Gauge *gauge)
         GaugePart *part = gauge->parts[i];
         if (!part)
             continue;
-        part->renderHandler(part, valuePixels, trailPixelsRendered, trailPixels,
+        part->renderHandler(part, valuePixels, trailPixelsRendered, trailPixelsActual,
                             bs.blinkOffActive, bs.blinkOnChanged,
                             bs.trailMode, bs.trailModeChanged);
     }
@@ -5205,13 +5470,23 @@ static void gauge_tick_and_render_pip(Gauge *gauge)
 
     const BlinkState bs = compute_blink_state(logic);
 
-    const u16 valuePixels = quantize_pixels_to_pip_step(logic, valuePixelsRaw);
+    const u16 valuePixelsQuantized = quantize_pixels_to_pip_step(logic, valuePixelsRaw);
     u16 trailPixels = quantize_pixels_to_pip_step(logic, trailPixelsRaw);
-    if (trailPixels < valuePixels)
-        trailPixels = valuePixels;
+    if (trailPixels < valuePixelsQuantized)
+        trailPixels = valuePixelsQuantized;
 
-    const u16 valueTargetPixels = quantize_pixels_to_pip_step(logic, logic->valueTargetPixels);
-    const u16 trailPixelsRendered = bs.blinkOn ? trailPixels : valuePixels;
+    u16 valuePixels = valuePixelsQuantized;
+    u16 trailPixelsRendered = bs.blinkOn ? trailPixels : valuePixelsQuantized;
+    u16 trailPixelsActual = trailPixels;
+    u16 valueTargetPixels = quantize_pixels_to_pip_step(logic, logic->valueTargetPixels);
+
+    if (bs.useValueBlinkRendering && !bs.blinkOn)
+    {
+        valuePixels = 0;
+        trailPixelsRendered = valuePixelsQuantized;
+        trailPixelsActual = valuePixelsQuantized;
+        valueTargetPixels = 0;
+    }
 
     if (update_render_cache_and_check(logic, valuePixels, trailPixelsRendered,
                                        &bs, valueTargetPixels,
@@ -5225,10 +5500,27 @@ static void gauge_tick_and_render_pip(Gauge *gauge)
         GaugePart *part = gauge->parts[i];
         if (!part)
             continue;
-        part->renderHandler(part, valuePixels, trailPixelsRendered, trailPixels,
+        part->renderHandler(part, valuePixels, trailPixelsRendered, trailPixelsActual,
                             bs.blinkOffActive, bs.blinkOnChanged,
                             bs.trailMode, bs.trailModeChanged);
     }
+}
+
+/* First update call: lock runtime configuration then delegate to steady handler. */
+static void gauge_tick_and_render_bootstrap(Gauge *gauge)
+{
+    GaugeTickAndRenderHandler *steadyHandler;
+
+    if (!gauge)
+        return;
+
+    steadyHandler = gauge->steadyTickAndRenderHandler;
+    if (!steadyHandler)
+        return;
+
+    gauge->runtimeLocked = 1;
+    gauge->tickAndRenderHandler = steadyHandler;
+    steadyHandler(gauge);
 }
 
 /** Update gauge: tick logic + render all parts. Call once per frame. */
@@ -5256,19 +5548,74 @@ void Gauge_setValue(Gauge *gauge, u16 newValue)
         logic->valueTargetPixels = logic->maxFillPixels;
 
     logic->valuePixels = logic->valueTargetPixels;
-    logic->trailPixels = logic->valuePixels;
     logic->holdFramesRemaining = 0;
-    logic->blinkFramesRemaining = 0;
-    logic->blinkTimer = 0;
-    logic->trailMode = GAUGE_TRAIL_NONE;
+
+    switch ((GaugeTrailMode)logic->configuredTrailMode)
+    {
+        case GAUGE_TRAIL_MODE_DISABLED:
+        case GAUGE_TRAIL_MODE_FOLLOW:
+            logic->trailPixels = logic->valuePixels;
+            logic->blinkFramesRemaining = 0;
+            logic->blinkTimer = 0;
+            logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+            break;
+
+        case GAUGE_TRAIL_MODE_STATIC_TRAIL:
+            logic->trailPixels = logic->maxFillPixels;
+            logic->blinkFramesRemaining = 0;
+            logic->blinkTimer = 0;
+            logic->activeTrailState = (logic->trailPixels > logic->valuePixels)
+                ? GAUGE_TRAIL_STATE_DAMAGE
+                : GAUGE_TRAIL_STATE_NONE;
+            break;
+
+        case GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK:
+            logic->trailPixels = logic->maxFillPixels;
+            logic->blinkFramesRemaining = is_critical_mode_active(logic) ? 1 : 0;
+            logic->blinkTimer = 0;
+            logic->activeTrailState = (logic->trailPixels > logic->valuePixels)
+                ? GAUGE_TRAIL_STATE_DAMAGE
+                : GAUGE_TRAIL_STATE_NONE;
+            break;
+
+        case GAUGE_TRAIL_MODE_CRITICAL_TRAIL_BLINK:
+            if (is_critical_mode_active(logic))
+            {
+                logic->trailPixels = logic->maxFillPixels;
+                logic->blinkFramesRemaining = 1;
+                logic->blinkTimer = 0;
+                logic->activeTrailState = (logic->trailPixels > logic->valuePixels)
+                    ? GAUGE_TRAIL_STATE_DAMAGE
+                    : GAUGE_TRAIL_STATE_NONE;
+            }
+            else
+            {
+                logic->trailPixels = logic->valuePixels;
+                logic->blinkFramesRemaining = 0;
+                logic->blinkTimer = 0;
+                logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+            }
+            break;
+
+        case GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK:
+            logic->trailPixels = logic->valuePixels;
+            logic->blinkFramesRemaining = is_critical_mode_active(logic) ? 1 : 0;
+            logic->blinkTimer = 0;
+            logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+            break;
+    }
 }
 
 /**
  * Decrease gauge value (damage).
  *
- * Trail holds at the previous position for holdFrames, then blinks for
- * blinkFrames, then shrinks toward the new value. If valueAnim is enabled,
- * the value itself also animates down.
+ * FOLLOW mode:
+ *   Trail holds at the previous position for holdFrames, then blinks for
+ *   blinkFrames, then shrinks toward the new value.
+ *
+ * Other modes:
+ *   Decrease applies their configured immediate behavior
+ *   (disabled/static/critical).
  */
 void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
 {
@@ -5289,13 +5636,76 @@ void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
     if (!logic->valueAnimEnabled)
         logic->valuePixels = logic->valueTargetPixels;
 
-    /* Handle trail */
+    switch ((GaugeTrailMode)logic->configuredTrailMode)
+    {
+        case GAUGE_TRAIL_MODE_DISABLED:
+            logic->trailPixels = logic->valuePixels;
+            logic->holdFramesRemaining = 0;
+            logic->blinkFramesRemaining = 0;
+            logic->blinkTimer = 0;
+            logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+            return;
+
+        case GAUGE_TRAIL_MODE_STATIC_TRAIL:
+            logic->trailPixels = logic->maxFillPixels;
+            logic->holdFramesRemaining = 0;
+            logic->blinkFramesRemaining = 0;
+            logic->blinkTimer = 0;
+            logic->activeTrailState = (logic->trailPixels > logic->valuePixels)
+                ? GAUGE_TRAIL_STATE_DAMAGE
+                : GAUGE_TRAIL_STATE_NONE;
+            return;
+
+        case GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK:
+            logic->trailPixels = logic->maxFillPixels;
+            logic->holdFramesRemaining = 0;
+            logic->blinkFramesRemaining = is_critical_mode_active(logic) ? 1 : 0;
+            logic->blinkTimer = 0;
+            logic->activeTrailState = (logic->trailPixels > logic->valuePixels)
+                ? GAUGE_TRAIL_STATE_DAMAGE
+                : GAUGE_TRAIL_STATE_NONE;
+            return;
+
+        case GAUGE_TRAIL_MODE_CRITICAL_TRAIL_BLINK:
+            logic->holdFramesRemaining = 0;
+            if (is_critical_mode_active(logic))
+            {
+                logic->trailPixels = logic->maxFillPixels;
+                logic->blinkFramesRemaining = 1;
+                logic->blinkTimer = 0;
+                logic->activeTrailState = (logic->trailPixels > logic->valuePixels)
+                    ? GAUGE_TRAIL_STATE_DAMAGE
+                    : GAUGE_TRAIL_STATE_NONE;
+            }
+            else
+            {
+                logic->trailPixels = logic->valuePixels;
+                logic->blinkFramesRemaining = 0;
+                logic->blinkTimer = 0;
+                logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+            }
+            return;
+
+        case GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK:
+            logic->trailPixels = logic->valuePixels;
+            logic->holdFramesRemaining = 0;
+            logic->blinkFramesRemaining = is_critical_mode_active(logic) ? 1 : 0;
+            logic->blinkTimer = 0;
+            logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+            return;
+
+        case GAUGE_TRAIL_MODE_FOLLOW:
+        default:
+            break;
+    }
+
+    /* FOLLOW mode trail handling */
     if (!logic->trailEnabled)
     {
         logic->trailPixels = logic->valuePixels;
         logic->holdFramesRemaining = 0;
         logic->blinkFramesRemaining = 0;
-        logic->trailMode = GAUGE_TRAIL_NONE;
+        logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
         return;
     }
 
@@ -5305,7 +5715,7 @@ void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
      * if a previous animation is still in progress.
      * If switching from GAIN mode, reset trail from the target to current. */
     const u16 previousDisplayedValuePixels = logic->valuePixels;
-    if (logic->trailMode == GAUGE_TRAIL_GAIN)
+    if (logic->activeTrailState == GAUGE_TRAIL_STATE_GAIN)
     {
         logic->trailPixels = previousDisplayedValuePixels;
     }
@@ -5318,15 +5728,19 @@ void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
     logic->holdFramesRemaining = holdFrames;
     logic->blinkFramesRemaining = blinkFrames;
     logic->blinkTimer = 0;
-    logic->trailMode = GAUGE_TRAIL_DAMAGE;
+    logic->activeTrailState = GAUGE_TRAIL_STATE_DAMAGE;
 }
 
 /**
  * Increase gauge value (heal).
  *
- * If both valueAnim and trail are enabled, triggers a gain trail effect:
- * trail jumps to target, holds, blinks, then value catches up.
- * Otherwise, trail follows value immediately.
+ * FOLLOW mode:
+ *   If value animation is enabled, triggers gain trail:
+ *   trail jumps to target, holds, blinks, then value catches up.
+ *
+ * Other modes:
+ *   Increase applies their configured immediate behavior
+ *   (disabled/static/critical).
  */
 void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
 {
@@ -5351,6 +5765,69 @@ void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
     if (!logic->valueAnimEnabled)
         logic->valuePixels = logic->valueTargetPixels;
 
+    switch ((GaugeTrailMode)logic->configuredTrailMode)
+    {
+        case GAUGE_TRAIL_MODE_DISABLED:
+            logic->trailPixels = logic->valuePixels;
+            logic->holdFramesRemaining = 0;
+            logic->blinkFramesRemaining = 0;
+            logic->blinkTimer = 0;
+            logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+            return;
+
+        case GAUGE_TRAIL_MODE_STATIC_TRAIL:
+            logic->trailPixels = logic->maxFillPixels;
+            logic->holdFramesRemaining = 0;
+            logic->blinkFramesRemaining = 0;
+            logic->blinkTimer = 0;
+            logic->activeTrailState = (logic->trailPixels > logic->valuePixels)
+                ? GAUGE_TRAIL_STATE_DAMAGE
+                : GAUGE_TRAIL_STATE_NONE;
+            return;
+
+        case GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK:
+            logic->trailPixels = logic->maxFillPixels;
+            logic->holdFramesRemaining = 0;
+            logic->blinkFramesRemaining = is_critical_mode_active(logic) ? 1 : 0;
+            logic->blinkTimer = 0;
+            logic->activeTrailState = (logic->trailPixels > logic->valuePixels)
+                ? GAUGE_TRAIL_STATE_DAMAGE
+                : GAUGE_TRAIL_STATE_NONE;
+            return;
+
+        case GAUGE_TRAIL_MODE_CRITICAL_TRAIL_BLINK:
+            logic->holdFramesRemaining = 0;
+            if (is_critical_mode_active(logic))
+            {
+                logic->trailPixels = logic->maxFillPixels;
+                logic->blinkFramesRemaining = 1;
+                logic->blinkTimer = 0;
+                logic->activeTrailState = (logic->trailPixels > logic->valuePixels)
+                    ? GAUGE_TRAIL_STATE_DAMAGE
+                    : GAUGE_TRAIL_STATE_NONE;
+            }
+            else
+            {
+                logic->trailPixels = logic->valuePixels;
+                logic->blinkFramesRemaining = 0;
+                logic->blinkTimer = 0;
+                logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+            }
+            return;
+
+        case GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK:
+            logic->trailPixels = logic->valuePixels;
+            logic->holdFramesRemaining = 0;
+            logic->blinkFramesRemaining = is_critical_mode_active(logic) ? 1 : 0;
+            logic->blinkTimer = 0;
+            logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+            return;
+
+        case GAUGE_TRAIL_MODE_FOLLOW:
+        default:
+            break;
+    }
+
     if (logic->trailEnabled && logic->valueAnimEnabled)
     {
         /* Gain trail: trail leads, value catches up after hold/blink */
@@ -5358,7 +5835,7 @@ void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
         logic->holdFramesRemaining = holdFrames;
         logic->blinkFramesRemaining = blinkFrames;
         logic->blinkTimer = 0;
-        logic->trailMode = GAUGE_TRAIL_GAIN;
+        logic->activeTrailState = GAUGE_TRAIL_STATE_GAIN;
     }
     else
     {
@@ -5367,7 +5844,7 @@ void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
         logic->holdFramesRemaining = 0;
         logic->blinkFramesRemaining = 0;
         logic->blinkTimer = 0;
-        logic->trailMode = GAUGE_TRAIL_NONE;
+        logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
     }
 }
 
@@ -5483,8 +5960,4 @@ u16 Gauge_getVramSize(const Gauge *gauge,
                                         gauge->logic.trailEnabled,
                                         gauge->valueMode);
 }
-
-
-
-
 
