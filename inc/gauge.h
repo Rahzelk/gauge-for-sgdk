@@ -1249,24 +1249,12 @@ typedef struct
  * value changes and a cell's fill is different, 32 bytes of new tile data
  * are DMA'd from the ROM strip to that cell's VRAM slot.
  *
- * The strip pointers are cached at init time (from the layout's segment
- * tilesets) to avoid looking up the segment ID and tileset every frame:
- *
- *   bodyFillStrip45:   BODY strip (45 tiles) - the main fill tileset
- *   endFillStrip45:    END strip (45 tiles) - for the value/trail edge cell
- *   trailFillStrip64:  TRAIL strip (64 tiles) - for trail-specific cells
- *   bridgeFillStrip45: BRIDGE strip (45 tiles) - for segment transitions
- *
  * Change detection:
  *   cachedStrip + cachedFillIndex track the last uploaded tile.
  *   If both match the desired tile, the DMA is skipped (saves ~200 cycles).
  */
 typedef struct
 {
-    const u32 *bodyFillStrip45;     /* BODY strip (always set when cell is valid) */
-    const u32 *endFillStrip45;      /* END strip (NULL if not supported) */
-    const u32 *trailFillStrip64;    /* TRAIL strip (NULL if not supported) */
-    const u32 *bridgeFillStrip45;   /* BRIDGE strip (NULL if not supported) */
     const u32 *cachedStrip;   /* Last strip uploaded (for cache) */
     u16 vramTileIndex;              /* VRAM tile index for this cell */
     u8 cachedFillIndex;               /* Last fill index uploaded (0xFF=none) */

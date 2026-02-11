@@ -1015,6 +1015,678 @@ static inline u8 layout_has_blink_off_mode(const GaugeLayout *layout, u8 trailMo
 }
 
 
+/* =============================================================================
+   Unified cell decision types
+   =============================================================================
+
+   These types and helpers factor the cell rendering DECISION (which strip and
+   tile index to use) out of process_fixed_mode() and process_dynamic_mode().
+
+   The decision is mode-agnostic:
+   - Fixed mode:   uses (strip, fillStripIndex) to DMA a tile per cell.
+   - Dynamic mode: uses (type) to route to the correct shared VRAM slot,
+                   then (strip, fillStripIndex) to DMA partial tiles.
+
+   This eliminates ~320 lines of duplicated classification logic.
+   ============================================================================= */
+
+/**
+ * Break zone cell type -- classifies a cell within the break zone.
+ *
+ * Used by compute_cell_decision() to determine which tileset and index to use.
+ *
+ *   |FULL|VALUE_BREAK|TRAIL_FULL|TRAIL_BREAK|TRAIL_BREAK2|END|EMPTY|
+ *    <-- value -->|<---------- trail ---------->|
+ */
+typedef enum
+{
+    CELL_TYPE_END,           /* Value/trail frontier (uses end tileset) */
+    CELL_TYPE_TRAIL_BREAK,   /* Trail edge cell, after VALUE_BREAK (uses trail tileset) */
+    CELL_TYPE_TRAIL_BREAK2,  /* Second trail break, before END (uses trail tileset) */
+    CELL_TYPE_TRAIL_FULL,    /* Fully covered by trail, no value (uses trail tileset) */
+    CELL_TYPE_VALUE_BREAK,   /* Value edge cell, before trail zone (uses body tileset) */
+    CELL_TYPE_REGION_FULL,   /* Region rendering: fully filled body */
+    CELL_TYPE_REGION_EMPTY,  /* Region rendering: empty body */
+    CELL_TYPE_REGION_TRAIL,  /* Region rendering: full trail */
+    CELL_TYPE_DEFAULT        /* Standard fill computation (no special break zone) */
+} CellBreakType;
+
+/**
+ * Classify a cell's break zone type based on pre-computed break info.
+ *
+ * @param breakInfoUsed  Break zone info (normal or blink-off adjusted)
+ * @param cellFillIndex  Fill index of the cell to classify
+ * @param hasEndStrip    1 if segment has an end tileset
+ * @param hasTrailStrip  1 if segment has a trail tileset
+ * @return CellBreakType indicating which visual mode applies
+ */
+static inline CellBreakType classify_break_zone_cell(
+    const GaugeBreakInfo *breakInfoUsed,
+    u8 cellFillIndex,
+    u8 hasEndStrip,
+    u8 hasTrailStrip)
+{
+    if (breakInfoUsed->endFillIndex != CACHE_INVALID_U8 &&
+        hasEndStrip && cellFillIndex == breakInfoUsed->endFillIndex)
+        return CELL_TYPE_END;
+
+    if (breakInfoUsed->trailBreakActive && hasTrailStrip &&
+        cellFillIndex == breakInfoUsed->trailBreakFillIndex)
+        return CELL_TYPE_TRAIL_BREAK;
+
+    if (breakInfoUsed->trailBreakSecondActive && hasTrailStrip &&
+        cellFillIndex == breakInfoUsed->trailBreakFillIndex2)
+        return CELL_TYPE_TRAIL_BREAK2;
+
+    if (breakInfoUsed->trailBreakActive && hasTrailStrip &&
+        cellFillIndex > breakInfoUsed->valueFillIndex &&
+        cellFillIndex < breakInfoUsed->trailFillIndex)
+        return CELL_TYPE_TRAIL_FULL;
+
+    if (breakInfoUsed->valueBreakFillIndex != CACHE_INVALID_U8 &&
+        cellFillIndex == breakInfoUsed->valueBreakFillIndex)
+        return CELL_TYPE_VALUE_BREAK;
+
+    if (breakInfoUsed->regionRenderActive)
+    {
+        if (cellFillIndex < breakInfoUsed->valueFillIndex)
+            return CELL_TYPE_REGION_FULL;
+        if (cellFillIndex > breakInfoUsed->trailFillIndex)
+            return CELL_TYPE_REGION_EMPTY;
+        if (cellFillIndex > breakInfoUsed->valueFillIndex &&
+            cellFillIndex < breakInfoUsed->trailFillIndex)
+            return CELL_TYPE_REGION_TRAIL;
+    }
+
+    return CELL_TYPE_DEFAULT;
+}
+
+
+/**
+ * Cell decision type -- encodes which VRAM slot dynamic mode should use.
+ * Fixed mode ignores this (uniform output for all types).
+ */
+typedef enum
+{
+    CELL_DECISION_CAP_END,          /* Cap end tile (dedicated VRAM per part) */
+    CELL_DECISION_CAP_START,        /* Cap start tile (dedicated VRAM per part) */
+    CELL_DECISION_BRIDGE,           /* Bridge tile (dedicated VRAM per segment) */
+    CELL_DECISION_STANDARD_FULL,    /* Fully filled body tile (pre-loaded per segment) */
+    CELL_DECISION_STANDARD_EMPTY,   /* Empty body tile (pre-loaded per segment) */
+    CELL_DECISION_STANDARD_TRAIL,   /* Full trail tile (pre-loaded per segment) */
+    CELL_DECISION_PARTIAL_END,      /* Partial END tile (streamed on demand) */
+    CELL_DECISION_PARTIAL_TRAIL,    /* Partial trail tile (streamed on demand) */
+    CELL_DECISION_PARTIAL_TRAIL2,   /* Second trail break tile (streamed on demand) */
+    CELL_DECISION_PARTIAL_VALUE     /* Partial value tile (streamed on demand) */
+} CellDecisionType;
+
+/**
+ * Cell rendering decision result.
+ *
+ * Produced by compute_cell_decision() for each cell.
+ * Contains all information needed by both fixed and dynamic renderers.
+ */
+typedef struct
+{
+    const u32 *strip;           /* Selected ROM strip (NULL = skip rendering) */
+    u8 fillStripIndex;          /* Tile index within the strip (0..44 or 0..63) */
+    CellDecisionType type;      /* VRAM slot type for dynamic mode routing */
+    u8 capStartUsesBreak;       /* 1 if cap start uses break variant (for dyn cache) */
+    u8 capStartUsesTrail;       /* 1 if cap start uses trail variant (for dyn cache) */
+} CellDecision;
+
+/**
+ * Fill loop context -- loop-invariant state shared between fixed and dynamic.
+ *
+ * Computed once before the cell loop by init_fill_loop_context().
+ * Contains break zone info, cap detection, and rendering parameters.
+ */
+typedef struct
+{
+    GaugeBreakInfo breakInfo;         /* Break zone with rendered trail (blink applied) */
+    GaugeBreakInfo breakInfoActual;   /* Break zone with actual trail (for bridges) */
+    u16 valuePixels;
+    u16 trailPixelsRendered;
+    u16 trailPixelsActual;
+    u8 breakLow;                      /* Early-exit lower bound (fill index) */
+    u8 breakHigh;                     /* Early-exit upper bound (fill index) */
+    u8 capStartCellIndex;
+    u8 capEndCellIndex;
+    u8 capStartSegId;
+    u8 capEndSegId;
+    u8 capStartEnabled;               /* Dynamic mode may override to 0 if VRAM absent */
+    u8 capEndEnabled;                 /* Dynamic mode may override to 0 if VRAM absent */
+    u8 blinkOffActive;
+    u8 trailMode;
+} FillLoopContext;
+
+
+/**
+ * Initialize fill loop context with loop-invariant state.
+ *
+ * Computes break zones, early-exit boundaries, and cap detection.
+ * Called once before the cell loop in both fixed and dynamic modes.
+ *
+ * @param layout              Layout configuration
+ * @param valuePixels         Current value fill in pixels
+ * @param trailPixelsRendered Trail pixels after blink
+ * @param trailPixelsActual   Trail pixels before blink (for bridges)
+ * @param blinkOffActive      1 if blink-off rendering is active
+ * @param trailMode           GAUGE_TRAIL_DAMAGE/GAIN/NONE
+ * @param ctx                 [out] Initialized loop context
+ */
+static inline void init_fill_loop_context(const GaugeLayout *layout,
+                                          u16 valuePixels,
+                                          u16 trailPixelsRendered,
+                                          u16 trailPixelsActual,
+                                          u8 blinkOffActive,
+                                          u8 trailMode,
+                                          FillLoopContext *ctx)
+{
+    ctx->valuePixels = valuePixels;
+    ctx->trailPixelsRendered = trailPixelsRendered;
+    ctx->trailPixelsActual = trailPixelsActual;
+    ctx->blinkOffActive = blinkOffActive;
+    ctx->trailMode = trailMode;
+
+    /* Break zone computation:
+     * breakInfo:       uses rendered trail (blink applied) for normal classification
+     * breakInfoActual: uses actual trail (ignoring blink) for bridge visibility */
+    compute_break_info(layout, valuePixels, trailPixelsRendered, trailMode,
+                       &ctx->breakInfo);
+    ctx->breakInfoActual = ctx->breakInfo;
+    if (trailPixelsActual != trailPixelsRendered)
+        compute_break_info(layout, valuePixels, trailPixelsActual, trailMode,
+                           &ctx->breakInfoActual);
+
+    /* Early-exit boundaries: cells outside [breakLow..breakHigh] are trivially
+     * full or empty (~70-80% of cells). Skips full classification. */
+    ctx->breakLow = (ctx->breakInfo.valueBreakFillIndex != CACHE_INVALID_U8)
+                   ? ctx->breakInfo.valueBreakFillIndex
+                   : ctx->breakInfo.valueFillIndex;
+    ctx->breakHigh = ctx->breakInfo.trailFillIndex;
+
+    /* Cap detection */
+    ctx->capStartCellIndex = layout->cellIndexByFillIndex[0];
+    ctx->capEndCellIndex = layout->cellIndexByFillIndex[layout->length - 1];
+    ctx->capStartSegId = layout->segmentIdByCell[ctx->capStartCellIndex];
+    ctx->capEndSegId = layout->segmentIdByCell[ctx->capEndCellIndex];
+    ctx->capStartEnabled = layout->capStartEnabled;
+    ctx->capEndEnabled = layout->capEndEnabled;
+}
+
+
+/**
+ * Compute the rendering decision for a single cell.
+ *
+ * This is the unified decision function shared by process_fixed_mode() and
+ * process_dynamic_mode(). It determines:
+ * - Which ROM strip to use (body, end, trail, bridge, cap, blink-off variant)
+ * - Which tile index within that strip
+ * - Which cell type (for dynamic mode VRAM slot routing)
+ *
+ * The caller provides bodyStrip as a parameter because its source differs
+ * between modes:
+ * - Fixed:   layout->tilesetBySegment[segmentId] (per-cell cache removed)
+ * - Dynamic: layout->tilesetBySegment[segmentId]
+ *
+ * All other strips (end, trail, bridge, caps, blink variants) are looked up
+ * from the layout inside this function.
+ *
+ * @param layout           Layout configuration
+ * @param ctx              Loop-invariant context (from init_fill_loop_context)
+ * @param cellIndex        Cell index in layout
+ * @param cellFillIndex    Fill index of the cell (from fillIndexByCell)
+ * @param segmentId        Segment ID of the cell
+ * @param bodyStrip        Pre-computed body strip (mode-specific source)
+ * @param out              [out] Rendering decision
+ */
+static inline void compute_cell_decision(const GaugeLayout *layout,
+                                         const FillLoopContext *ctx,
+                                         u8 cellIndex,
+                                         u8 cellFillIndex,
+                                         u8 segmentId,
+                                         const u32 *bodyStrip,
+                                         CellDecision *out)
+{
+    out->capStartUsesBreak = 0;
+    out->capStartUsesTrail = 0;
+
+    /* Blink-off body strip lookup is only needed when blink-off is active. */
+    const u32 *blinkOffBodyStrip = NULL;
+    if (ctx->blinkOffActive)
+    {
+        blinkOffBodyStrip = select_blink_strip(
+            layout->blinkOffTilesetBySegment[segmentId],
+            layout->gainBlinkOffTilesetBySegment[segmentId],
+            ctx->trailMode);
+    }
+
+    /* === Cap end (always uses its dedicated tileset) === */
+    if (cellIndex == ctx->capEndCellIndex &&
+        ctx->capEndEnabled &&
+        segmentId == ctx->capEndSegId)
+    {
+        const u32 *capEndStrip = select_base_strip(
+            layout->tilesetCapEndBySegment[segmentId],
+            layout->gainTilesetCapEndBySegment[segmentId],
+            ctx->trailMode);
+        u16 capTrailPixels = ctx->trailPixelsRendered;
+
+        const u32 *capEndBlinkStrip = select_blink_strip(
+            layout->blinkOffTilesetCapEndBySegment[segmentId],
+            layout->gainBlinkOffTilesetCapEndBySegment[segmentId],
+            ctx->trailMode);
+
+        if (ctx->blinkOffActive &&
+            capEndBlinkStrip &&
+            is_cell_in_trail_zone(&ctx->breakInfoActual, cellFillIndex))
+        {
+            capEndStrip = capEndBlinkStrip;
+            capTrailPixels = ctx->trailPixelsActual;
+        }
+
+        u8 capValuePx = 0;
+        u8 capTrailPx = 0;
+        compute_fill_for_cell(layout, cellIndex, ctx->valuePixels, capTrailPixels,
+                              &capValuePx, &capTrailPx);
+
+        out->type = CELL_DECISION_CAP_END;
+        out->strip = capEndStrip;
+        out->fillStripIndex = s_tileIndexByValueTrail[capValuePx][capTrailPx];
+        return;
+    }
+
+    /* === Cap start (fixed border at cell 0) === */
+    if (cellIndex == ctx->capStartCellIndex &&
+        ctx->capStartEnabled &&
+        segmentId == ctx->capStartSegId)
+    {
+        const u32 *capStartStrip = select_base_strip(
+            layout->tilesetCapStartBySegment[segmentId],
+            layout->gainTilesetCapStartBySegment[segmentId],
+            ctx->trailMode);
+
+        if (capStartStrip)
+        {
+            const u32 *capStartBreakStrip = select_base_strip(
+                layout->tilesetCapStartBreakBySegment[segmentId],
+                layout->gainTilesetCapStartBreakBySegment[segmentId],
+                ctx->trailMode);
+            const u32 *capStartTrailStrip = select_base_strip(
+                layout->tilesetCapStartTrailBySegment[segmentId],
+                layout->gainTilesetCapStartTrailBySegment[segmentId],
+                ctx->trailMode);
+            const u32 *capStartBlinkStrip = select_blink_strip(
+                layout->blinkOffTilesetCapStartBySegment[segmentId],
+                layout->gainBlinkOffTilesetCapStartBySegment[segmentId],
+                ctx->trailMode);
+            const u32 *capStartBlinkBreakStrip = select_blink_strip(
+                layout->blinkOffTilesetCapStartBreakBySegment[segmentId],
+                layout->gainBlinkOffTilesetCapStartBreakBySegment[segmentId],
+                ctx->trailMode);
+            const u32 *capStartBlinkTrailStrip = select_blink_strip(
+                layout->blinkOffTilesetCapStartTrailBySegment[segmentId],
+                layout->gainBlinkOffTilesetCapStartTrailBySegment[segmentId],
+                ctx->trailMode);
+
+            CapStartResult capResult;
+            if (ctx->blinkOffActive)
+            {
+                CapStartResult capActual;
+                classify_cap_start_with_strips(&ctx->breakInfoActual,
+                                               cellFillIndex,
+                                               capStartStrip,
+                                               capStartBreakStrip,
+                                               capStartTrailStrip,
+                                               &capActual);
+
+                const u8 inTrailZone = is_cell_in_trail_zone(&ctx->breakInfoActual,
+                                                              cellFillIndex);
+                const u32 *blinkStrip = NULL;
+
+                if (inTrailZone)
+                {
+                    if (capActual.usesTrail)
+                        blinkStrip = capStartBlinkTrailStrip;
+                    else if (capActual.usesBreak)
+                        blinkStrip = capStartBlinkBreakStrip;
+                    else
+                        blinkStrip = capStartBlinkStrip;
+                }
+
+                if (blinkStrip)
+                {
+                    capActual.strip = blinkStrip;
+                    capResult = capActual;
+                }
+                else
+                {
+                    classify_cap_start_with_strips(&ctx->breakInfo,
+                                                   cellFillIndex,
+                                                   capStartStrip,
+                                                   capStartBreakStrip,
+                                                   capStartTrailStrip,
+                                                   &capResult);
+                }
+            }
+            else
+            {
+                classify_cap_start_with_strips(&ctx->breakInfo,
+                                               cellFillIndex,
+                                               capStartStrip,
+                                               capStartBreakStrip,
+                                               capStartTrailStrip,
+                                               &capResult);
+            }
+
+            out->type = CELL_DECISION_CAP_START;
+            out->strip = capResult.strip;
+            out->fillStripIndex = capResult.fillStripIndex;
+            out->capStartUsesBreak = capResult.usesBreak;
+            out->capStartUsesTrail = capResult.usesTrail;
+            return;
+        }
+        /* capStartStrip == NULL: fall through to normal cell handling */
+    }
+
+    /* === Bridge/BREAK forced rendering (D/B before gauge END) ===
+     * Bridge cells sit at segment boundaries. When the gauge's value/trail
+     * edge is past this cell, the bridge shows a transition tile.
+     * breakInfoActual uses trailPixelsActual (ignoring blink) so bridges don't
+     * flicker during blink phase. */
+    if (ctx->breakInfoActual.endFillIndex != CACHE_INVALID_U8)
+    {
+        /* Bridge end cell: last cell of a segment with a bridge tileset */
+        if (layout->bridgeEndByFillIndex[cellFillIndex] &&
+            ctx->breakInfoActual.endFillIndex > cellFillIndex &&
+            ctx->breakInfoActual.valueFillIndex > cellFillIndex)
+        {
+            const u8 nextFillIndex = (u8)(cellFillIndex + 1);
+            const u8 bridgeInTrailZone = is_cell_in_trail_zone(
+                &ctx->breakInfoActual, nextFillIndex);
+
+            const u32 *bridgeStrip = select_base_strip(
+                layout->tilesetBridgeBySegment[segmentId],
+                layout->gainTilesetBridgeBySegment[segmentId],
+                ctx->trailMode);
+
+            if (bridgeStrip)
+            {
+                const u32 *blinkOffBridgeStrip = select_blink_strip(
+                    layout->blinkOffTilesetBridgeBySegment[segmentId],
+                    layout->gainBlinkOffTilesetBridgeBySegment[segmentId],
+                    ctx->trailMode);
+
+                const u8 useBlinkOffBridge = (ctx->blinkOffActive &&
+                                              blinkOffBridgeStrip &&
+                                              bridgeInTrailZone);
+                const GaugeBreakInfo *bridgeBreakInfo = useBlinkOffBridge
+                    ? &ctx->breakInfoActual : &ctx->breakInfo;
+                const u16 bridgeTrailPixels = useBlinkOffBridge
+                    ? ctx->trailPixelsActual : ctx->trailPixelsRendered;
+                const u32 *bridgeStripUse = useBlinkOffBridge
+                    ? blinkOffBridgeStrip : bridgeStrip;
+                const u8 bridgeIdx = compute_bridge_strip_index(
+                    layout, bridgeBreakInfo, cellFillIndex,
+                    ctx->valuePixels, bridgeTrailPixels);
+
+                out->type = CELL_DECISION_BRIDGE;
+                out->strip = bridgeStripUse;
+                out->fillStripIndex = bridgeIdx;
+            }
+            else
+            {
+                /* No bridge tileset: fall back to body strip, fully filled.
+                 * Fixed mode renders this; dynamic mode skips via vramTileBridge==0. */
+                const u32 *fallbackStrip = bodyStrip;
+                if (ctx->blinkOffActive && blinkOffBodyStrip && bridgeInTrailZone)
+                    fallbackStrip = blinkOffBodyStrip;
+
+                out->type = CELL_DECISION_BRIDGE;
+                out->strip = fallbackStrip;
+                out->fillStripIndex = STRIP_INDEX_FULL;
+            }
+            return;
+        }
+
+        /* Forced BREAK cell: cell before a bridge that must show as fully filled */
+        if (layout->bridgeBreakByFillIndex[cellFillIndex])
+        {
+            const u8 boundaryFillIndex = layout->bridgeBreakBoundaryByFillIndex[cellFillIndex];
+            if (ctx->breakInfoActual.endFillIndex > boundaryFillIndex &&
+                ctx->breakInfoActual.valueFillIndex > boundaryFillIndex)
+            {
+                const u32 *breakStripUse = bodyStrip;
+                if (ctx->blinkOffActive && blinkOffBodyStrip &&
+                    is_cell_in_trail_zone(&ctx->breakInfoActual, cellFillIndex))
+                {
+                    breakStripUse = blinkOffBodyStrip;
+                }
+                out->type = CELL_DECISION_STANDARD_FULL;
+                out->strip = breakStripUse;
+                out->fillStripIndex = STRIP_INDEX_FULL;
+                return;
+            }
+        }
+    }
+
+    /* === Early-exit: trivial cells (FULL or EMPTY) ===
+     * ~70-80% of cells hit this path, skipping the full classification below.
+     * Blink-off needs per-cell classification for mixed segments. */
+    if (!ctx->blinkOffActive)
+    {
+        if (cellFillIndex < ctx->breakLow)
+        {
+            out->type = CELL_DECISION_STANDARD_FULL;
+            out->strip = bodyStrip;
+            out->fillStripIndex = STRIP_INDEX_FULL;
+            return;
+        }
+        if (cellFillIndex > ctx->breakHigh)
+        {
+            out->type = CELL_DECISION_STANDARD_EMPTY;
+            out->strip = bodyStrip;
+            out->fillStripIndex = STRIP_INDEX_EMPTY;
+            return;
+        }
+    }
+
+    /* === Break zone: full classification needed ===
+     * Lazy strip computation: only break-zone cells (~20-30%) need these.
+     * bodyStrip is provided by the caller; blink-off body strip is selected here. */
+    const u32 *endStrip = select_base_strip(
+        layout->tilesetEndBySegment[segmentId],
+        layout->gainTilesetEndBySegment[segmentId],
+        ctx->trailMode);
+    const u32 *trailStrip = select_base_strip(
+        layout->tilesetTrailBySegment[segmentId],
+        layout->gainTilesetTrailBySegment[segmentId],
+        ctx->trailMode);
+    const u32 *blinkOffEndStrip = select_blink_strip(
+        layout->blinkOffTilesetEndBySegment[segmentId],
+        layout->gainBlinkOffTilesetEndBySegment[segmentId],
+        ctx->trailMode);
+    const u32 *blinkOffTrailStrip = select_blink_strip(
+        layout->blinkOffTilesetTrailBySegment[segmentId],
+        layout->gainBlinkOffTilesetTrailBySegment[segmentId],
+        ctx->trailMode);
+
+    /* Mutable copies for blink-off override */
+    const u32 *bodyStripUse = bodyStrip;
+    const u32 *endStripUse = endStrip;
+    const u32 *trailStripUse = trailStrip;
+
+    const GaugeBreakInfo *breakInfoUsed = &ctx->breakInfo;
+    u16 trailPixelsUse = ctx->trailPixelsRendered;
+    u8 useBlinkOff = 0;
+
+    if (ctx->blinkOffActive)
+    {
+        useBlinkOff = apply_blink_off_overrides(
+            &ctx->breakInfoActual, cellFillIndex,
+            blinkOffEndStrip, blinkOffTrailStrip, blinkOffBodyStrip,
+            &endStripUse, &trailStripUse, &bodyStripUse);
+        if (useBlinkOff)
+        {
+            breakInfoUsed = &ctx->breakInfoActual;
+            trailPixelsUse = ctx->trailPixelsActual;
+        }
+    }
+
+    /* Trail strip with body fallback (defensive, matches dynamic mode) */
+    const u32 *trailStripFinal = trailStripUse ? trailStripUse : bodyStripUse;
+    /* NOTE: full-trail index depends on the strip type:
+     * - TRAIL strip uses s_trailTileIndexByValueTrail[0][8] (index 7)
+     * - BODY strip uses STRIP_INDEX_FULL_TRAIL (index 8)
+     * This keeps FIXED and DYNAMIC behavior consistent when no trail strip exists. */
+    const u8 fullTrailIndex = (trailStripUse != NULL)
+        ? s_trailTileIndexByValueTrail[0][8]
+        : STRIP_INDEX_FULL_TRAIL;
+
+    const CellBreakType cellType = classify_break_zone_cell(
+        breakInfoUsed, cellFillIndex,
+        (endStripUse != NULL), (trailStripUse != NULL));
+
+    switch (cellType)
+    {
+    case CELL_TYPE_END:
+        out->type = CELL_DECISION_PARTIAL_END;
+        out->strip = endStripUse;
+        out->fillStripIndex = s_tileIndexByValueTrail
+            [breakInfoUsed->endValuePxInTile][breakInfoUsed->endTrailPxInTile];
+        return;
+
+    case CELL_TYPE_TRAIL_BREAK:
+        out->type = CELL_DECISION_PARTIAL_TRAIL;
+        out->strip = trailStripFinal;
+        out->fillStripIndex = breakInfoUsed->trailBreakSecondActive
+            ? s_trailTileIndexByValueTrail[breakInfoUsed->valuePxInBreakCell][8]
+            : s_trailTileIndexByValueTrail[breakInfoUsed->valuePxInBreakCell]
+                                          [breakInfoUsed->trailPxInBreakCell];
+        return;
+
+    case CELL_TYPE_TRAIL_BREAK2:
+    {
+        out->type = CELL_DECISION_PARTIAL_TRAIL2;
+        out->strip = trailStripFinal;
+        const u8 endIndex = s_tileIndexByValueTrail
+            [breakInfoUsed->endValuePxInTile][breakInfoUsed->endTrailPxInTile];
+        out->fillStripIndex = (endIndex == 8)
+            ? s_trailTileIndexByValueTrail[0][endIndex]
+            : endIndex;
+        return;
+    }
+
+    case CELL_TYPE_TRAIL_FULL:
+        out->type = CELL_DECISION_STANDARD_TRAIL;
+        out->strip = trailStripFinal;
+        out->fillStripIndex = fullTrailIndex;
+        return;
+
+    case CELL_TYPE_VALUE_BREAK:
+        out->type = CELL_DECISION_PARTIAL_VALUE;
+        out->strip = bodyStripUse;
+        out->fillStripIndex = breakInfoUsed->trailBreakActive
+            ? breakInfoUsed->valuePxInBreakCell
+            : s_tileIndexByValueTrail[breakInfoUsed->endValuePxInTile]
+                                     [breakInfoUsed->endTrailPxInTile];
+        return;
+
+    case CELL_TYPE_REGION_FULL:
+        out->type = CELL_DECISION_STANDARD_FULL;
+        out->strip = bodyStripUse;
+        out->fillStripIndex = STRIP_INDEX_FULL;
+        return;
+
+    case CELL_TYPE_REGION_EMPTY:
+        out->type = CELL_DECISION_STANDARD_EMPTY;
+        out->strip = bodyStripUse;
+        out->fillStripIndex = STRIP_INDEX_EMPTY;
+        return;
+
+    case CELL_TYPE_REGION_TRAIL:
+        out->type = CELL_DECISION_STANDARD_TRAIL;
+        out->strip = trailStripFinal;
+        out->fillStripIndex = fullTrailIndex;
+        return;
+
+    case CELL_TYPE_DEFAULT:
+    {
+        /* Sub-routing by cell position relative to value/trail edges.
+         * Standard cells use shortcuts; partial cells need fill computation. */
+        const u32 *defaultStrip = bodyStripUse;
+
+        /* endStrip override: if this cell is the END cell, use endStrip */
+        if (breakInfoUsed->endFillIndex != CACHE_INVALID_U8 &&
+            cellFillIndex == breakInfoUsed->endFillIndex &&
+            endStripUse)
+        {
+            defaultStrip = endStripUse;
+        }
+
+        if (cellFillIndex < breakInfoUsed->valueFillIndex)
+        {
+            out->type = CELL_DECISION_STANDARD_FULL;
+            out->strip = defaultStrip;
+            out->fillStripIndex = STRIP_INDEX_FULL;
+        }
+        else if (cellFillIndex > breakInfoUsed->valueFillIndex &&
+                 cellFillIndex < breakInfoUsed->trailFillIndex)
+        {
+            out->type = CELL_DECISION_STANDARD_TRAIL;
+            out->strip = trailStripFinal;
+            out->fillStripIndex = fullTrailIndex;
+        }
+        else if (cellFillIndex > breakInfoUsed->trailFillIndex)
+        {
+            out->type = CELL_DECISION_STANDARD_EMPTY;
+            out->strip = defaultStrip;
+            out->fillStripIndex = STRIP_INDEX_EMPTY;
+        }
+        else
+        {
+            /* Partial cell: compute exact pixel fill */
+            u8 valuePxInTile = 0;
+            u8 trailPxInTile = 0;
+            compute_fill_for_cell(layout, cellIndex,
+                                  ctx->valuePixels, trailPixelsUse,
+                                  &valuePxInTile, &trailPxInTile);
+
+            if (cellFillIndex == breakInfoUsed->valueFillIndex &&
+                cellFillIndex == breakInfoUsed->trailFillIndex)
+            {
+                /* Both value and trail edges in same cell */
+                out->type = CELL_DECISION_PARTIAL_VALUE;
+                out->strip = defaultStrip;
+                out->fillStripIndex = s_tileIndexByValueTrail[valuePxInTile][trailPxInTile];
+            }
+            else if (cellFillIndex == breakInfoUsed->valueFillIndex)
+            {
+                /* Value edge cell (trail is full = 8) */
+                out->type = CELL_DECISION_PARTIAL_VALUE;
+                out->strip = defaultStrip;
+                out->fillStripIndex = s_tileIndexByValueTrail[valuePxInTile][trailPxInTile];
+            }
+            else
+            {
+                /* Trail edge cell (value is 0) */
+                out->type = CELL_DECISION_PARTIAL_TRAIL;
+                out->strip = defaultStrip;
+                out->fillStripIndex = s_tileIndexByValueTrail[valuePxInTile][trailPxInTile];
+            }
+        }
+        return;
+    }
+    }
+
+    /* Fallback (should never be reached) */
+    out->type = CELL_DECISION_STANDARD_EMPTY;
+    out->strip = bodyStripUse;
+    out->fillStripIndex = STRIP_INDEX_EMPTY;
+}
+
+
 /**
  * Upload a tile from a ROM strip to VRAM if not already cached (fixed mode).
  *
@@ -2251,6 +2923,317 @@ void GaugeLayout_setPipStyles(GaugeLayout *layout,
     build_pip_luts(layout);
 }
 
+/* =============================================================================
+   GaugeLayout_build sub-functions
+   ============================================================================= */
+
+/**
+ * Usage flags for one tileset context (base/gain/blinkOff/gainBlinkOff).
+ * Each flag is 1 if any segment provides that tileset, 0 otherwise.
+ */
+typedef struct
+{
+    u8 body;
+    u8 end;
+    u8 trail;
+    u8 bridge;
+    u8 capStart;
+    u8 capEnd;
+    u8 capStartBreak;
+    u8 capStartTrail;
+} SkinSetUsageFlags;
+
+/**
+ * Combined usage flags across all 4 tileset contexts.
+ */
+typedef struct
+{
+    SkinSetUsageFlags base;      /* base.body is unused (always required) */
+    SkinSetUsageFlags gain;
+    SkinSetUsageFlags blinkOff;
+    SkinSetUsageFlags gainBlinkOff;
+    u8 capEndFlags;              /* 1 if any segment sets capEndEnabled */
+} SegmentStyleUsageFlags;
+
+/**
+ * Scan helper: OR-combine a SkinSet's non-NULL pointers into usage flags.
+ */
+static inline void scan_skin_set(const GaugeSkinSet *skin, SkinSetUsageFlags *f)
+{
+    f->body |= (skin->body != NULL);
+    f->end |= (skin->end != NULL);
+    f->trail |= (skin->trail != NULL);
+    f->bridge |= (skin->bridge != NULL);
+    f->capStart |= (skin->capStart != NULL);
+    f->capEnd |= (skin->capEnd != NULL);
+    f->capStartBreak |= (skin->capStartBreak != NULL);
+    f->capStartTrail |= (skin->capStartTrail != NULL);
+}
+
+/**
+ * Scan all segment styles and collect usage flags.
+ *
+ * For each tileset context (base/gain/blinkOff/gainBlinkOff), determines which
+ * tileset types are used by at least one segment. This drives lazy allocation:
+ * arrays are only allocated for tileset types that actually appear.
+ *
+ * @param styles        Segment style array (one per segment)
+ * @param segmentCount  Number of segments
+ * @param out           [out] Collected usage flags (zero-initialized internally)
+ */
+static void scan_segment_style_usage(const GaugeSegmentStyle *styles,
+                                     u8 segmentCount,
+                                     SegmentStyleUsageFlags *out)
+{
+    memset(out, 0, sizeof(*out));
+    for (u8 i = 0; i < segmentCount; i++)
+    {
+        const GaugeSegmentStyle *style = &styles[i];
+        scan_skin_set(&style->base, &out->base);
+        scan_skin_set(&style->gain, &out->gain);
+        scan_skin_set(&style->blinkOff, &out->blinkOff);
+        scan_skin_set(&style->gainBlinkOff, &out->gainBlinkOff);
+        out->capEndFlags |= (style->capEndEnabled != 0);
+    }
+}
+
+/**
+ * Sync base tileset allocations (end/trail/bridge/caps + capEnd flags).
+ *
+ * base.body is always required and handled by GaugeLayout_initEx, so
+ * only the 7 optional tilesets + capEnd flag array are synced here.
+ */
+static void sync_base_allocations(GaugeLayout *layout,
+                                  const SkinSetUsageFlags *f,
+                                  u8 hasCapEndFlags)
+{
+    const u8 sc = layout->segmentCount;
+    layout_sync_optional_segment_tilesets_by_usage(f->end,
+        &layout->tilesetEndBySegment, sc, "Gauge build base END alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->trail,
+        &layout->tilesetTrailBySegment, sc, "Gauge build base TRAIL alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->bridge,
+        &layout->tilesetBridgeBySegment, sc, "Gauge build base BRIDGE alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->capStart,
+        &layout->tilesetCapStartBySegment, sc, "Gauge build base CAP START alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->capEnd,
+        &layout->tilesetCapEndBySegment, sc, "Gauge build base CAP END alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->capStartBreak,
+        &layout->tilesetCapStartBreakBySegment, sc, "Gauge build base CAP START BREAK alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->capStartTrail,
+        &layout->tilesetCapStartTrailBySegment, sc, "Gauge build base CAP START TRAIL alloc failed");
+    layout_sync_optional_segment_flags_by_usage(hasCapEndFlags,
+        &layout->capEndBySegment, sc, s_zeroSegmentFlags, 0,
+        "Gauge build capEnd flags alloc failed");
+}
+
+/**
+ * Sync gain tileset allocations (body + 7 optional tilesets).
+ */
+static void sync_gain_allocations(GaugeLayout *layout,
+                                  const SkinSetUsageFlags *f)
+{
+    const u8 sc = layout->segmentCount;
+    layout_sync_optional_segment_tilesets_by_usage(f->body,
+        &layout->gainTilesetBySegment, sc, "Gauge build gain BODY alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->end,
+        &layout->gainTilesetEndBySegment, sc, "Gauge build gain END alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->trail,
+        &layout->gainTilesetTrailBySegment, sc, "Gauge build gain TRAIL alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->bridge,
+        &layout->gainTilesetBridgeBySegment, sc, "Gauge build gain BRIDGE alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->capStart,
+        &layout->gainTilesetCapStartBySegment, sc, "Gauge build gain CAP START alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->capEnd,
+        &layout->gainTilesetCapEndBySegment, sc, "Gauge build gain CAP END alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->capStartBreak,
+        &layout->gainTilesetCapStartBreakBySegment, sc, "Gauge build gain CAP START BREAK alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->capStartTrail,
+        &layout->gainTilesetCapStartTrailBySegment, sc, "Gauge build gain CAP START TRAIL alloc failed");
+}
+
+/**
+ * Sync blink-off tileset allocations (body + 7 optional tilesets).
+ */
+static void sync_blink_allocations(GaugeLayout *layout,
+                                   const SkinSetUsageFlags *f)
+{
+    const u8 sc = layout->segmentCount;
+    layout_sync_optional_segment_tilesets_by_usage(f->body,
+        &layout->blinkOffTilesetBySegment, sc, "Gauge build blink BODY alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->end,
+        &layout->blinkOffTilesetEndBySegment, sc, "Gauge build blink END alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->trail,
+        &layout->blinkOffTilesetTrailBySegment, sc, "Gauge build blink TRAIL alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->bridge,
+        &layout->blinkOffTilesetBridgeBySegment, sc, "Gauge build blink BRIDGE alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->capStart,
+        &layout->blinkOffTilesetCapStartBySegment, sc, "Gauge build blink CAP START alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->capEnd,
+        &layout->blinkOffTilesetCapEndBySegment, sc, "Gauge build blink CAP END alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->capStartBreak,
+        &layout->blinkOffTilesetCapStartBreakBySegment, sc, "Gauge build blink CAP START BREAK alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->capStartTrail,
+        &layout->blinkOffTilesetCapStartTrailBySegment, sc, "Gauge build blink CAP START TRAIL alloc failed");
+}
+
+/**
+ * Sync gain blink-off tileset allocations (body + 7 optional tilesets).
+ */
+static void sync_gain_blink_allocations(GaugeLayout *layout,
+                                        const SkinSetUsageFlags *f)
+{
+    const u8 sc = layout->segmentCount;
+    layout_sync_optional_segment_tilesets_by_usage(f->body,
+        &layout->gainBlinkOffTilesetBySegment, sc, "Gauge build gain blink BODY alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->end,
+        &layout->gainBlinkOffTilesetEndBySegment, sc, "Gauge build gain blink END alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->trail,
+        &layout->gainBlinkOffTilesetTrailBySegment, sc, "Gauge build gain blink TRAIL alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->bridge,
+        &layout->gainBlinkOffTilesetBridgeBySegment, sc, "Gauge build gain blink BRIDGE alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->capStart,
+        &layout->gainBlinkOffTilesetCapStartBySegment, sc, "Gauge build gain blink CAP START alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->capEnd,
+        &layout->gainBlinkOffTilesetCapEndBySegment, sc, "Gauge build gain blink CAP END alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->capStartBreak,
+        &layout->gainBlinkOffTilesetCapStartBreakBySegment, sc, "Gauge build gain blink CAP START BREAK alloc failed");
+    layout_sync_optional_segment_tilesets_by_usage(f->capStartTrail,
+        &layout->gainBlinkOffTilesetCapStartTrailBySegment, sc, "Gauge build gain blink CAP START TRAIL alloc failed");
+}
+
+/**
+ * Populate base tilesets from segment styles into layout arrays.
+ *
+ * body is always assigned. Optional arrays are only written when allocated
+ * (checked via != s_nullSegmentTilesets / s_zeroSegmentFlags sentinel).
+ */
+static void populate_base_tilesets(GaugeLayout *layout,
+                                   const GaugeSegmentStyle *styles)
+{
+    for (u8 s = 0; s < layout->segmentCount; s++)
+    {
+        const GaugeSkinSet *skin = &styles[s].base;
+        layout->tilesetBySegment[s] = skin->body;
+        if (layout->tilesetEndBySegment != s_nullSegmentTilesets)
+            layout->tilesetEndBySegment[s] = skin->end;
+        if (layout->tilesetTrailBySegment != s_nullSegmentTilesets)
+            layout->tilesetTrailBySegment[s] = skin->trail;
+        if (layout->tilesetBridgeBySegment != s_nullSegmentTilesets)
+            layout->tilesetBridgeBySegment[s] = skin->bridge;
+        if (layout->tilesetCapStartBySegment != s_nullSegmentTilesets)
+            layout->tilesetCapStartBySegment[s] = skin->capStart;
+        if (layout->tilesetCapEndBySegment != s_nullSegmentTilesets)
+            layout->tilesetCapEndBySegment[s] = skin->capEnd;
+        if (layout->tilesetCapStartBreakBySegment != s_nullSegmentTilesets)
+            layout->tilesetCapStartBreakBySegment[s] = skin->capStartBreak;
+        if (layout->tilesetCapStartTrailBySegment != s_nullSegmentTilesets)
+            layout->tilesetCapStartTrailBySegment[s] = skin->capStartTrail;
+        if (layout->capEndBySegment != s_zeroSegmentFlags)
+            layout->capEndBySegment[s] = styles[s].capEndEnabled ? 1 : 0;
+    }
+}
+
+/**
+ * Populate gain tilesets from segment styles into layout arrays.
+ */
+static void populate_gain_tilesets(GaugeLayout *layout,
+                                   const GaugeSegmentStyle *styles)
+{
+    for (u8 s = 0; s < layout->segmentCount; s++)
+    {
+        const GaugeSkinSet *skin = &styles[s].gain;
+        if (layout->gainTilesetBySegment != s_nullSegmentTilesets)
+            layout->gainTilesetBySegment[s] = skin->body;
+        if (layout->gainTilesetEndBySegment != s_nullSegmentTilesets)
+            layout->gainTilesetEndBySegment[s] = skin->end;
+        if (layout->gainTilesetTrailBySegment != s_nullSegmentTilesets)
+            layout->gainTilesetTrailBySegment[s] = skin->trail;
+        if (layout->gainTilesetBridgeBySegment != s_nullSegmentTilesets)
+            layout->gainTilesetBridgeBySegment[s] = skin->bridge;
+        if (layout->gainTilesetCapStartBySegment != s_nullSegmentTilesets)
+            layout->gainTilesetCapStartBySegment[s] = skin->capStart;
+        if (layout->gainTilesetCapEndBySegment != s_nullSegmentTilesets)
+            layout->gainTilesetCapEndBySegment[s] = skin->capEnd;
+        if (layout->gainTilesetCapStartBreakBySegment != s_nullSegmentTilesets)
+            layout->gainTilesetCapStartBreakBySegment[s] = skin->capStartBreak;
+        if (layout->gainTilesetCapStartTrailBySegment != s_nullSegmentTilesets)
+            layout->gainTilesetCapStartTrailBySegment[s] = skin->capStartTrail;
+    }
+}
+
+/**
+ * Populate blink-off tilesets from segment styles into layout arrays.
+ */
+static void populate_blink_tilesets(GaugeLayout *layout,
+                                    const GaugeSegmentStyle *styles)
+{
+    for (u8 s = 0; s < layout->segmentCount; s++)
+    {
+        const GaugeSkinSet *skin = &styles[s].blinkOff;
+        if (layout->blinkOffTilesetBySegment != s_nullSegmentTilesets)
+            layout->blinkOffTilesetBySegment[s] = skin->body;
+        if (layout->blinkOffTilesetEndBySegment != s_nullSegmentTilesets)
+            layout->blinkOffTilesetEndBySegment[s] = skin->end;
+        if (layout->blinkOffTilesetTrailBySegment != s_nullSegmentTilesets)
+            layout->blinkOffTilesetTrailBySegment[s] = skin->trail;
+        if (layout->blinkOffTilesetBridgeBySegment != s_nullSegmentTilesets)
+            layout->blinkOffTilesetBridgeBySegment[s] = skin->bridge;
+        if (layout->blinkOffTilesetCapStartBySegment != s_nullSegmentTilesets)
+            layout->blinkOffTilesetCapStartBySegment[s] = skin->capStart;
+        if (layout->blinkOffTilesetCapEndBySegment != s_nullSegmentTilesets)
+            layout->blinkOffTilesetCapEndBySegment[s] = skin->capEnd;
+        if (layout->blinkOffTilesetCapStartBreakBySegment != s_nullSegmentTilesets)
+            layout->blinkOffTilesetCapStartBreakBySegment[s] = skin->capStartBreak;
+        if (layout->blinkOffTilesetCapStartTrailBySegment != s_nullSegmentTilesets)
+            layout->blinkOffTilesetCapStartTrailBySegment[s] = skin->capStartTrail;
+    }
+}
+
+/**
+ * Populate gain blink-off tilesets from segment styles into layout arrays.
+ */
+static void populate_gain_blink_tilesets(GaugeLayout *layout,
+                                         const GaugeSegmentStyle *styles)
+{
+    for (u8 s = 0; s < layout->segmentCount; s++)
+    {
+        const GaugeSkinSet *skin = &styles[s].gainBlinkOff;
+        if (layout->gainBlinkOffTilesetBySegment != s_nullSegmentTilesets)
+            layout->gainBlinkOffTilesetBySegment[s] = skin->body;
+        if (layout->gainBlinkOffTilesetEndBySegment != s_nullSegmentTilesets)
+            layout->gainBlinkOffTilesetEndBySegment[s] = skin->end;
+        if (layout->gainBlinkOffTilesetTrailBySegment != s_nullSegmentTilesets)
+            layout->gainBlinkOffTilesetTrailBySegment[s] = skin->trail;
+        if (layout->gainBlinkOffTilesetBridgeBySegment != s_nullSegmentTilesets)
+            layout->gainBlinkOffTilesetBridgeBySegment[s] = skin->bridge;
+        if (layout->gainBlinkOffTilesetCapStartBySegment != s_nullSegmentTilesets)
+            layout->gainBlinkOffTilesetCapStartBySegment[s] = skin->capStart;
+        if (layout->gainBlinkOffTilesetCapEndBySegment != s_nullSegmentTilesets)
+            layout->gainBlinkOffTilesetCapEndBySegment[s] = skin->capEnd;
+        if (layout->gainBlinkOffTilesetCapStartBreakBySegment != s_nullSegmentTilesets)
+            layout->gainBlinkOffTilesetCapStartBreakBySegment[s] = skin->capStartBreak;
+        if (layout->gainBlinkOffTilesetCapStartTrailBySegment != s_nullSegmentTilesets)
+            layout->gainBlinkOffTilesetCapStartTrailBySegment[s] = skin->capStartTrail;
+    }
+}
+
+/**
+ * Compute all derived layout state after tilesets are populated.
+ *
+ * Caches blink-off presence flags, detects cap configuration,
+ * builds bridge LUTs and pip LUTs.
+ */
+static void finalize_layout_derived_state(GaugeLayout *layout)
+{
+    layout->hasBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_DAMAGE);
+    layout->hasGainBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_GAIN);
+    detect_caps_enabled(layout, &layout->capStartEnabled, &layout->capEndEnabled);
+    build_bridge_luts(layout);
+    build_pip_luts(layout);
+}
+
+
 /**
  * Build a layout from a GaugeLayoutInit config (preferred one-call API).
  *
@@ -2263,7 +3246,6 @@ void GaugeLayout_build(GaugeLayout *layout, const GaugeLayoutInit *init)
     if (!layout || !init)
         return;
 
-    /* Initialize geometry/visual properties first. */
     GaugeLayout_initEx(layout,
                        init->length,
                        init->fillDirection,
@@ -2275,303 +3257,23 @@ void GaugeLayout_build(GaugeLayout *layout, const GaugeLayoutInit *init)
                        init->verticalFlip,
                        init->horizontalFlip);
 
-    /* Apply segment styles directly with lazy optional allocations. */
     if (init->segmentStyles)
     {
-        u8 hasBaseEnd = 0;
-        u8 hasBaseTrail = 0;
-        u8 hasBaseBridge = 0;
-        u8 hasCapStart = 0;
-        u8 hasCapEnd = 0;
-        u8 hasCapStartBreak = 0;
-        u8 hasCapStartTrail = 0;
-        u8 hasCapEndFlags = 0;
+        SegmentStyleUsageFlags flags;
+        scan_segment_style_usage(init->segmentStyles, layout->segmentCount, &flags);
 
-        u8 hasGainBody = 0;
-        u8 hasGainEnd = 0;
-        u8 hasGainTrail = 0;
-        u8 hasGainBridge = 0;
-        u8 hasGainCapStart = 0;
-        u8 hasGainCapEnd = 0;
-        u8 hasGainCapStartBreak = 0;
-        u8 hasGainCapStartTrail = 0;
+        sync_base_allocations(layout, &flags.base, flags.capEndFlags);
+        sync_gain_allocations(layout, &flags.gain);
+        sync_blink_allocations(layout, &flags.blinkOff);
+        sync_gain_blink_allocations(layout, &flags.gainBlinkOff);
 
-        u8 hasBlinkBody = 0;
-        u8 hasBlinkEnd = 0;
-        u8 hasBlinkTrail = 0;
-        u8 hasBlinkBridge = 0;
-        u8 hasBlinkCapStart = 0;
-        u8 hasBlinkCapEnd = 0;
-        u8 hasBlinkCapStartBreak = 0;
-        u8 hasBlinkCapStartTrail = 0;
-
-        u8 hasGainBlinkBody = 0;
-        u8 hasGainBlinkEnd = 0;
-        u8 hasGainBlinkTrail = 0;
-        u8 hasGainBlinkBridge = 0;
-        u8 hasGainBlinkCapStart = 0;
-        u8 hasGainBlinkCapEnd = 0;
-        u8 hasGainBlinkCapStartBreak = 0;
-        u8 hasGainBlinkCapStartTrail = 0;
-
-        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-        {
-            const GaugeSegmentStyle *style = &init->segmentStyles[segmentId];
-            hasBaseEnd |= (style->base.end != NULL);
-            hasBaseTrail |= (style->base.trail != NULL);
-            hasBaseBridge |= (style->base.bridge != NULL);
-            hasCapStart |= (style->base.capStart != NULL);
-            hasCapEnd |= (style->base.capEnd != NULL);
-            hasCapStartBreak |= (style->base.capStartBreak != NULL);
-            hasCapStartTrail |= (style->base.capStartTrail != NULL);
-            hasCapEndFlags |= (style->capEndEnabled != 0);
-
-            hasGainBody |= (style->gain.body != NULL);
-            hasGainEnd |= (style->gain.end != NULL);
-            hasGainTrail |= (style->gain.trail != NULL);
-            hasGainBridge |= (style->gain.bridge != NULL);
-            hasGainCapStart |= (style->gain.capStart != NULL);
-            hasGainCapEnd |= (style->gain.capEnd != NULL);
-            hasGainCapStartBreak |= (style->gain.capStartBreak != NULL);
-            hasGainCapStartTrail |= (style->gain.capStartTrail != NULL);
-
-            hasBlinkBody |= (style->blinkOff.body != NULL);
-            hasBlinkEnd |= (style->blinkOff.end != NULL);
-            hasBlinkTrail |= (style->blinkOff.trail != NULL);
-            hasBlinkBridge |= (style->blinkOff.bridge != NULL);
-            hasBlinkCapStart |= (style->blinkOff.capStart != NULL);
-            hasBlinkCapEnd |= (style->blinkOff.capEnd != NULL);
-            hasBlinkCapStartBreak |= (style->blinkOff.capStartBreak != NULL);
-            hasBlinkCapStartTrail |= (style->blinkOff.capStartTrail != NULL);
-
-            hasGainBlinkBody |= (style->gainBlinkOff.body != NULL);
-            hasGainBlinkEnd |= (style->gainBlinkOff.end != NULL);
-            hasGainBlinkTrail |= (style->gainBlinkOff.trail != NULL);
-            hasGainBlinkBridge |= (style->gainBlinkOff.bridge != NULL);
-            hasGainBlinkCapStart |= (style->gainBlinkOff.capStart != NULL);
-            hasGainBlinkCapEnd |= (style->gainBlinkOff.capEnd != NULL);
-            hasGainBlinkCapStartBreak |= (style->gainBlinkOff.capStartBreak != NULL);
-            hasGainBlinkCapStartTrail |= (style->gainBlinkOff.capStartTrail != NULL);
-        }
-
-        layout_sync_optional_segment_tilesets_by_usage(hasBaseEnd,
-                                                       &layout->tilesetEndBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build base END alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasBaseTrail,
-                                                       &layout->tilesetTrailBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build base TRAIL alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasBaseBridge,
-                                                       &layout->tilesetBridgeBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build base BRIDGE alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasCapStart,
-                                                       &layout->tilesetCapStartBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build base CAP START alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasCapEnd,
-                                                       &layout->tilesetCapEndBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build base CAP END alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasCapStartBreak,
-                                                       &layout->tilesetCapStartBreakBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build base CAP START BREAK alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasCapStartTrail,
-                                                       &layout->tilesetCapStartTrailBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build base CAP START TRAIL alloc failed");
-        layout_sync_optional_segment_flags_by_usage(hasCapEndFlags,
-                                                    &layout->capEndBySegment,
-                                                    layout->segmentCount,
-                                                    s_zeroSegmentFlags,
-                                                    0,
-                                                    "Gauge build capEnd flags alloc failed");
-
-        layout_sync_optional_segment_tilesets_by_usage(hasGainBody,
-                                                       &layout->gainTilesetBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build gain BODY alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasGainEnd,
-                                                       &layout->gainTilesetEndBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build gain END alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasGainTrail,
-                                                       &layout->gainTilesetTrailBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build gain TRAIL alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasGainBridge,
-                                                       &layout->gainTilesetBridgeBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build gain BRIDGE alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasGainCapStart,
-                                                       &layout->gainTilesetCapStartBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build gain CAP START alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasGainCapEnd,
-                                                       &layout->gainTilesetCapEndBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build gain CAP END alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasGainCapStartBreak,
-                                                       &layout->gainTilesetCapStartBreakBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build gain CAP START BREAK alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasGainCapStartTrail,
-                                                       &layout->gainTilesetCapStartTrailBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build gain CAP START TRAIL alloc failed");
-
-        layout_sync_optional_segment_tilesets_by_usage(hasBlinkBody,
-                                                       &layout->blinkOffTilesetBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build blink BODY alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasBlinkEnd,
-                                                       &layout->blinkOffTilesetEndBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build blink END alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasBlinkTrail,
-                                                       &layout->blinkOffTilesetTrailBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build blink TRAIL alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasBlinkBridge,
-                                                       &layout->blinkOffTilesetBridgeBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build blink BRIDGE alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasBlinkCapStart,
-                                                       &layout->blinkOffTilesetCapStartBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build blink CAP START alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasBlinkCapEnd,
-                                                       &layout->blinkOffTilesetCapEndBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build blink CAP END alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasBlinkCapStartBreak,
-                                                       &layout->blinkOffTilesetCapStartBreakBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build blink CAP START BREAK alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasBlinkCapStartTrail,
-                                                       &layout->blinkOffTilesetCapStartTrailBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build blink CAP START TRAIL alloc failed");
-
-        layout_sync_optional_segment_tilesets_by_usage(hasGainBlinkBody,
-                                                       &layout->gainBlinkOffTilesetBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build gain blink BODY alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasGainBlinkEnd,
-                                                       &layout->gainBlinkOffTilesetEndBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build gain blink END alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasGainBlinkTrail,
-                                                       &layout->gainBlinkOffTilesetTrailBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build gain blink TRAIL alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasGainBlinkBridge,
-                                                       &layout->gainBlinkOffTilesetBridgeBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build gain blink BRIDGE alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasGainBlinkCapStart,
-                                                       &layout->gainBlinkOffTilesetCapStartBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build gain blink CAP START alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasGainBlinkCapEnd,
-                                                       &layout->gainBlinkOffTilesetCapEndBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build gain blink CAP END alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasGainBlinkCapStartBreak,
-                                                       &layout->gainBlinkOffTilesetCapStartBreakBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build gain blink CAP START BREAK alloc failed");
-        layout_sync_optional_segment_tilesets_by_usage(hasGainBlinkCapStartTrail,
-                                                       &layout->gainBlinkOffTilesetCapStartTrailBySegment,
-                                                       layout->segmentCount,
-                                                       "Gauge build gain blink CAP START TRAIL alloc failed");
-
-        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-        {
-            const GaugeSegmentStyle *style = &init->segmentStyles[segmentId];
-
-            layout->tilesetBySegment[segmentId] = style->base.body;
-            if (layout->tilesetEndBySegment != s_nullSegmentTilesets)
-                layout->tilesetEndBySegment[segmentId] = style->base.end;
-            if (layout->tilesetTrailBySegment != s_nullSegmentTilesets)
-                layout->tilesetTrailBySegment[segmentId] = style->base.trail;
-            if (layout->tilesetBridgeBySegment != s_nullSegmentTilesets)
-                layout->tilesetBridgeBySegment[segmentId] = style->base.bridge;
-            if (layout->tilesetCapStartBySegment != s_nullSegmentTilesets)
-                layout->tilesetCapStartBySegment[segmentId] = style->base.capStart;
-            if (layout->tilesetCapEndBySegment != s_nullSegmentTilesets)
-                layout->tilesetCapEndBySegment[segmentId] = style->base.capEnd;
-            if (layout->tilesetCapStartBreakBySegment != s_nullSegmentTilesets)
-                layout->tilesetCapStartBreakBySegment[segmentId] = style->base.capStartBreak;
-            if (layout->tilesetCapStartTrailBySegment != s_nullSegmentTilesets)
-                layout->tilesetCapStartTrailBySegment[segmentId] = style->base.capStartTrail;
-            if (layout->capEndBySegment != s_zeroSegmentFlags)
-                layout->capEndBySegment[segmentId] = style->capEndEnabled ? 1 : 0;
-
-            if (layout->gainTilesetBySegment != s_nullSegmentTilesets)
-                layout->gainTilesetBySegment[segmentId] = style->gain.body;
-            if (layout->gainTilesetEndBySegment != s_nullSegmentTilesets)
-                layout->gainTilesetEndBySegment[segmentId] = style->gain.end;
-            if (layout->gainTilesetTrailBySegment != s_nullSegmentTilesets)
-                layout->gainTilesetTrailBySegment[segmentId] = style->gain.trail;
-            if (layout->gainTilesetBridgeBySegment != s_nullSegmentTilesets)
-                layout->gainTilesetBridgeBySegment[segmentId] = style->gain.bridge;
-            if (layout->gainTilesetCapStartBySegment != s_nullSegmentTilesets)
-                layout->gainTilesetCapStartBySegment[segmentId] = style->gain.capStart;
-            if (layout->gainTilesetCapEndBySegment != s_nullSegmentTilesets)
-                layout->gainTilesetCapEndBySegment[segmentId] = style->gain.capEnd;
-            if (layout->gainTilesetCapStartBreakBySegment != s_nullSegmentTilesets)
-                layout->gainTilesetCapStartBreakBySegment[segmentId] = style->gain.capStartBreak;
-            if (layout->gainTilesetCapStartTrailBySegment != s_nullSegmentTilesets)
-                layout->gainTilesetCapStartTrailBySegment[segmentId] = style->gain.capStartTrail;
-
-            if (layout->blinkOffTilesetBySegment != s_nullSegmentTilesets)
-                layout->blinkOffTilesetBySegment[segmentId] = style->blinkOff.body;
-            if (layout->blinkOffTilesetEndBySegment != s_nullSegmentTilesets)
-                layout->blinkOffTilesetEndBySegment[segmentId] = style->blinkOff.end;
-            if (layout->blinkOffTilesetTrailBySegment != s_nullSegmentTilesets)
-                layout->blinkOffTilesetTrailBySegment[segmentId] = style->blinkOff.trail;
-            if (layout->blinkOffTilesetBridgeBySegment != s_nullSegmentTilesets)
-                layout->blinkOffTilesetBridgeBySegment[segmentId] = style->blinkOff.bridge;
-            if (layout->blinkOffTilesetCapStartBySegment != s_nullSegmentTilesets)
-                layout->blinkOffTilesetCapStartBySegment[segmentId] = style->blinkOff.capStart;
-            if (layout->blinkOffTilesetCapEndBySegment != s_nullSegmentTilesets)
-                layout->blinkOffTilesetCapEndBySegment[segmentId] = style->blinkOff.capEnd;
-            if (layout->blinkOffTilesetCapStartBreakBySegment != s_nullSegmentTilesets)
-                layout->blinkOffTilesetCapStartBreakBySegment[segmentId] = style->blinkOff.capStartBreak;
-            if (layout->blinkOffTilesetCapStartTrailBySegment != s_nullSegmentTilesets)
-                layout->blinkOffTilesetCapStartTrailBySegment[segmentId] = style->blinkOff.capStartTrail;
-
-            if (layout->gainBlinkOffTilesetBySegment != s_nullSegmentTilesets)
-                layout->gainBlinkOffTilesetBySegment[segmentId] = style->gainBlinkOff.body;
-            if (layout->gainBlinkOffTilesetEndBySegment != s_nullSegmentTilesets)
-                layout->gainBlinkOffTilesetEndBySegment[segmentId] = style->gainBlinkOff.end;
-            if (layout->gainBlinkOffTilesetTrailBySegment != s_nullSegmentTilesets)
-                layout->gainBlinkOffTilesetTrailBySegment[segmentId] = style->gainBlinkOff.trail;
-            if (layout->gainBlinkOffTilesetBridgeBySegment != s_nullSegmentTilesets)
-                layout->gainBlinkOffTilesetBridgeBySegment[segmentId] = style->gainBlinkOff.bridge;
-            if (layout->gainBlinkOffTilesetCapStartBySegment != s_nullSegmentTilesets)
-                layout->gainBlinkOffTilesetCapStartBySegment[segmentId] = style->gainBlinkOff.capStart;
-            if (layout->gainBlinkOffTilesetCapEndBySegment != s_nullSegmentTilesets)
-                layout->gainBlinkOffTilesetCapEndBySegment[segmentId] = style->gainBlinkOff.capEnd;
-            if (layout->gainBlinkOffTilesetCapStartBreakBySegment != s_nullSegmentTilesets)
-                layout->gainBlinkOffTilesetCapStartBreakBySegment[segmentId] = style->gainBlinkOff.capStartBreak;
-            if (layout->gainBlinkOffTilesetCapStartTrailBySegment != s_nullSegmentTilesets)
-                layout->gainBlinkOffTilesetCapStartTrailBySegment[segmentId] = style->gainBlinkOff.capStartTrail;
-        }
+        populate_base_tilesets(layout, init->segmentStyles);
+        populate_gain_tilesets(layout, init->segmentStyles);
+        populate_blink_tilesets(layout, init->segmentStyles);
+        populate_gain_blink_tilesets(layout, init->segmentStyles);
     }
 
-    layout->hasBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_DAMAGE);
-    layout->hasGainBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_GAIN);
-
-    /* Compute cached cap flags */
-    detect_caps_enabled(layout, &layout->capStartEnabled, &layout->capEndEnabled);
-
-    /* Bridges depend on both base and gain bridge arrays, recompute once. */
-    build_bridge_luts(layout);
-    build_pip_luts(layout);
+    finalize_layout_derived_state(layout);
 }
 
 
@@ -3304,10 +4006,6 @@ static void write_tilemap_pip_init(GaugePart *part)
         upload_fill_tile(pipStrip, localTile, vramTile, DMA_QUEUE);
 
         part->cells[part->cellCount].vramTileIndex = vramTile;
-        part->cells[part->cellCount].bodyFillStrip45 = pipStrip;
-        part->cells[part->cellCount].endFillStrip45 = NULL;
-        part->cells[part->cellCount].trailFillStrip64 = NULL;
-        part->cells[part->cellCount].bridgeFillStrip45 = NULL;
         part->cells[part->cellCount].cachedStrip = pipStrip;
         part->cells[part->cellCount].cachedFillIndex = localTile;
         part->cells[part->cellCount].cellIndex = cellIndex;
@@ -3350,16 +4048,7 @@ static void write_tilemap_fixed_init(GaugePart *part)
 
         VDP_setTileMapXY(WINDOW, attr, x, y);
 
-        /* Precompute per-cell strips to avoid segment lookups every frame */
-        const u32 *endStrip = layout->tilesetEndBySegment[segmentId];
-        const u32 *trailStrip = layout->tilesetTrailBySegment[segmentId];
-        const u32 *bridgeStrip = layout->tilesetBridgeBySegment[segmentId];
-
         part->cells[part->cellCount].vramTileIndex = vramTile;
-        part->cells[part->cellCount].bodyFillStrip45 = bodyStrip;
-        part->cells[part->cellCount].endFillStrip45 = endStrip;
-        part->cells[part->cellCount].trailFillStrip64 = trailStrip;
-        part->cells[part->cellCount].bridgeFillStrip45 = bridgeStrip;
         part->cells[part->cellCount].cachedStrip = NULL;
         part->cells[part->cellCount].cachedFillIndex = CACHE_INVALID_U8;
         part->cells[part->cellCount].cellIndex = cellIndex;
@@ -3367,88 +4056,6 @@ static void write_tilemap_fixed_init(GaugePart *part)
 
     } 
 }
-
-/* =============================================================================
-   Break zone cell classification (shared by fixed and dynamic modes)
-   =============================================================================
-
-   Classifies a cell within the break zone into one of these types:
-
-     |FULL|VALUE_BREAK|TRAIL_FULL|TRAIL_BREAK|TRAIL_BREAK2|END|EMPTY|
-      <-- value -->|<---------- trail ---------->|
-
-   Both process_fixed_mode() and process_dynamic_mode() use the same
-   classification logic but differ in how they act on the result:
-   - Fixed:   selects ROM strip -> DMA tile to per-cell VRAM
-   - Dynamic: selects VRAM tile -> optional DMA + tilemap update
-
-   ============================================================================= */
-typedef enum
-{
-    CELL_TYPE_END,           /* Value/trail frontier (uses end tileset) */
-    CELL_TYPE_TRAIL_BREAK,   /* Trail edge cell, after VALUE_BREAK (uses trail tileset) */
-    CELL_TYPE_TRAIL_BREAK2,  /* Second trail break, before END (uses trail tileset) */
-    CELL_TYPE_TRAIL_FULL,    /* Fully covered by trail, no value (uses trail tileset) */
-    CELL_TYPE_VALUE_BREAK,   /* Value edge cell, before trail zone (uses body tileset) */
-    CELL_TYPE_REGION_FULL,   /* Region rendering: fully filled body */
-    CELL_TYPE_REGION_EMPTY,  /* Region rendering: empty body */
-    CELL_TYPE_REGION_TRAIL,  /* Region rendering: full trail */
-    CELL_TYPE_DEFAULT        /* Standard fill computation (no special break zone) */
-} CellBreakType;
-
-/**
- * Classify a cell's break zone type based on pre-computed break info.
- *
- * This is the shared classification logic used by both process_fixed_mode
- * and process_dynamic_mode to determine which tileset and tile index to use.
- *
- * @param breakInfoUsed  Break zone info (normal or blink-off adjusted)
- * @param cellFillIndex  Fill index of the cell to classify
- * @param hasEndStrip    1 if segment has an end tileset
- * @param hasTrailStrip  1 if segment has a trail tileset
- * @return CellBreakType indicating which visual mode applies
- */
-static inline CellBreakType classify_break_zone_cell(
-    const GaugeBreakInfo *breakInfoUsed,
-    u8 cellFillIndex,
-    u8 hasEndStrip,
-    u8 hasTrailStrip)
-{
-    if (breakInfoUsed->endFillIndex != CACHE_INVALID_U8 &&
-        hasEndStrip && cellFillIndex == breakInfoUsed->endFillIndex)
-        return CELL_TYPE_END;
-
-    if (breakInfoUsed->trailBreakActive && hasTrailStrip &&
-        cellFillIndex == breakInfoUsed->trailBreakFillIndex)
-        return CELL_TYPE_TRAIL_BREAK;
-
-    if (breakInfoUsed->trailBreakSecondActive && hasTrailStrip &&
-        cellFillIndex == breakInfoUsed->trailBreakFillIndex2)
-        return CELL_TYPE_TRAIL_BREAK2;
-
-    if (breakInfoUsed->trailBreakActive && hasTrailStrip &&
-        cellFillIndex > breakInfoUsed->valueFillIndex &&
-        cellFillIndex < breakInfoUsed->trailFillIndex)
-        return CELL_TYPE_TRAIL_FULL;
-
-    if (breakInfoUsed->valueBreakFillIndex != CACHE_INVALID_U8 &&
-        cellFillIndex == breakInfoUsed->valueBreakFillIndex)
-        return CELL_TYPE_VALUE_BREAK;
-
-    if (breakInfoUsed->regionRenderActive)
-    {
-        if (cellFillIndex < breakInfoUsed->valueFillIndex)
-            return CELL_TYPE_REGION_FULL;
-        if (cellFillIndex > breakInfoUsed->trailFillIndex)
-            return CELL_TYPE_REGION_EMPTY;
-        if (cellFillIndex > breakInfoUsed->valueFillIndex &&
-            cellFillIndex < breakInfoUsed->trailFillIndex)
-            return CELL_TYPE_REGION_TRAIL;
-    }
-
-    return CELL_TYPE_DEFAULT;
-}
-
 
 /**
  * Process fixed mode: stream tiles for all cells via DMA.
@@ -3458,13 +4065,9 @@ static inline CellBreakType classify_break_zone_cell(
  * Change detection per cell (cachedFillIndex + cachedStrip) avoids
  * redundant DMA transfers.
  *
- * Algorithm:
- * 1. Compute break zone boundaries (breakLow..breakHigh)
- * 2. For each cell (countdown loop):
- *    a. Early-exit if trivially full or empty (skip classification)
- *    b. Classify cell into visual mode (END(E)/TRAIL(T)/VALUE_BREAK(B)/EMPTY(V)/FULL(F))
- *    c. Select appropriate ROM strip and fill index
- *    d. DMA tile data if changed (upload_cell_if_needed)
+ * Cell classification is delegated to compute_cell_decision() (shared with
+ * dynamic mode). This function only handles the mode-specific output:
+ * a single upload_cell_if_needed() call per cell.
  *
  * @param part                 Part to render
  * @param valuePixels          Current value fill in pixels
@@ -3484,29 +4087,9 @@ static void process_fixed_mode(GaugePart *part,
 {
     const GaugeLayout *layout = part->layout;
 
-    /* --- Break zone computation ---
-     * breakInfo: used for normal cell classification (trail with blink applied)
-     * breakInfoActual: used for bridge visibility (trail WITHOUT blink, so bridges
-     *            don't flicker on/off during blink phase) */
-    GaugeBreakInfo breakInfo;
-    compute_break_info(layout, valuePixels, trailPixelsRendered, trailMode, &breakInfo);
-    GaugeBreakInfo breakInfoActual = breakInfo;
-    if (trailPixelsActual != trailPixelsRendered)
-        compute_break_info(layout, valuePixels, trailPixelsActual, trailMode, &breakInfoActual);
-
-    /* Early-exit boundaries: cells with fillIndex outside [breakLow..breakHigh]
-     * are trivially full or empty (~70-80% of cells). Skips full classification. */
-    const u8 breakLow = (breakInfo.valueBreakFillIndex != CACHE_INVALID_U8)
-                       ? breakInfo.valueBreakFillIndex : breakInfo.valueFillIndex;
-    const u8 breakHigh = breakInfo.trailFillIndex;
-
-    /* Cap detection */
-    const u8 capStartCellIndex = layout->cellIndexByFillIndex[0];
-    const u8 capEndCellIndex = layout->cellIndexByFillIndex[layout->length - 1];
-    const u8 capStartSegId = layout->segmentIdByCell[capStartCellIndex];
-    const u8 capEndSegId = layout->segmentIdByCell[capEndCellIndex];
-    const u8 capStartEnabled = layout->capStartEnabled;
-    const u8 capEndEnabled = layout->capEndEnabled;
+    FillLoopContext ctx;
+    init_fill_loop_context(layout, valuePixels, trailPixelsRendered,
+                           trailPixelsActual, blinkOffActive, trailMode, &ctx);
 
     /* Countdown loop: 68000 zero-flag test is free after decrement (dbra) */
     u8 i = part->cellCount;
@@ -3516,360 +4099,27 @@ static void process_fixed_mode(GaugePart *part,
         const u8 cellIndex = cell->cellIndex;
         const u8 cellFillIndex = layout->fillIndexByCell[cellIndex];
         const u8 segmentId = layout->segmentIdByCell[cellIndex];
-        const u32 *bodyStrip = select_base_strip(cell->bodyFillStrip45,
-                                                 layout->gainTilesetBySegment[segmentId],
-                                                 trailMode);
-        const u32 *blinkOffBodyStrip = select_blink_strip(
-            layout->blinkOffTilesetBySegment[segmentId],
-            layout->gainBlinkOffTilesetBySegment[segmentId],
-            trailMode);
-        /* endStrip, trailStrip, bridgeStrip and blink-off variants are
-         * computed lazily below - only when needed (bridge or break zone).
-         * Saves 6 x select calls (~6-8 cycles each) for ~70-80% trivial cells. */
-
-        /* === Cap end (always uses its tileset) === */
-        if (cellIndex == capEndCellIndex && capEndEnabled && segmentId == capEndSegId)
-        {
-            u8 capValuePx = 0;
-            u8 capTrailPx = 0;
-            const u32 *capEndStrip = select_base_strip(
-                layout->tilesetCapEndBySegment[segmentId],
-                layout->gainTilesetCapEndBySegment[segmentId],
-                trailMode);
-            u16 capTrailPixels = trailPixelsRendered;
-
-            const u32 *capEndBlinkStrip = select_blink_strip(
-                layout->blinkOffTilesetCapEndBySegment[segmentId],
-                layout->gainBlinkOffTilesetCapEndBySegment[segmentId],
-                trailMode);
-
-            if (blinkOffActive &&
-                capEndBlinkStrip &&
-                is_cell_in_trail_zone(&breakInfoActual, cellFillIndex))
-            {
-                capEndStrip = capEndBlinkStrip;
-                capTrailPixels = trailPixelsActual;
-            }
-
-            compute_fill_for_cell(layout, cellIndex, valuePixels, capTrailPixels,
-                                  &capValuePx, &capTrailPx);
-            upload_cell_if_needed(cell,
-                                  capEndStrip,
-                                  s_tileIndexByValueTrail[capValuePx][capTrailPx]);
-            continue;
-        }
-
-        /* === Cap start (fixed border at cell 0) === */
-        if (cellIndex == capStartCellIndex && capStartEnabled && segmentId == capStartSegId)
-        {
-            const u32 *capStartStrip = select_base_strip(
-                layout->tilesetCapStartBySegment[segmentId],
-                layout->gainTilesetCapStartBySegment[segmentId],
-                trailMode);
-            const u32 *capStartBreakStrip = select_base_strip(
-                layout->tilesetCapStartBreakBySegment[segmentId],
-                layout->gainTilesetCapStartBreakBySegment[segmentId],
-                trailMode);
-            const u32 *capStartTrailStrip = select_base_strip(
-                layout->tilesetCapStartTrailBySegment[segmentId],
-                layout->gainTilesetCapStartTrailBySegment[segmentId],
-                trailMode);
-            const u32 *capStartBlinkStrip = select_blink_strip(
-                layout->blinkOffTilesetCapStartBySegment[segmentId],
-                layout->gainBlinkOffTilesetCapStartBySegment[segmentId],
-                trailMode);
-            const u32 *capStartBlinkBreakStrip = select_blink_strip(
-                layout->blinkOffTilesetCapStartBreakBySegment[segmentId],
-                layout->gainBlinkOffTilesetCapStartBreakBySegment[segmentId],
-                trailMode);
-            const u32 *capStartBlinkTrailStrip = select_blink_strip(
-                layout->blinkOffTilesetCapStartTrailBySegment[segmentId],
-                layout->gainBlinkOffTilesetCapStartTrailBySegment[segmentId],
-                trailMode);
-
-            if (capStartStrip)
-            {
-                CapStartResult capResult;
-                if (blinkOffActive)
-                {
-                    CapStartResult capActual;
-                    classify_cap_start_with_strips(&breakInfoActual,
-                                                   cellFillIndex,
-                                                   capStartStrip,
-                                                   capStartBreakStrip,
-                                                   capStartTrailStrip,
-                                                   &capActual);
-
-                    const u8 inTrailZone = is_cell_in_trail_zone(&breakInfoActual, cellFillIndex);
-                    const u32 *blinkStrip = NULL;
-
-                    if (inTrailZone)
-                    {
-                        if (capActual.usesTrail)
-                            blinkStrip = capStartBlinkTrailStrip;
-                        else if (capActual.usesBreak)
-                            blinkStrip = capStartBlinkBreakStrip;
-                        else
-                            blinkStrip = capStartBlinkStrip;
-                    }
-
-                    if (blinkStrip)
-                    {
-                        capActual.strip = blinkStrip;
-                        capResult = capActual;
-                    }
-                    else
-                    {
-                        classify_cap_start_with_strips(&breakInfo,
-                                                       cellFillIndex,
-                                                       capStartStrip,
-                                                       capStartBreakStrip,
-                                                       capStartTrailStrip,
-                                                       &capResult);
-                    }
-                }
-                else
-                {
-                    classify_cap_start_with_strips(&breakInfo,
-                                                   cellFillIndex,
-                                                   capStartStrip,
-                                                   capStartBreakStrip,
-                                                   capStartTrailStrip,
-                                                   &capResult);
-                }
-                upload_cell_if_needed(cell, capResult.strip, capResult.fillStripIndex);
-                continue;
-            }
-        }
-
-        /* === Bridge/BREAK forced rendering (D/B before gauge END) ===
-         * Bridge cells sit at segment boundaries. When the gauge's value/trail
-         * edge is past this cell, the bridge shows a transition tile.
-         * breakInfoActual uses trailPixelsActual (ignoring blink) so bridges don't
-         * flicker during blink phase. */
-        if (breakInfoActual.endFillIndex != CACHE_INVALID_U8)
-        {
-            /* Bridge end cell: last cell of a segment with a bridge tileset */
-            if (layout->bridgeEndByFillIndex[cellFillIndex] &&
-                breakInfoActual.endFillIndex > cellFillIndex &&
-                breakInfoActual.valueFillIndex > cellFillIndex)
-            {
-                const u8 nextFillIndex = (u8)(cellFillIndex + 1);
-                const u8 bridgeInTrailZone = is_cell_in_trail_zone(&breakInfoActual, nextFillIndex);
-
-                /* Lazy: bridge strips computed only for bridge cells (rare) */
-                const u32 *bridgeStrip = select_base_strip(cell->bridgeFillStrip45,
-                                                           layout->gainTilesetBridgeBySegment[segmentId],
-                                                           trailMode);
-                const u32 *blinkOffBridgeStrip = select_blink_strip(
-                    layout->blinkOffTilesetBridgeBySegment[segmentId],
-                    layout->gainBlinkOffTilesetBridgeBySegment[segmentId],
-                    trailMode);
-
-                if (bridgeStrip)
-                {
-                    const u8 useBlinkOffBridge = (blinkOffActive &&
-                                                  blinkOffBridgeStrip &&
-                                                  bridgeInTrailZone);
-                    const GaugeBreakInfo *bridgeBreakInfo = useBlinkOffBridge ? &breakInfoActual : &breakInfo;
-                    const u16 bridgeTrailPixels = useBlinkOffBridge ? trailPixelsActual : trailPixelsRendered;
-                    const u32 *bridgeStripUse = useBlinkOffBridge
-                                                ? blinkOffBridgeStrip
-                                                : bridgeStrip;
-                    const u8 bridgeIdx = compute_bridge_strip_index(
-                        layout, bridgeBreakInfo, cellFillIndex, valuePixels, bridgeTrailPixels);
-                    upload_cell_if_needed(cell, bridgeStripUse, bridgeIdx);
-                }
-                else
-                {
-                    /* No bridge tileset: fall back to body, fully filled */
-                    const u32 *fallbackStrip = bodyStrip;
-                    if (blinkOffActive && blinkOffBodyStrip && bridgeInTrailZone)
-                    {
-                        fallbackStrip = blinkOffBodyStrip;
-                    }
-                    upload_cell_if_needed(cell, fallbackStrip,
-                                          STRIP_INDEX_FULL);
-                }
-                continue;
-            }
-
-            /* Forced BREAK cell: cell before a bridge that must show as fully filled */
-            if (layout->bridgeBreakByFillIndex[cellFillIndex])
-            {
-                const u8 boundaryFillIndex = layout->bridgeBreakBoundaryByFillIndex[cellFillIndex];
-                if (breakInfoActual.endFillIndex > boundaryFillIndex &&
-                    breakInfoActual.valueFillIndex > boundaryFillIndex)
-                {
-                    const u32 *breakStripUse = bodyStrip;
-                    if (blinkOffActive && blinkOffBodyStrip &&
-                        is_cell_in_trail_zone(&breakInfoActual, cellFillIndex))
-                    {
-                        breakStripUse = blinkOffBodyStrip;
-                    }
-                    upload_cell_if_needed(cell, breakStripUse,
-                                          STRIP_INDEX_FULL);
-                    continue;
-                }
-            }
-        }
-
-        /* === Early-exit: trivial cells (FULL = F or EMPTY = V) ===
-         * ~70-80% of cells hit this path, skipping the 5-boolean
-         * classification below. Saves ~50 cycles per cell. */
-        /* Blink-off needs per-cell classification for mixed segments. */
-        if (!blinkOffActive)
-        {
-            if (cellFillIndex < breakLow)
-            {
-                upload_cell_if_needed(cell, bodyStrip,
-                                      STRIP_INDEX_FULL);
-                continue;
-            }
-            if (cellFillIndex > breakHigh)
-            {
-                upload_cell_if_needed(cell, bodyStrip,
-                                      STRIP_INDEX_EMPTY);
-                continue;
-            }
-        }
-
-        /* Lazy: remaining strips only for break zone cells (~20-30%).
-         * bodyStrip and blinkOffBodyStrip already computed above. */
-        const u32 *endStrip = select_base_strip(cell->endFillStrip45,
-                                                layout->gainTilesetEndBySegment[segmentId],
-                                                trailMode);
-        const u32 *trailStrip = select_base_strip(cell->trailFillStrip64,
-                                                  layout->gainTilesetTrailBySegment[segmentId],
-                                                  trailMode);
-        const u32 *blinkOffEndStrip = select_blink_strip(
-            layout->blinkOffTilesetEndBySegment[segmentId],
-            layout->gainBlinkOffTilesetEndBySegment[segmentId],
-            trailMode);
-        const u32 *blinkOffTrailStrip = select_blink_strip(
-            layout->blinkOffTilesetTrailBySegment[segmentId],
-            layout->gainBlinkOffTilesetTrailBySegment[segmentId],
+        const u32 *bodyStrip = select_base_strip(
+            layout->tilesetBySegment[segmentId],
+            layout->gainTilesetBySegment[segmentId],
             trailMode);
 
-        /* === Break zone classification + strip selection === */
-        const GaugeBreakInfo *breakInfoUsed = &breakInfo;
-        u16 trailPixelsUse = trailPixelsRendered;
-        u8 useBlinkOff = 0;
+        CellDecision decision;
+        compute_cell_decision(layout, &ctx, cellIndex, cellFillIndex,
+                              segmentId, bodyStrip, &decision);
 
-        if (blinkOffActive)
-        {
-            useBlinkOff = apply_blink_off_overrides(
-                &breakInfoActual, cellFillIndex,
-                blinkOffEndStrip, blinkOffTrailStrip, blinkOffBodyStrip,
-                &endStrip, &trailStrip, &bodyStrip);
-            if (useBlinkOff)
-            {
-                breakInfoUsed = &breakInfoActual;
-                trailPixelsUse = trailPixelsActual;
-            }
-        }
-
-        const CellBreakType cellType = classify_break_zone_cell(
-            breakInfoUsed, cellFillIndex, (endStrip != NULL), (trailStrip != NULL));
-
-        const u32 *stripToUse = bodyStrip;
-        u8 desiredStripIndex = 0;
-
-        switch (cellType)
-        {
-        case CELL_TYPE_END:
-            stripToUse = endStrip;
-            desiredStripIndex = s_tileIndexByValueTrail[breakInfoUsed->endValuePxInTile][breakInfoUsed->endTrailPxInTile];
-            break;
-
-        case CELL_TYPE_TRAIL_BREAK:
-            /* If next cell is full trail, force trailPx=8 for proper raccord */
-            stripToUse = trailStrip;
-            desiredStripIndex = breakInfoUsed->trailBreakSecondActive
-                ? s_trailTileIndexByValueTrail[breakInfoUsed->valuePxInBreakCell][8]
-                : s_trailTileIndexByValueTrail[breakInfoUsed->valuePxInBreakCell][breakInfoUsed->trailPxInBreakCell];
-            break;
-
-        case CELL_TYPE_TRAIL_BREAK2:
-        {
-            /* Same fill index as END but on TRAIL tileset */
-            stripToUse = trailStrip;
-            const u8 endIndex = s_tileIndexByValueTrail[breakInfoUsed->endValuePxInTile][breakInfoUsed->endTrailPxInTile];
-            desiredStripIndex = (endIndex == 8)
-                ? s_trailTileIndexByValueTrail[0][endIndex]
-                : endIndex;
-            break;
-        }
-
-        case CELL_TYPE_TRAIL_FULL:
-            stripToUse = trailStrip;
-            desiredStripIndex = 7;
-            break;
-
-        case CELL_TYPE_VALUE_BREAK:
-            stripToUse = bodyStrip;
-            desiredStripIndex = breakInfoUsed->trailBreakActive
-                ? breakInfoUsed->valuePxInBreakCell
-                : s_tileIndexByValueTrail[breakInfoUsed->endValuePxInTile][breakInfoUsed->endTrailPxInTile];
-            break;
-
-        case CELL_TYPE_REGION_FULL:
-            stripToUse = bodyStrip;
-            desiredStripIndex = STRIP_INDEX_FULL;
-            break;
-
-        case CELL_TYPE_REGION_EMPTY:
-            stripToUse = bodyStrip;
-            desiredStripIndex = STRIP_INDEX_EMPTY;
-            break;
-
-        case CELL_TYPE_REGION_TRAIL:
-            stripToUse = trailStrip;
-            desiredStripIndex = 7;
-            break;
-
-        case CELL_TYPE_DEFAULT:
-        {
-            /* Standard fill computation (no special break zone) */
-            if (breakInfoUsed->endFillIndex != CACHE_INVALID_U8 &&
-                cellFillIndex == breakInfoUsed->endFillIndex)
-                stripToUse = endStrip;
-
-            u8 valuePxInTile = 0;
-            u8 trailPxInTile = 0;
-            compute_fill_for_cell(layout, cell->cellIndex,
-                                  valuePixels, trailPixelsUse,
-                                  &valuePxInTile, &trailPxInTile);
-            desiredStripIndex = s_tileIndexByValueTrail[valuePxInTile][trailPxInTile];
-            break;
-        }
-        }
-        upload_cell_if_needed(cell, stripToUse, desiredStripIndex);
+        upload_cell_if_needed(cell, decision.strip, decision.fillStripIndex);
     }
 }
 
 /**
  * Process dynamic mode -- Tilemap-based rendering algorithm.
  *
- * Unlike fixed mode, dynamic mode uses shared VRAM tiles and updates the
- * tilemap to point cells at the appropriate pre-loaded or streamed tile.
- * This uses less VRAM but more CPU (tilemap writes vs DMA).
+ * Uses compute_cell_decision() for unified strip/index/type selection (shared
+ * with fixed mode), then routes the decision to the appropriate VRAM slot.
+ * Standard tiles are pre-loaded; partial/cap/bridge tiles are streamed on demand.
  *
- * Algorithm:
- * 1. Compute break zone boundaries (breakLow..breakHigh)
- * 2. For each cell (countdown loop):
- *    a. Early-exit if trivially full or empty (tilemap-only update)
- *    b. Classify cell into visual mode (same as fixed mode)
- *    c. Select VRAM tile (pre-loaded standard or streamed partial)
- *    d. Stream partial tile data if segment/fill changed
- *    e. Update tilemap if VRAM tile assignment changed
- *
- * Pre-computed data used:
- * - layout->tilemapPosByCell: screen coordinates per cell (computed at init)
- * - dyn->cellValid: cell validity flags (avoids NULL checks in render loop)
- * - dyn->cellCurrentTileIndex: tilemap cache for change detection
- *
- * @param part                 Part to render
+ * @param part               Part to process
  * @param valuePixels          Current value fill in pixels
  * @param trailPixelsRendered  Current trail fill in pixels (after blink)
  * @param trailPixelsActual    Current trail fill in pixels (before blink, used for bridges)
@@ -3896,15 +4146,13 @@ static void process_dynamic_mode(GaugePart *part,
     const u16 attrBase = TILE_ATTR_FULL(layout->palette, layout->priority,
                                         layout->verticalFlip, layout->horizontalFlip, 0);
 
-    /* --- Break zone computation ---
-     * breakInfo: used for normal cell classification (trail with blink applied)
-     * breakInfoActual: used for bridge visibility (trail WITHOUT blink, so bridges
-     *            don't flicker on/off during blink phase) */
-    GaugeBreakInfo breakInfo;
-    compute_break_info(layout, valuePixels, trailPixelsRendered, trailMode, &breakInfo);
-    GaugeBreakInfo breakInfoActual = breakInfo;
-    if (trailPixelsActual != trailPixelsRendered)
-        compute_break_info(layout, valuePixels, trailPixelsActual, trailMode, &breakInfoActual);
+    FillLoopContext ctx;
+    init_fill_loop_context(layout, valuePixels, trailPixelsRendered,
+                           trailPixelsActual, blinkOffActive, trailMode, &ctx);
+
+    /* Dynamic mode also requires VRAM tiles to actually be allocated */
+    if (ctx.capStartEnabled && dyn->vramTileCapStart == 0) ctx.capStartEnabled = 0;
+    if (ctx.capEndEnabled && dyn->vramTileCapEnd == 0) ctx.capEndEnabled = 0;
 
     /* Dynamic mode caches tile data in VRAM. When blink toggles or trail mode
      * changes, the cached standard tiles (full/empty/trail) may now come from
@@ -3922,23 +4170,6 @@ static void process_dynamic_mode(GaugePart *part,
         reload_dynamic_full_trail_tiles(dyn, layout, blinkOffActive, trailMode);
     }
 
-    /* Early-exit boundaries: cells outside [breakLow..breakHigh] are trivially
-     * full or empty. Same logic as fixed mode. */
-    const u8 breakLow = (breakInfo.valueBreakFillIndex != CACHE_INVALID_U8)
-                       ? breakInfo.valueBreakFillIndex : breakInfo.valueFillIndex;
-    const u8 breakHigh = breakInfo.trailFillIndex;
-
-    /* Cap detection */
-    const u8 capStartCellIndex = layout->cellIndexByFillIndex[0];
-    const u8 capEndCellIndex = layout->cellIndexByFillIndex[layout->length - 1];
-    const u8 capStartSegId = layout->segmentIdByCell[capStartCellIndex];
-    const u8 capEndSegId = layout->segmentIdByCell[capEndCellIndex];
-    u8 capStartEnabled = layout->capStartEnabled;
-    u8 capEndEnabled = layout->capEndEnabled;
-    /* Dynamic mode also requires VRAM tiles to actually be allocated */
-    if (capStartEnabled && dyn->vramTileCapStart == 0) capStartEnabled = 0;
-    if (capEndEnabled && dyn->vramTileCapEnd == 0) capEndEnabled = 0;
-
     /* Forward iteration required: dynamic mode shares partial VRAM tiles across cells.
      * With countdown, a lower-index cell could overwrite partial tile data needed by a
      * higher-index cell that was processed first. Forward order ensures the last writer
@@ -3952,466 +4183,122 @@ static void process_dynamic_mode(GaugePart *part,
 
         const u8 cellFillIndex = layout->fillIndexByCell[cellIndex];
         const u8 segmentId = layout->segmentIdByCell[cellIndex];
-
-        /* === Cap end (always uses its tileset) === */
-        if (cellIndex == capEndCellIndex && capEndEnabled && segmentId == capEndSegId)
-        {
-            u8 capValuePx = 0;
-            u8 capTrailPx = 0;
-            const u32 *capEndStrip = select_base_strip(
-                layout->tilesetCapEndBySegment[segmentId],
-                layout->gainTilesetCapEndBySegment[segmentId],
-                trailMode);
-            u16 capTrailPixels = trailPixelsRendered;
-
-            const u32 *capEndBlinkStrip = select_blink_strip(
-                layout->blinkOffTilesetCapEndBySegment[segmentId],
-                layout->gainBlinkOffTilesetCapEndBySegment[segmentId],
-                trailMode);
-
-            if (blinkOffActive &&
-                capEndBlinkStrip &&
-                is_cell_in_trail_zone(&breakInfoActual, cellFillIndex))
-            {
-                capEndStrip = capEndBlinkStrip;
-                capTrailPixels = trailPixelsActual;
-            }
-
-            compute_fill_for_cell(layout, cellIndex, valuePixels, capTrailPixels,
-                                  &capValuePx, &capTrailPx);
-            const u8 fillStripIndex = s_tileIndexByValueTrail[capValuePx][capTrailPx];
-            if (dyn->cachedFillIndexCapEnd != fillStripIndex)
-            {
-                upload_fill_tile(capEndStrip,
-                                 fillStripIndex,
-                                 dyn->vramTileCapEnd,
-                                 DMA);
-                dyn->cachedFillIndexCapEnd = fillStripIndex;
-            }
-            if (dyn->cellCurrentTileIndex[cellIndex] != dyn->vramTileCapEnd)
-            {
-                VDP_setTileMapXY(WINDOW, attrBase | dyn->vramTileCapEnd,
-                                 layout->tilemapPosByCell[cellIndex].x,
-                                 layout->tilemapPosByCell[cellIndex].y);
-                dyn->cellCurrentTileIndex[cellIndex] = dyn->vramTileCapEnd;
-            }
-            continue;
-        }
-
-        /* === Cap start (fixed border at cell 0) === */
-        if (cellIndex == capStartCellIndex && capStartEnabled && segmentId == capStartSegId)
-        {
-            const u32 *capStartStrip = select_base_strip(
-                layout->tilesetCapStartBySegment[segmentId],
-                layout->gainTilesetCapStartBySegment[segmentId],
-                trailMode);
-            const u32 *capStartBreakStrip = select_base_strip(
-                layout->tilesetCapStartBreakBySegment[segmentId],
-                layout->gainTilesetCapStartBreakBySegment[segmentId],
-                trailMode);
-            const u32 *capStartTrailStrip = select_base_strip(
-                layout->tilesetCapStartTrailBySegment[segmentId],
-                layout->gainTilesetCapStartTrailBySegment[segmentId],
-                trailMode);
-            const u32 *capStartBlinkStrip = select_blink_strip(
-                layout->blinkOffTilesetCapStartBySegment[segmentId],
-                layout->gainBlinkOffTilesetCapStartBySegment[segmentId],
-                trailMode);
-            const u32 *capStartBlinkBreakStrip = select_blink_strip(
-                layout->blinkOffTilesetCapStartBreakBySegment[segmentId],
-                layout->gainBlinkOffTilesetCapStartBreakBySegment[segmentId],
-                trailMode);
-            const u32 *capStartBlinkTrailStrip = select_blink_strip(
-                layout->blinkOffTilesetCapStartTrailBySegment[segmentId],
-                layout->gainBlinkOffTilesetCapStartTrailBySegment[segmentId],
-                trailMode);
-
-            if (capStartStrip)
-            {
-                CapStartResult capResult;
-                if (blinkOffActive)
-                {
-                    CapStartResult capActual;
-                    classify_cap_start_with_strips(&breakInfoActual,
-                                                   cellFillIndex,
-                                                   capStartStrip,
-                                                   capStartBreakStrip,
-                                                   capStartTrailStrip,
-                                                   &capActual);
-
-                    const u8 inTrailZone = is_cell_in_trail_zone(&breakInfoActual, cellFillIndex);
-                    const u32 *blinkStrip = NULL;
-
-                    if (inTrailZone)
-                    {
-                        if (capActual.usesTrail)
-                            blinkStrip = capStartBlinkTrailStrip;
-                        else if (capActual.usesBreak)
-                            blinkStrip = capStartBlinkBreakStrip;
-                        else
-                            blinkStrip = capStartBlinkStrip;
-                    }
-
-                    if (blinkStrip)
-                    {
-                        capActual.strip = blinkStrip;
-                        capResult = capActual;
-                    }
-                    else
-                    {
-                        classify_cap_start_with_strips(&breakInfo,
-                                                       cellFillIndex,
-                                                       capStartStrip,
-                                                       capStartBreakStrip,
-                                                       capStartTrailStrip,
-                                                       &capResult);
-                    }
-                }
-                else
-                {
-                    classify_cap_start_with_strips(&breakInfo,
-                                                   cellFillIndex,
-                                                   capStartStrip,
-                                                   capStartBreakStrip,
-                                                   capStartTrailStrip,
-                                                   &capResult);
-                }
-
-                /* Stream cap start tile if strip/index/variant changed */
-                if (dyn->cachedFillIndexCapStart != capResult.fillStripIndex ||
-                    dyn->loadedCapStartUsesBreak != capResult.usesBreak ||
-                    dyn->loadedCapStartUsesTrail != capResult.usesTrail)
-                {
-                    upload_fill_tile(capResult.strip, capResult.fillStripIndex,
-                                     dyn->vramTileCapStart, DMA);
-                    dyn->cachedFillIndexCapStart = capResult.fillStripIndex;
-                    dyn->loadedCapStartUsesBreak = capResult.usesBreak;
-                    dyn->loadedCapStartUsesTrail = capResult.usesTrail;
-                }
-
-                /* Update tilemap if tile assignment changed */
-                if (dyn->cellCurrentTileIndex[cellIndex] != dyn->vramTileCapStart)
-                {
-                    VDP_setTileMapXY(WINDOW, attrBase | dyn->vramTileCapStart,
-                                     layout->tilemapPosByCell[cellIndex].x,
-                                     layout->tilemapPosByCell[cellIndex].y);
-                    dyn->cellCurrentTileIndex[cellIndex] = dyn->vramTileCapStart;
-                }
-                continue;
-            }
-        }
-
-        /* === Bridge/BREAK forced rendering (D/B before gauge END) ===
-         * Bridge cells sit at segment boundaries. When the gauge's value/trail
-         * edge is past this cell, the bridge shows a transition tile.
-         * breakInfoActual uses trailPixelsActual (ignoring blink) so bridges don't
-         * flicker during blink phase. */
-        if (breakInfoActual.endFillIndex != CACHE_INVALID_U8)
-        {
-            /* Bridge end cell: last cell of a segment with a bridge tileset */
-            if (layout->bridgeEndByFillIndex[cellFillIndex] &&
-                breakInfoActual.endFillIndex > cellFillIndex &&
-                breakInfoActual.valueFillIndex > cellFillIndex)
-            {
-                const u16 vramTileBridge = dyn->vramTileBridge[segmentId];
-                if (vramTileBridge != 0)
-                {
-                    const u8 nextFillIndex = (u8)(cellFillIndex + 1);
-                    const u8 bridgeInTrailZone = is_cell_in_trail_zone(&breakInfoActual, nextFillIndex);
-                    const u32 *bridgeStrip = select_base_strip(
-                        layout->tilesetBridgeBySegment[segmentId],
-                        layout->gainTilesetBridgeBySegment[segmentId],
-                        trailMode);
-                    const u32 *blinkOffBridgeStrip = select_blink_strip(
-                        layout->blinkOffTilesetBridgeBySegment[segmentId],
-                        layout->gainBlinkOffTilesetBridgeBySegment[segmentId],
-                        trailMode);
-                    const u8 useBlinkOffBridge = (blinkOffActive &&
-                                                  blinkOffBridgeStrip &&
-                                                  bridgeInTrailZone);
-                    const GaugeBreakInfo *bridgeBreakInfo = useBlinkOffBridge ? &breakInfoActual : &breakInfo;
-                    const u16 bridgeTrailPixels = useBlinkOffBridge ? trailPixelsActual : trailPixelsRendered;
-                    const u32 *bridgeStripUse = useBlinkOffBridge
-                                                ? blinkOffBridgeStrip
-                                                : bridgeStrip;
-                    const u8 bridgeIdx = compute_bridge_strip_index(
-                        layout, bridgeBreakInfo, cellFillIndex, valuePixels, bridgeTrailPixels);
-
-                    if (dyn->cachedFillIndexBridge[segmentId] != bridgeIdx)
-                    {
-                        upload_fill_tile(bridgeStripUse,
-                                         bridgeIdx, vramTileBridge, DMA);
-                        dyn->cachedFillIndexBridge[segmentId] = bridgeIdx;
-                    }
-                    if (dyn->cellCurrentTileIndex[cellIndex] != vramTileBridge)
-                    {
-                        VDP_setTileMapXY(WINDOW, attrBase | vramTileBridge,
-                                         layout->tilemapPosByCell[cellIndex].x,
-                                         layout->tilemapPosByCell[cellIndex].y);
-                        dyn->cellCurrentTileIndex[cellIndex] = vramTileBridge;
-                    }
-                }
-                continue;
-            }
-
-            /* Forced BREAK cell: cell before a bridge that must show as fully filled */
-            if (layout->bridgeBreakByFillIndex[cellFillIndex])
-            {
-                const u8 boundaryFillIndex = layout->bridgeBreakBoundaryByFillIndex[cellFillIndex];
-                if (breakInfoActual.endFillIndex > boundaryFillIndex &&
-                    breakInfoActual.valueFillIndex > boundaryFillIndex)
-                {
-                    const u16 vramTile = dyn->vramTileFullValue[segmentId];
-                    if (dyn->cellCurrentTileIndex[cellIndex] != vramTile)
-                    {
-                        VDP_setTileMapXY(WINDOW, attrBase | vramTile,
-                                         layout->tilemapPosByCell[cellIndex].x,
-                                         layout->tilemapPosByCell[cellIndex].y);
-                        dyn->cellCurrentTileIndex[cellIndex] = vramTile;
-                    }
-                    continue;
-                }
-            }
-        }
-
-        /* === Early-exit: trivial cells (FULL = F or EMPTY = V) ===
-         * Standard tiles are pre-loaded in VRAM, only tilemap update needed.
-         * ~70-80% of cells hit this path. */
-        /* Blink-off needs per-cell classification for mixed segments. */
-        if (!blinkOffActive)
-        {
-            if (cellFillIndex < breakLow)
-            {
-                const u16 vt = dyn->vramTileFullValue[segmentId];
-                if (dyn->cellCurrentTileIndex[cellIndex] != vt)
-                {
-                    VDP_setTileMapXY(WINDOW, attrBase | vt,
-                                     layout->tilemapPosByCell[cellIndex].x,
-                                     layout->tilemapPosByCell[cellIndex].y);
-                    dyn->cellCurrentTileIndex[cellIndex] = vt;
-                }
-                continue;
-            }
-            if (cellFillIndex > breakHigh)
-            {
-                const u16 vt = dyn->vramTileEmpty[segmentId];
-                if (dyn->cellCurrentTileIndex[cellIndex] != vt)
-                {
-                    VDP_setTileMapXY(WINDOW, attrBase | vt,
-                                     layout->tilemapPosByCell[cellIndex].x,
-                                     layout->tilemapPosByCell[cellIndex].y);
-                    dyn->cellCurrentTileIndex[cellIndex] = vt;
-                }
-                continue;
-            }
-        }
-
-        /* === Break zone: full classification needed (END(E)/TRAIL(T)/VALUE_BREAK(B)/FULL(F)/EMPTY(V)) === */
-        const GaugeBreakInfo *breakInfoUsed = &breakInfo;
-        u16 trailPixelsUse = trailPixelsRendered;
-        const u32 *bodyStrip = select_base_strip(layout->tilesetBySegment[segmentId],
-                                                 layout->gainTilesetBySegment[segmentId],
-                                                 trailMode);
-        const u32 *endStrip = select_base_strip(layout->tilesetEndBySegment[segmentId],
-                                                layout->gainTilesetEndBySegment[segmentId],
-                                                trailMode);
-        const u32 *trailStrip = select_base_strip(layout->tilesetTrailBySegment[segmentId],
-                                                  layout->gainTilesetTrailBySegment[segmentId],
-                                                  trailMode);
-        const u32 *blinkOffEndStrip = select_blink_strip(
-            layout->blinkOffTilesetEndBySegment[segmentId],
-            layout->gainBlinkOffTilesetEndBySegment[segmentId],
+        const u32 *bodyStrip = select_base_strip(
+            layout->tilesetBySegment[segmentId],
+            layout->gainTilesetBySegment[segmentId],
             trailMode);
-        const u32 *blinkOffTrailStrip = select_blink_strip(
-            layout->blinkOffTilesetTrailBySegment[segmentId],
-            layout->gainBlinkOffTilesetTrailBySegment[segmentId],
-            trailMode);
-        const u32 *blinkOffBodyStrip = select_blink_strip(
-            layout->blinkOffTilesetBySegment[segmentId],
-            layout->gainBlinkOffTilesetBySegment[segmentId],
-            trailMode);
-        u8 useBlinkOff = 0;
 
-        if (blinkOffActive)
-        {
-            useBlinkOff = apply_blink_off_overrides(
-                &breakInfoActual, cellFillIndex,
-                blinkOffEndStrip, blinkOffTrailStrip, blinkOffBodyStrip,
-                &endStrip, &trailStrip, &bodyStrip);
-            if (useBlinkOff)
-            {
-                breakInfoUsed = &breakInfoActual;
-                trailPixelsUse = trailPixelsActual;
-            }
-        }
+        CellDecision decision;
+        compute_cell_decision(layout, &ctx, cellIndex, cellFillIndex,
+                              segmentId, bodyStrip, &decision);
 
-        const u32 *trailStripUse = trailStrip ? trailStrip : bodyStrip;
-
-        const CellBreakType cellType = classify_break_zone_cell(
-            breakInfoUsed, cellFillIndex, (endStrip != NULL), (trailStrip != NULL));
-
+        /* === VRAM routing: map decision type to VRAM slot + cache === */
         u16 vramTile = 0;
         u8 needsUpload = 0;
-        u8 fillStripIndex = 0;
-        const u32 *stripToUse = NULL;
 
-        switch (cellType)
+        switch (decision.type)
         {
-        case CELL_TYPE_END:
-            stripToUse = endStrip;
-            fillStripIndex = s_tileIndexByValueTrail[breakInfoUsed->endValuePxInTile][breakInfoUsed->endTrailPxInTile];
-            vramTile = dyn->vramTilePartialEnd;
-            if (dyn->loadedSegmentPartialEnd != segmentId ||
-                dyn->cachedFillIndexPartialEnd != fillStripIndex)
+        case CELL_DECISION_CAP_END:
+            vramTile = dyn->vramTileCapEnd;
+            if (dyn->cachedFillIndexCapEnd != decision.fillStripIndex)
             {
                 needsUpload = 1;
-                dyn->loadedSegmentPartialEnd = segmentId;
-                dyn->cachedFillIndexPartialEnd = fillStripIndex;
+                dyn->cachedFillIndexCapEnd = decision.fillStripIndex;
             }
             break;
 
-        case CELL_TYPE_TRAIL_BREAK:
-            stripToUse = trailStripUse;
-            fillStripIndex = breakInfoUsed->trailBreakSecondActive
-                ? s_trailTileIndexByValueTrail[breakInfoUsed->valuePxInBreakCell][8]
-                : s_trailTileIndexByValueTrail[breakInfoUsed->valuePxInBreakCell][breakInfoUsed->trailPxInBreakCell];
-            vramTile = dyn->vramTilePartialTrail;
-            if (dyn->loadedSegmentPartialTrail != segmentId ||
-                dyn->cachedFillIndexPartialTrail != fillStripIndex)
+        case CELL_DECISION_CAP_START:
+            vramTile = dyn->vramTileCapStart;
+            if (dyn->cachedFillIndexCapStart != decision.fillStripIndex ||
+                dyn->loadedCapStartUsesBreak != decision.capStartUsesBreak ||
+                dyn->loadedCapStartUsesTrail != decision.capStartUsesTrail)
             {
                 needsUpload = 1;
-                dyn->loadedSegmentPartialTrail = segmentId;
-                dyn->cachedFillIndexPartialTrail = fillStripIndex;
+                dyn->cachedFillIndexCapStart = decision.fillStripIndex;
+                dyn->loadedCapStartUsesBreak = decision.capStartUsesBreak;
+                dyn->loadedCapStartUsesTrail = decision.capStartUsesTrail;
             }
             break;
 
-        case CELL_TYPE_TRAIL_BREAK2:
+        case CELL_DECISION_BRIDGE:
         {
-            stripToUse = trailStripUse;
-            const u8 endIndex = s_tileIndexByValueTrail[breakInfoUsed->endValuePxInTile][breakInfoUsed->endTrailPxInTile];
-            fillStripIndex = (endIndex == 8)
-                ? s_trailTileIndexByValueTrail[0][endIndex]
-                : endIndex;
-            vramTile = dyn->vramTilePartialTrailSecond;
-            if (dyn->loadedSegmentPartialTrailSecond != segmentId ||
-                dyn->cachedFillIndexPartialTrailSecond != fillStripIndex)
+            const u16 vramTileBridge = dyn->vramTileBridge[segmentId];
+            if (vramTileBridge == 0)
+                continue;  /* No VRAM bridge allocated -> skip */
+            vramTile = vramTileBridge;
+            if (dyn->cachedFillIndexBridge[segmentId] != decision.fillStripIndex)
             {
                 needsUpload = 1;
-                dyn->loadedSegmentPartialTrailSecond = segmentId;
-                dyn->cachedFillIndexPartialTrailSecond = fillStripIndex;
+                dyn->cachedFillIndexBridge[segmentId] = decision.fillStripIndex;
             }
             break;
         }
 
-        case CELL_TYPE_TRAIL_FULL:
-            vramTile = dyn->vramTileFullTrail[segmentId];
-            break;
-
-        case CELL_TYPE_VALUE_BREAK:
-            stripToUse = bodyStrip;
-            fillStripIndex = breakInfoUsed->trailBreakActive
-                ? breakInfoUsed->valuePxInBreakCell
-                : s_tileIndexByValueTrail[breakInfoUsed->endValuePxInTile][breakInfoUsed->endTrailPxInTile];
-            vramTile = dyn->vramTilePartialValue;
-            if (dyn->loadedSegmentPartialValue != segmentId ||
-                dyn->cachedFillIndexPartialValue != fillStripIndex)
-            {
-                needsUpload = 1;
-                dyn->loadedSegmentPartialValue = segmentId;
-                dyn->cachedFillIndexPartialValue = fillStripIndex;
-            }
-            break;
-
-        case CELL_TYPE_REGION_FULL:
+        case CELL_DECISION_STANDARD_FULL:
             vramTile = dyn->vramTileFullValue[segmentId];
             break;
 
-        case CELL_TYPE_REGION_EMPTY:
+        case CELL_DECISION_STANDARD_EMPTY:
             vramTile = dyn->vramTileEmpty[segmentId];
             break;
 
-        case CELL_TYPE_REGION_TRAIL:
+        case CELL_DECISION_STANDARD_TRAIL:
             vramTile = dyn->vramTileFullTrail[segmentId];
             break;
 
-        case CELL_TYPE_DEFAULT:
-        {
-            /* Standard fill computation: determine which partial tile to use */
-            if (cellFillIndex < breakInfoUsed->valueFillIndex)
+        case CELL_DECISION_PARTIAL_END:
+            vramTile = dyn->vramTilePartialEnd;
+            if (dyn->loadedSegmentPartialEnd != segmentId ||
+                dyn->cachedFillIndexPartialEnd != decision.fillStripIndex)
             {
-                vramTile = dyn->vramTileFullValue[segmentId];
+                needsUpload = 1;
+                dyn->loadedSegmentPartialEnd = segmentId;
+                dyn->cachedFillIndexPartialEnd = decision.fillStripIndex;
             }
-            else if (cellFillIndex > breakInfoUsed->valueFillIndex && cellFillIndex < breakInfoUsed->trailFillIndex)
+            break;
+
+        case CELL_DECISION_PARTIAL_TRAIL:
+            vramTile = dyn->vramTilePartialTrail;
+            if (dyn->loadedSegmentPartialTrail != segmentId ||
+                dyn->cachedFillIndexPartialTrail != decision.fillStripIndex)
             {
-                vramTile = dyn->vramTileFullTrail[segmentId];
+                needsUpload = 1;
+                dyn->loadedSegmentPartialTrail = segmentId;
+                dyn->cachedFillIndexPartialTrail = decision.fillStripIndex;
             }
-            else if (cellFillIndex > breakInfoUsed->trailFillIndex)
+            break;
+
+        case CELL_DECISION_PARTIAL_TRAIL2:
+            vramTile = dyn->vramTilePartialTrailSecond;
+            if (dyn->loadedSegmentPartialTrailSecond != segmentId ||
+                dyn->cachedFillIndexPartialTrailSecond != decision.fillStripIndex)
             {
-                vramTile = dyn->vramTileEmpty[segmentId];
+                needsUpload = 1;
+                dyn->loadedSegmentPartialTrailSecond = segmentId;
+                dyn->cachedFillIndexPartialTrailSecond = decision.fillStripIndex;
             }
-            else if (cellFillIndex == breakInfoUsed->valueFillIndex && cellFillIndex == breakInfoUsed->trailFillIndex)
+            break;
+
+        case CELL_DECISION_PARTIAL_VALUE:
+            vramTile = dyn->vramTilePartialValue;
+            if (dyn->loadedSegmentPartialValue != segmentId ||
+                dyn->cachedFillIndexPartialValue != decision.fillStripIndex)
             {
-                /* Both value and trail partial in same cell */
-                u8 valuePxInTile, trailPxInTile;
-                compute_fill_for_cell(layout, cellIndex, valuePixels, trailPixelsUse,
-                                      &valuePxInTile, &trailPxInTile);
-                stripToUse = bodyStrip;
-                fillStripIndex = s_tileIndexByValueTrail[valuePxInTile][trailPxInTile];
-                vramTile = dyn->vramTilePartialValue;
-                if (dyn->loadedSegmentPartialValue != segmentId ||
-                    dyn->cachedFillIndexPartialValue != fillStripIndex)
-                {
-                    needsUpload = 1;
-                    dyn->loadedSegmentPartialValue = segmentId;
-                    dyn->cachedFillIndexPartialValue = fillStripIndex;
-                }
-            }
-            else if (cellFillIndex == breakInfoUsed->valueFillIndex)
-            {
-                /* Value partial cell (trail is full=8) */
-                u8 valuePxInTile, trailPxInTile;
-                compute_fill_for_cell(layout, cellIndex, valuePixels, trailPixelsUse,
-                                      &valuePxInTile, &trailPxInTile);
-                stripToUse = bodyStrip;
-                fillStripIndex = s_tileIndexByValueTrail[valuePxInTile][8];
-                vramTile = dyn->vramTilePartialValue;
-                if (dyn->loadedSegmentPartialValue != segmentId ||
-                    dyn->cachedFillIndexPartialValue != fillStripIndex)
-                {
-                    needsUpload = 1;
-                    dyn->loadedSegmentPartialValue = segmentId;
-                    dyn->cachedFillIndexPartialValue = fillStripIndex;
-                }
-            }
-            else  /* cellFillIndex == breakInfoUsed->trailFillIndex */
-            {
-                /* Trail partial cell (value=0) */
-                u8 valuePxInTile, trailPxInTile;
-                compute_fill_for_cell(layout, cellIndex, valuePixels, trailPixelsUse,
-                                      &valuePxInTile, &trailPxInTile);
-                stripToUse = bodyStrip;
-                fillStripIndex = s_tileIndexByValueTrail[0][trailPxInTile];
-                vramTile = dyn->vramTilePartialTrail;
-                if (dyn->loadedSegmentPartialTrail != segmentId ||
-                    dyn->cachedFillIndexPartialTrail != fillStripIndex)
-                {
-                    needsUpload = 1;
-                    dyn->loadedSegmentPartialTrail = segmentId;
-                    dyn->cachedFillIndexPartialTrail = fillStripIndex;
-                }
+                needsUpload = 1;
+                dyn->loadedSegmentPartialValue = segmentId;
+                dyn->cachedFillIndexPartialValue = decision.fillStripIndex;
             }
             break;
         }
-        }
+
         /* Upload partial tile if needed */
-        if (needsUpload && stripToUse)
-            upload_fill_tile(stripToUse, fillStripIndex, vramTile, DMA);
+        if (needsUpload && decision.strip)
+            upload_fill_tile(decision.strip, decision.fillStripIndex, vramTile, DMA);
 
         /* Update tilemap only if tile changed (change detection optimization) */
         if (dyn->cellCurrentTileIndex[cellIndex] != vramTile)
         {
-            const u16 attr = attrBase | vramTile;
-            VDP_setTileMapXY(WINDOW, attr,
+            VDP_setTileMapXY(WINDOW, attrBase | vramTile,
                              layout->tilemapPosByCell[cellIndex].x,
                              layout->tilemapPosByCell[cellIndex].y);
             dyn->cellCurrentTileIndex[cellIndex] = vramTile;
