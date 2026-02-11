@@ -465,7 +465,7 @@ typedef enum
  *   No trail.
  *
  * FOLLOW:
- *   Classic behavior (hold/blink/shrink on damage, optional gain trail).
+ *   Classic damage behavior (hold/blink/shrink on decrease).
  *
  * STATIC_TRAIL:
  *   Persistent trail region. No blink, no shrink.
@@ -491,9 +491,30 @@ typedef enum
     GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK = 5
 } GaugeTrailMode;
 
+/**
+ * Gain behavior mode (used by Gauge_increase).
+ *
+ * DISABLED:
+ *   No gain trail. Value changes according to current value animation config.
+ *
+ * FOLLOW:
+ *   Gain trail leads on increase (hold/blink), then value catches up.
+ *
+ * RESERVED_*:
+ *   Placeholders for future gain styles.
+ */
+typedef enum
+{
+    GAUGE_GAIN_MODE_DISABLED   = 0,
+    GAUGE_GAIN_MODE_FOLLOW     = 1,
+    GAUGE_GAIN_MODE_RESERVED_1 = 2,
+    GAUGE_GAIN_MODE_RESERVED_2 = 3
+} GaugeGainMode;
+
 /* =============================================================================
    Forward declarations (needed for circular references)
    ============================================================================= */
+typedef struct GaugeLogic GaugeLogic;
 typedef struct Gauge Gauge;
 typedef struct GaugePart GaugePart;
 
@@ -502,6 +523,12 @@ typedef struct GaugePart GaugePart;
  * Selected once at init based on GaugeValueMode.
  */
 typedef void GaugeTickAndRenderHandler(Gauge *gauge);
+
+/**
+ * Per-gauge logic tick handler (value + trail state machine).
+ * Selected at configuration time from trail mode and kept stable at runtime.
+ */
+typedef void GaugeLogicTickHandler(GaugeLogic *logic);
 
 /**
  * Per-part render handler.
@@ -1068,12 +1095,12 @@ void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src);
  * @param capStartTrailTilesets 45-tile strips for cap start in trail zone
  * @param capEndBySegment       Array of flags: 1=enable cap end for segment, 0=disabled
  */
-void GaugeLayout_setCaps(GaugeLayout *layout,
-                         const u32 * const *capStartTilesets,
-                         const u32 * const *capEndTilesets,
-                         const u32 * const *capStartBreakTilesets,
-                         const u32 * const *capStartTrailTilesets,
-                         const u8 *capEndBySegment);
+void GaugeLayout_setCapTilesets(GaugeLayout *layout,
+                                const u32 * const *capStartTilesets,
+                                const u32 * const *capEndTilesets,
+                                const u32 * const *capStartBreakTilesets,
+                                const u32 * const *capStartTrailTilesets,
+                                const u8 *capEndBySegment);
 
 /**
  * Configure optional gain trail tilesets (used during gain trail when value increases).
@@ -1089,15 +1116,15 @@ void GaugeLayout_setCaps(GaugeLayout *layout,
  * @param gainCapStartBreakTilesets CAP START BREAK gain strips (45 tiles)
  * @param gainCapStartTrailTilesets CAP START TRAIL gain strips (45 tiles)
  */
-void GaugeLayout_setGainTrail(GaugeLayout *layout,
-                              const u32 * const *gainBodyTilesets,
-                              const u32 * const *gainEndTilesets,
-                              const u32 * const *gainTrailTilesets,
-                              const u32 * const *gainBridgeTilesets,
-                              const u32 * const *gainCapStartTilesets,
-                              const u32 * const *gainCapEndTilesets,
-                              const u32 * const *gainCapStartBreakTilesets,
-                              const u32 * const *gainCapStartTrailTilesets);
+void GaugeLayout_setGainTrailTilesets(GaugeLayout *layout,
+                                      const u32 * const *gainBodyTilesets,
+                                      const u32 * const *gainEndTilesets,
+                                      const u32 * const *gainTrailTilesets,
+                                      const u32 * const *gainBridgeTilesets,
+                                      const u32 * const *gainCapStartTilesets,
+                                      const u32 * const *gainCapEndTilesets,
+                                      const u32 * const *gainCapStartBreakTilesets,
+                                      const u32 * const *gainCapStartTrailTilesets);
 
 /**
  * Configure optional blink-off tilesets (used during trail blink OFF frames).
@@ -1116,15 +1143,15 @@ void GaugeLayout_setGainTrail(GaugeLayout *layout,
  * @param blinkOffCapStartBreakTilesets CAP START BREAK blink-off strips (45 tiles)
  * @param blinkOffCapStartTrailTilesets CAP START TRAIL blink-off strips (45 tiles)
  */
-void GaugeLayout_setBlinkOff(GaugeLayout *layout,
-                             const u32 * const *blinkOffBodyTilesets,
-                             const u32 * const *blinkOffEndTilesets,
-                             const u32 * const *blinkOffTrailTilesets,
-                             const u32 * const *blinkOffBridgeTilesets,
-                             const u32 * const *blinkOffCapStartTilesets,
-                             const u32 * const *blinkOffCapEndTilesets,
-                             const u32 * const *blinkOffCapStartBreakTilesets,
-                             const u32 * const *blinkOffCapStartTrailTilesets);
+void GaugeLayout_setBlinkOffTilesets(GaugeLayout *layout,
+                                     const u32 * const *blinkOffBodyTilesets,
+                                     const u32 * const *blinkOffEndTilesets,
+                                     const u32 * const *blinkOffTrailTilesets,
+                                     const u32 * const *blinkOffBridgeTilesets,
+                                     const u32 * const *blinkOffCapStartTilesets,
+                                     const u32 * const *blinkOffCapEndTilesets,
+                                     const u32 * const *blinkOffCapStartBreakTilesets,
+                                     const u32 * const *blinkOffCapStartTrailTilesets);
 
 /**
  * Configure optional gain blink-off tilesets (used during gain trail blink OFF frames).
@@ -1140,15 +1167,15 @@ void GaugeLayout_setBlinkOff(GaugeLayout *layout,
  * @param gainBlinkOffCapStartBreakTilesets CAP START BREAK gain blink-off strips (45 tiles)
  * @param gainBlinkOffCapStartTrailTilesets CAP START TRAIL gain blink-off strips (45 tiles)
  */
-void GaugeLayout_setGainBlinkOff(GaugeLayout *layout,
-                                 const u32 * const *gainBlinkOffBodyTilesets,
-                                 const u32 * const *gainBlinkOffEndTilesets,
-                                 const u32 * const *gainBlinkOffTrailTilesets,
-                                 const u32 * const *gainBlinkOffBridgeTilesets,
-                                 const u32 * const *gainBlinkOffCapStartTilesets,
-                                 const u32 * const *gainBlinkOffCapEndTilesets,
-                                 const u32 * const *gainBlinkOffCapStartBreakTilesets,
-                                 const u32 * const *gainBlinkOffCapStartTrailTilesets);
+void GaugeLayout_setGainBlinkOffTilesets(GaugeLayout *layout,
+                                         const u32 * const *gainBlinkOffBodyTilesets,
+                                         const u32 * const *gainBlinkOffEndTilesets,
+                                         const u32 * const *gainBlinkOffTrailTilesets,
+                                         const u32 * const *gainBlinkOffBridgeTilesets,
+                                         const u32 * const *gainBlinkOffCapStartTilesets,
+                                         const u32 * const *gainBlinkOffCapEndTilesets,
+                                         const u32 * const *gainBlinkOffCapStartBreakTilesets,
+                                         const u32 * const *gainBlinkOffCapStartTrailTilesets);
 
 /**
  * Configure compact PIP styles (used by GAUGE_VALUE_MODE_PIP renderer).
@@ -1183,28 +1210,33 @@ void GaugeLayout_setPipStyles(GaugeLayout *layout,
    maps between them. When they're equal, it's a direct 1:1 mapping.
    The LUT buffer is allocated dynamically (maxValue+1 entries).
 
-   VALUE BEHAVIOR ON DAMAGE (Gauge_decrease):
-   -------------------------------------------
-     1. currentValue decreases by the requested amount
-     2. valueTargetPixels = value_to_pixels(currentValue)
-     3. If valueAnimEnabled: valuePixels animates toward valueTargetPixels
-        If !valueAnimEnabled: valuePixels jumps instantly
-     4. Trail holds at the previous valuePixels position for holdFrames
-     5. Trail blinks on/off for blinkFrames
-     6. Trail shrinks toward the new valuePixels
-     7. When trail reaches value, trailMode resets to NONE
+   TRAIL MODE BEHAVIOR:
+   --------------------
+   FOLLOW:
+     - Gauge_decrease starts classic damage trail (hold -> blink -> shrink).
 
-   VALUE BEHAVIOR ON HEAL (Gauge_increase):
-   -----------------------------------------
-     1. currentValue increases by the requested amount
-     2. valueTargetPixels = value_to_pixels(currentValue)
-     3. If valueAnimEnabled AND trailEnabled:
-        - Trail jumps immediately to new target (gain trail leads ahead)
-        - Trail holds for holdFrames, blinks for blinkFrames
-        - Value then animates up to catch the trail
-        - When value reaches trail, trailMode resets to NONE
-     4. If !valueAnimEnabled OR !trailEnabled:
-        - Value changes instantly, trail follows, no blink/hold
+   DISABLED:
+     - No trail (trail equals value).
+
+   STATIC_TRAIL:
+     - Trail stays at maxFillPixels (persistent lost region), no blink.
+
+   STATIC_TRAIL_CRITICAL_BLINK:
+     - Same as STATIC_TRAIL, with blink only when currentValue <= criticalValue.
+
+   CRITICAL_TRAIL_BLINK:
+     - No trail above threshold.
+     - At/below threshold: trail spans max->value and blinks continuously.
+
+   CRITICAL_VALUE_BLINK:
+     - No trail.
+     - At/below threshold: remaining value blinks.
+
+   GAIN MODE (configured separately via Gauge_setGainMode):
+   --------------------------------------------------------
+   FOLLOW:
+     - Gauge_increase starts gain trail (hold -> blink -> value catch-up),
+       independent from the damage trail mode.
 
    ANIMATION PARAMETERS:
    ---------------------
@@ -1235,7 +1267,7 @@ void GaugeLayout_setPipStyles(GaugeLayout *layout,
      Automatically managed by the logic -- users don't need to touch this.
 
    ============================================================================= */
-typedef struct
+struct GaugeLogic
 {
     /* --- 16-bit / pointer fields first (word-aligned on 68000) --- */
 
@@ -1261,16 +1293,22 @@ typedef struct
     u8 blinkFramesRemaining;        /* Frames of blinking left after hold */
     u8 valueAnimEnabled;            /* 0=value jumps instantly, 1=value slides smoothly */
     u8 valueAnimShift;              /* Value slide speed: step = distance >> shift + 1 */
-    u8 trailAnimShift;              /* Trail shrink speed: step = distance >> shift + 1 */
-    u8 blinkShift;                  /* Blink rate: toggles every 2^shift frames */
+    u8 trailAnimShift;              /* Damage trail shrink speed: step = distance >> shift + 1 */
+    u8 blinkShift;                  /* Damage blink rate: toggles every 2^shift frames */
+    u8 gainAnimShift;               /* Gain catch-up speed: step = distance >> shift + 1 */
+    u8 gainBlinkShift;              /* Gain blink rate: toggles every 2^shift frames */
     u8 trailEnabled;                /* 0=no trail rendering, 1=trail rendering enabled */
     u8 configuredTrailMode;         /* GaugeTrailMode (configured behavior) */
+    u8 configuredGainMode;          /* GaugeGainMode (configured behavior) */
     u8 activeTrailState;            /* Internal state: NONE / DAMAGE / GAIN */
+    u8 modeUsesCriticalThreshold;   /* 1 when trail mode uses criticalValue threshold */
+    u8 modeUsesValueBlink;          /* 1 when critical mode blinks remaining value (not trail) */
+    u8 modeKeepsStaticTrail;        /* 1 when trail stays fixed at maxFillPixels */
     u8 lastBlinkOn;                 /* Blink ON/OFF state from last frame (for change detection) */
     u8 lastActiveTrailState;        /* Internal trail state from last frame (for change detection) */
     u8 needUpdate;                  /* 1=needs rendering, 0=fully idle (Gauge_update returns early) */
 
-} GaugeLogic;
+};
 
 
 /* =============================================================================
@@ -1455,7 +1493,8 @@ typedef struct GaugePart
 
    3. Configure animations (optional):
         Gauge_setValueAnim(&myGauge, 1, 4);   // enable smooth value changes
-        Gauge_setTrailMode(&myGauge, GAUGE_TRAIL_MODE_FOLLOW, 0, 4, 3);
+        Gauge_setTrailMode(&myGauge, GAUGE_TRAIL_MODE_FOLLOW, 0, 4, 3); // damage mode
+        Gauge_setGainMode(&myGauge, GAUGE_GAIN_MODE_FOLLOW, 4, 3);       // gain mode
 
    4. Add parts (each call allocates part + VRAM and sets up rendering):
         Gauge_addPart(&myGauge, &layout, x, y);
@@ -1502,9 +1541,10 @@ struct Gauge
     GaugePart **parts;          /* Dynamically allocated array of part pointers */
     GaugeTickAndRenderHandler *tickAndRenderHandler;       /* Active update path */
     GaugeTickAndRenderHandler *steadyTickAndRenderHandler; /* Handler used after first update lock */
+    GaugeLogicTickHandler *logicTickHandler;               /* Active logic tick path (trail mode specific) */
     u8 partCount;               /* Number of active parts */
     u8 partCapacity;            /* Allocated part pointer capacity */
-    u8 runtimeLocked;           /* 1 after first Gauge_update call */
+    u8 runtimeLocked;           /* Runtime state: 0=open, 1=has parts, 2=closed after first update */
 
     /* --- VRAM allocation --- */
     u16 vramBase;                   /* Base VRAM tile index */
@@ -1561,8 +1601,10 @@ void GaugeLayout_release(GaugeLayout *layout);
 
 /**
  * Initialize gauge from GaugeInit configuration.
- * Trail and value animation are disabled by default.
- * Use Gauge_setTrailMode() and Gauge_setValueAnim() to configure animations.
+ * Trail mode defaults to disabled, gain mode defaults to disabled,
+ * and value animation defaults to instant.
+ * Use Gauge_setTrailMode(), Gauge_setGainMode() and Gauge_setValueAnim()
+ * to configure animations.
  * Call Gauge_release() before re-initializing an already-used Gauge.
  */
 void Gauge_init(Gauge *gauge, const GaugeInit *init);
@@ -1571,7 +1613,8 @@ void Gauge_init(Gauge *gauge, const GaugeInit *init);
  * Configure value animation.
  *
  * Configuration-time only:
- * - no-op after first Gauge_update() call (runtime lock)
+ * - no-op once the first part has been added
+ * - no-op after first Gauge_update() call (runtime closed)
  *
  * @param gauge    Gauge to configure
  * @param enabled  Enable animated value changes (0=instant, 1=animated)
@@ -1580,17 +1623,17 @@ void Gauge_init(Gauge *gauge, const GaugeInit *init);
 void Gauge_setValueAnim(Gauge *gauge, u8 enabled, u8 shift);
 
 /**
- * Configure trail behavior mode and timing.
+ * Configure damage trail behavior mode and timing.
  *
  * Configuration-time only:
- * - no-op once at least one part has been added
- * - no-op after first Gauge_update() call (runtime lock)
+ * - no-op once the first part has been added
+ * - no-op after first Gauge_update() call (runtime closed)
  *
  * @param gauge         Gauge to configure
- * @param mode          Trail behavior mode
+ * @param mode          Damage trail behavior mode
  * @param criticalValue Critical threshold in logical value units (CRITICAL_* modes)
- * @param shift         Trail shrink speed divider (3-6 recommended, 0=use default 4)
- * @param blinkShift    Blink frequency divider (2-4 recommended, 0=use default 3)
+ * @param shift         Damage trail shrink speed divider (3-6 recommended, 0=use default 4)
+ * @param blinkShift    Damage blink frequency divider (2-4 recommended, 0=use default 3)
  */
 void Gauge_setTrailMode(Gauge *gauge,
                         GaugeTrailMode mode,
@@ -1599,11 +1642,29 @@ void Gauge_setTrailMode(Gauge *gauge,
                         u8 blinkShift);
 
 /**
+ * Configure gain behavior mode and timing.
+ *
+ * Configuration-time only:
+ * - no-op once the first part has been added
+ * - no-op after first Gauge_update() call (runtime closed)
+ *
+ * @param gauge      Gauge to configure
+ * @param mode       Gain behavior mode
+ * @param shift      Gain catch-up speed divider (3-6 recommended, 0=use default 4)
+ * @param blinkShift Gain blink frequency divider (2-4 recommended, 0=use default 3)
+ */
+void Gauge_setGainMode(Gauge *gauge,
+                       GaugeGainMode mode,
+                       u8 shift,
+                       u8 blinkShift);
+
+/**
  * Override the maximum fill pixel count.
  * By default, maxFillPixels = layout->length * 8 (set at Gauge_init).
  * No-op if the new value equals the current maxFillPixels.
  * Configuration-time only:
- * - no-op after first Gauge_update() call (runtime lock)
+ * - no-op once the first part has been added
+ * - no-op after first Gauge_update() call (runtime closed)
  *
  * If maxValue != new maxFillPixels, the embedded LUT is repopulated.
  * If maxValue == new maxFillPixels, the LUT is cleared (1:1 mapping).
@@ -1616,7 +1677,8 @@ void Gauge_setMaxFillPixels(Gauge *gauge, u16 maxFillPixels);
 /**
  * Add a part to the gauge (simplified).
  * VRAM is allocated automatically from gauge's vramBase.
- * No-op after first Gauge_update() call (runtime lock).
+ * Allowed while runtime state is OPEN or HAS_PARTS.
+ * No-op after first Gauge_update() call (runtime CLOSED).
  *
  * @param gauge     Parent gauge
  * @param layout    Layout configuration (retained via refCount)
@@ -1631,7 +1693,8 @@ u8 Gauge_addPart(Gauge *gauge,
 /**
  * Add a part with custom VRAM configuration.
  * Use when you need specific VRAM placement or different VRAM mode.
- * No-op after first Gauge_update() call (runtime lock).
+ * Allowed while runtime state is OPEN or HAS_PARTS.
+ * No-op after first Gauge_update() call (runtime CLOSED).
  *
  * @param gauge     Parent gauge
  * @param layout    Layout configuration (retained via refCount)
@@ -1660,7 +1723,7 @@ void Gauge_release(Gauge *gauge);
  *
  * Performs:
  * - Value animation (if enabled)
- * - Trail animation (hold, blink, shrink)
+ * - Trail mode processing (follow/static/critical)
  * - Tile streaming for all parts
  * - Early return optimization if nothing changed
  */
@@ -1687,7 +1750,8 @@ void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
  
 /**
  * Increase gauge value (heal).
- * When valueAnim is enabled, can trigger a gain trail (lead blink then catch-up).
+ * If gain mode is FOLLOW and valueAnim is enabled,
+ * triggers gain trail (lead blink then catch-up).
  *
  * @param gauge   Gauge to modify
  * @param amount  Amount to increase

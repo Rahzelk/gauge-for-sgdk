@@ -21,7 +21,8 @@
       - Fill a GaugeInit and call Gauge_init(&gauge, &gaugeInit)
       - Optionally configure animations:
         * Gauge_setValueAnim() for smooth value transitions
-        * Gauge_setTrailMode() for trail/blink behavior
+        * Gauge_setTrailMode() for damage trail/blink behavior
+        * Gauge_setGainMode() for increase/gain behavior
 
    4. ADD PARTS TO THE GAUGE (visual representation on screen)
       - Call Gauge_addPart() for each visual instance
@@ -34,7 +35,7 @@
 
    6. MODIFY VALUES
       - Gauge_setValue(gauge, value) : instant change, no animation
-      - Gauge_increase(gauge, amount, holdFrames, blinkFrames) : behavior depends on trail mode
+      - Gauge_increase(gauge, amount, holdFrames, blinkFrames) : behavior depends on gain mode
       - Gauge_decrease(gauge, amount, holdFrames, blinkFrames) : damage with trail
 
    VRAM MODES:
@@ -573,13 +574,17 @@ static void initSample5(u16 *nextVram)
         .valueMode = GAUGE_VALUE_MODE_FILL
     });
 
-    /* Step 6: Enable value animation + critical value blink mode. */
+    /* Step 6: Enable value animation + critical damage mode + gain FOLLOW mode. */
     Gauge_setValueAnim(&g_gaugeSample5, 1, 2);      /* enabled, default speed */
     Gauge_setTrailMode(&g_gaugeSample5,
                        GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK,
                        30,
                        3,
                        2);
+    Gauge_setGainMode(&g_gaugeSample5,
+                      GAUGE_GAIN_MODE_FOLLOW,
+                      3,
+                      2);
 
     /* Step 7: Add part */
     Gauge_addPart(&g_gaugeSample5,
@@ -804,15 +809,15 @@ static void initSample7(u16 *nextVram)
     /* Visual trigger tweak for bevel part: start reacting around valuePx ~= 32.
      * Formula: fillOffset = triggerPx - partWidthPx => 32 - (3*8) = 8. */
     GaugeLayout_setFillOffset(&s_layoutSample7Part2, 8);
-    GaugeLayout_setGainTrail(&s_layoutSample7Part2,
-                             sample7Part2GainBodyTilesets,
-                             sample7Part2GainEndTilesets,
-                             sample7Part2GainTrailTilesets,
-                             NULL,
-                             NULL,
-                             NULL,
-                             NULL,
-                             NULL);
+    GaugeLayout_setGainTrailTilesets(&s_layoutSample7Part2,
+                                     sample7Part2GainBodyTilesets,
+                                     sample7Part2GainEndTilesets,
+                                     sample7Part2GainTrailTilesets,
+                                     NULL,
+                                     NULL,
+                                     NULL,
+                                     NULL,
+                                     NULL);
 
     /* Step 4: Initialize gauge (max pixels = Part1 only)
        - maxValue = Part1 pixels (12 tiles = 96 pixels)
@@ -830,8 +835,8 @@ static void initSample7(u16 *nextVram)
     });
 
     Gauge_setTrailMode(&g_gaugeSample7,
-                       GAUGE_TRAIL_MODE_FOLLOW,
-                       0,
+                       GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK,
+                       40,
                        0,
                        0);
 
@@ -1052,22 +1057,22 @@ static void initSample4Layout(void)
        Cap behavior summary:
        - Cap start behaves like a classic cell (END, TRAIL, BREAK or FULL)
        - Cap end always uses its own tileset and follows the END LUT */
-    GaugeLayout_setCaps(&s_layoutSample4,
-                        sample4CapStartTilesets,
-                        sample4CapEndTilesets,
-                        sample4CapStartBreakTilesets,
-                        sample4CapStartTrailTilesets,
-                        sample4CapEndBySegment);
+    GaugeLayout_setCapTilesets(&s_layoutSample4,
+                               sample4CapStartTilesets,
+                               sample4CapEndTilesets,
+                               sample4CapStartBreakTilesets,
+                               sample4CapStartTrailTilesets,
+                               sample4CapEndBySegment);
 
-    GaugeLayout_setBlinkOff(&s_layoutSample4,
-                            sample4BlinkOffBodyTilesets,
-                            sample4BlinkOffEndTilesets,
-                            sample4BlinkOffTrailTilesets,
-                            sample4BlinkOffBridgeTilesets,
-                            sample4BlinkOffCapStartTilesets,
-                            sample4BlinkOffCapEndTilesets,
-                            sample4BlinkOffCapStartBreakTilesets,
-                            sample4BlinkOffCapStartTrailTilesets);
+    GaugeLayout_setBlinkOffTilesets(&s_layoutSample4,
+                                    sample4BlinkOffBodyTilesets,
+                                    sample4BlinkOffEndTilesets,
+                                    sample4BlinkOffTrailTilesets,
+                                    sample4BlinkOffBridgeTilesets,
+                                    sample4BlinkOffCapStartTilesets,
+                                    sample4BlinkOffCapEndTilesets,
+                                    sample4BlinkOffCapStartBreakTilesets,
+                                    sample4BlinkOffCapStartTrailTilesets);
 
     GaugeLayout_makeMirror(&s_layoutSample4Mirror, &s_layoutSample4);
 }
