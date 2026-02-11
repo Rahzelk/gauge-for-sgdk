@@ -128,8 +128,9 @@
    Blink rate is controlled by blinkShift:
      blinkShift=1 -> toggles every  2 frames (fast)
      blinkShift=2 -> toggles every  4 frames
-     blinkShift=3 -> toggles every  8 frames (default, ~7.5 Hz @ 60fps)
+     blinkShift=3 -> toggles every  8 frames (default, 7.5 toggles/sec @ 60fps)
      blinkShift=4 -> toggles every 16 frames (slow)
+   Note: a full ON+OFF cycle is twice the toggle period (e.g., 3.75 cycles/sec at shift=3).
 
 
    CAPS (CAP START / CAP END)
@@ -492,6 +493,15 @@ typedef enum
 } GaugeTrailMode;
 
 /**
+ * Cap end enable flag for capEndBySegment arrays.
+ */
+typedef enum
+{
+    GAUGE_CAP_INACTIVE = 0,
+    GAUGE_CAP_ACTIVE   = 1
+} GaugeCapEndState;
+
+/**
  * Gain behavior mode (used by Gauge_increase).
  *
  * DISABLED:
@@ -629,6 +639,9 @@ typedef void GaugePartRenderHandler(GaugePart *part,
        fillOffset = triggerPixel - (partLength * 8)
      where triggerPixel is the gauge pixel value at which the last
      cell of the bottom row should become completely full.
+
+     Note: fillOffset is stored on GaugeLayout. Use a separate layout if
+     different parts need different offsets.
 
      Configure via GaugeLayout_setFillOffset().
 
@@ -1053,7 +1066,7 @@ void GaugeLayout_initEx(GaugeLayout *layout,
  * Example: Part2 is 3 cells, should become fully filled at pixel 32:
  *   fillOffset = 32 - (3 * 8) = 8
  *
- * @param layout            Layout to configure
+ * @param layout            Layout to configure (shared by all parts that retain it)
  * @param fillOffsetPixels  Pixel offset (0 = starts at gauge pixel 0)
  */
 void GaugeLayout_setFillOffset(GaugeLayout *layout, u16 fillOffsetPixels);
@@ -1061,12 +1074,14 @@ void GaugeLayout_setFillOffset(GaugeLayout *layout, u16 fillOffsetPixels);
 /**
  * Set fill direction to forward (cell 0 fills first).
  * Use for gauges that fill from left or top.
+ * Configuration-time only; affects all parts that share this layout.
  */
 void GaugeLayout_setFillForward(GaugeLayout *layout);
 
 /**
  * Set fill direction to reverse (last cell fills first).
  * Use for gauges that fill from right or bottom.
+ * Configuration-time only; affects all parts that share this layout.
  */
 void GaugeLayout_setFillReverse(GaugeLayout *layout);
 
@@ -1074,7 +1089,7 @@ void GaugeLayout_setFillReverse(GaugeLayout *layout);
  * Create mirrored layout for P2/opponent side.
  * - Reverses segment order
  * - Reverses fill direction
- * - Sets appropriate flip flags based on orientation
+ * - Copies flip flags from the source layout (no automatic flip)
  *
  * @param dst   Destination layout (will be initialized)
  * @param src   Source layout to mirror
@@ -1515,8 +1530,9 @@ typedef struct GaugePart
 
    Common use cases:
    - 2-lane gauge: 2 parts at Y and Y+1 for a 2-tile-tall bar
-   - 2-lane with shorter bottom row: Part 1 uses fillOffset to sample
-     a subset of the value (see fillOffset field reference in GaugeLayout)
+   - 2-lane with shorter bottom row: the shorter row uses a different fillOffset
+     to sample a subset of the value (see fillOffset field reference in GaugeLayout).
+     Because fillOffset is stored in the layout, use a separate layout for that row.
 
    NOTE: For two independent gauges (e.g., P1 and P2 health bars), use
    two separate Gauge objects. A mirrored P2 layout is created with

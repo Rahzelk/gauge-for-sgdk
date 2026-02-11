@@ -60,11 +60,11 @@
 
 /* Default animation speeds (bit shift dividers: higher = slower)
  * Animation step formula: step = (distance >> shift) + 1
- * Blink frequency formula: frequency = 60fps / (2 * (1 << shift)) Hz
+ * Blink full-cycle frequency: 60fps / (2 * (1 << shift)) Hz
  */
 #define GAUGE_DEFAULT_VALUE_ANIM_SHIFT  4  /* Value moves at distance/16 + 1 px per frame */
 #define GAUGE_DEFAULT_TRAIL_ANIM_SHIFT  4  /* Trail shrinks at distance/16 + 1 px per frame */
-#define GAUGE_DEFAULT_BLINK_SHIFT       3  /* Blink toggles every 8 frames (~7.5 Hz @ 60fps) */
+#define GAUGE_DEFAULT_BLINK_SHIFT       3  /* Blink toggles every 8 frames (7.5 toggles/sec @ 60fps) */
 
 /* Gauge runtime configuration states. */
 #define GAUGE_RUNTIME_OPEN       0
@@ -2514,7 +2514,8 @@ void GaugeLayout_setFillReverse(GaugeLayout *layout)
 /**
  * Create a mirrored copy of a layout (for P2/opponent side).
  *
- * Reverses segment order, swaps fill direction, and sets appropriate flip flags.
+ * Reverses segment order and swaps fill direction.
+ * Copies flip flags from the source layout (no automatic flip).
  * Copies all tilesets by reference (no deep copy needed since tilesets are in ROM).
  */
 void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src)
