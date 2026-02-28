@@ -472,6 +472,13 @@ static u16 compute_vram_size_for_layout(const GaugeLayout *layout,
                                         GaugeVramMode vramMode,
                                         u8 trailEnabled,
                                         GaugeValueMode valueMode);
+static inline u8 select_pip_state_for_cell(const GaugeLayout *layout,
+                                           u8 cellIndex,
+                                           u16 valuePixels,
+                                           u16 trailPixelsRendered,
+                                           u16 trailPixelsActual,
+                                           u8 blinkOffActive,
+                                           u8 trailMode);
 
 /**
  * Compute all break/transition zone information for a gauge part.
@@ -1138,7 +1145,124 @@ typedef struct
     CellDecisionType type;      /* VRAM slot type for dynamic mode routing */
     u8 capStartUsesBreak;       /* 1 if cap start uses break variant (for dyn cache) */
     u8 capStartUsesTrail;       /* 1 if cap start uses trail variant (for dyn cache) */
+    u8 useBlinkVariant;         /* 1 when decision strip comes from blink-off variant */
 } CellDecision;
+
+/* Debug trace context (filled in gauge_tick_and_render_fill). */
+#if GAUGE_ENABLE_TRACE
+typedef struct
+{
+    u8 active;
+    u8 partIndex;
+    u32 traceId;
+} GaugeTraceContext;
+
+static GaugeTraceContext s_traceContext = {0, 0, 0};
+
+static const char *decision_type_to_text(CellDecisionType type)
+{
+    switch (type)
+    {
+    case CELL_DECISION_CAP_END: return "CAP_END";
+    case CELL_DECISION_CAP_START: return "CAP_START";
+    case CELL_DECISION_BRIDGE: return "BRIDGE";
+    case CELL_DECISION_STANDARD_FULL: return "STANDARD_FULL";
+    case CELL_DECISION_STANDARD_EMPTY: return "STANDARD_EMPTY";
+    case CELL_DECISION_STANDARD_TRAIL: return "STANDARD_TRAIL";
+    case CELL_DECISION_PARTIAL_END: return "PARTIAL_END";
+    case CELL_DECISION_PARTIAL_TRAIL: return "PARTIAL_TRAIL";
+    case CELL_DECISION_PARTIAL_TRAIL2: return "PARTIAL_TRAIL2";
+    case CELL_DECISION_PARTIAL_VALUE: return "PARTIAL_VALUE";
+    default: return "UNKNOWN";
+    }
+}
+
+static const char *decision_class_to_text(CellDecisionType type,
+                                          u8 capStartUsesBreak,
+                                          u8 capStartUsesTrail)
+{
+    switch (type)
+    {
+    case CELL_DECISION_CAP_END:
+        return "CAP_END";
+    case CELL_DECISION_CAP_START:
+        if (capStartUsesTrail)
+            return "CAP_START_TRAIL";
+        if (capStartUsesBreak)
+            return "CAP_START_BREAK";
+        return "CAP_START";
+    case CELL_DECISION_BRIDGE:
+        return "BRIDGE";
+    case CELL_DECISION_PARTIAL_END:
+        return "END";
+    case CELL_DECISION_STANDARD_TRAIL:
+    case CELL_DECISION_PARTIAL_TRAIL:
+    case CELL_DECISION_PARTIAL_TRAIL2:
+        return "TRAIL";
+    case CELL_DECISION_STANDARD_FULL:
+    case CELL_DECISION_STANDARD_EMPTY:
+    case CELL_DECISION_PARTIAL_VALUE:
+    default:
+        return "BODY";
+    }
+}
+
+static const char *trail_mode_to_text(u8 trailMode)
+{
+    switch (trailMode)
+    {
+    case GAUGE_TRAIL_STATE_DAMAGE: return "DAMAGE";
+    case GAUGE_TRAIL_STATE_GAIN: return "GAIN";
+    case GAUGE_TRAIL_STATE_NONE:
+    default:
+        return "NONE";
+    }
+}
+
+static const char *render_state_to_text(u8 trailMode,
+                                        u8 blinkOffActive,
+                                        u16 valuePixels,
+                                        u16 trailPixelsRendered)
+{
+    if (trailMode == GAUGE_TRAIL_STATE_GAIN)
+        return "GAIN";
+    if (blinkOffActive)
+        return "BLINK_OFF";
+    if (trailPixelsRendered > valuePixels)
+        return "TRAIL";
+    return "NORMAL";
+}
+
+static void trace_emit_cell_line(u8 cellIndex,
+                                 u8 segmentId,
+                                 CellDecisionType masterType,
+                                 u8 masterIdx,
+                                 u8 terminalOverrideApplied,
+                                 const CellDecision *decision)
+{
+    if (!s_traceContext.active || !decision)
+        return;
+
+    kprintf(
+        "GAUGE_TRACE CELL traceId=%lu part=%u cell=%u seg=%u mtype=%s midx=%u ovr=%s class=%s type=%s strip=0x%08lX idx=%u\n",
+        (unsigned long)s_traceContext.traceId,
+        (unsigned int)s_traceContext.partIndex,
+        (unsigned int)cellIndex,
+        (unsigned int)segmentId,
+        decision_type_to_text(masterType),
+        (unsigned int)masterIdx,
+        terminalOverrideApplied ? "TERM_END" : "NONE",
+        decision_class_to_text(decision->type,
+                               decision->capStartUsesBreak,
+                               decision->capStartUsesTrail),
+        decision_type_to_text(decision->type),
+        (unsigned long)(u32)decision->strip,
+        (unsigned int)decision->fillStripIndex
+    );
+}
+#endif
+
+static Gauge *s_activeGaugeForRender = NULL;
 
 /**
  * Fill loop context -- loop-invariant state shared between fixed and dynamic.
@@ -1256,6 +1380,7 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
 {
     out->capStartUsesBreak = 0;
     out->capStartUsesTrail = 0;
+    out->useBlinkVariant = 0;
 
     /* Blink-off body strip lookup is only needed when blink-off is active. */
     const u32 *blinkOffBodyStrip = NULL;
@@ -1283,12 +1408,14 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
             layout->gainBlinkOffTilesetCapEndBySegment[segmentId],
             ctx->trailMode);
 
+        u8 capUsesBlink = 0;
         if (ctx->blinkOffActive &&
             capEndBlinkStrip &&
             is_cell_in_trail_zone(&ctx->breakInfoActual, cellFillIndex))
         {
             capEndStrip = capEndBlinkStrip;
             capTrailPixels = ctx->trailPixelsActual;
+            capUsesBlink = 1;
         }
 
         u8 capValuePx = 0;
@@ -1299,6 +1426,7 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
         out->type = CELL_DECISION_CAP_END;
         out->strip = capEndStrip;
         out->fillStripIndex = s_tileIndexByValueTrail[capValuePx][capTrailPx];
+        out->useBlinkVariant = capUsesBlink;
         return;
     }
 
@@ -1336,6 +1464,7 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
                 ctx->trailMode);
 
             CapStartResult capResult;
+            u8 capUsesBlink = 0;
             if (ctx->blinkOffActive)
             {
                 CapStartResult capActual;
@@ -1364,6 +1493,7 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
                 {
                     capActual.strip = blinkStrip;
                     capResult = capActual;
+                    capUsesBlink = 1;
                 }
                 else
                 {
@@ -1390,6 +1520,7 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
             out->fillStripIndex = capResult.fillStripIndex;
             out->capStartUsesBreak = capResult.usesBreak;
             out->capStartUsesTrail = capResult.usesTrail;
+            out->useBlinkVariant = capUsesBlink;
             return;
         }
         /* capStartStrip == NULL: fall through to normal cell handling */
@@ -1439,6 +1570,7 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
                 out->type = CELL_DECISION_BRIDGE;
                 out->strip = bridgeStripUse;
                 out->fillStripIndex = bridgeIdx;
+                out->useBlinkVariant = useBlinkOffBridge;
             }
             else
             {
@@ -1451,6 +1583,7 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
                 out->type = CELL_DECISION_BRIDGE;
                 out->strip = fallbackStrip;
                 out->fillStripIndex = STRIP_INDEX_FULL;
+                out->useBlinkVariant = (fallbackStrip == blinkOffBodyStrip) ? 1 : 0;
             }
             return;
         }
@@ -1471,6 +1604,7 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
                 out->type = CELL_DECISION_STANDARD_FULL;
                 out->strip = breakStripUse;
                 out->fillStripIndex = STRIP_INDEX_FULL;
+                out->useBlinkVariant = (breakStripUse == blinkOffBodyStrip) ? 1 : 0;
                 return;
             }
         }
@@ -1560,6 +1694,7 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
         out->strip = endStripUse;
         out->fillStripIndex = s_tileIndexByValueTrail
             [breakInfoUsed->endValuePxInTile][breakInfoUsed->endTrailPxInTile];
+        out->useBlinkVariant = useBlinkOff;
         return;
 
     case CELL_TYPE_TRAIL_BREAK:
@@ -1569,6 +1704,7 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
             ? s_trailTileIndexByValueTrail[breakInfoUsed->valuePxInBreakCell][8]
             : s_trailTileIndexByValueTrail[breakInfoUsed->valuePxInBreakCell]
                                           [breakInfoUsed->trailPxInBreakCell];
+        out->useBlinkVariant = useBlinkOff;
         return;
 
     case CELL_TYPE_TRAIL_BREAK2:
@@ -1580,6 +1716,7 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
         out->fillStripIndex = (endIndex == 8)
             ? s_trailTileIndexByValueTrail[0][endIndex]
             : endIndex;
+        out->useBlinkVariant = useBlinkOff;
         return;
     }
 
@@ -1587,6 +1724,7 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
         out->type = CELL_DECISION_STANDARD_TRAIL;
         out->strip = trailStripFinal;
         out->fillStripIndex = fullTrailIndex;
+        out->useBlinkVariant = useBlinkOff;
         return;
 
     case CELL_TYPE_VALUE_BREAK:
@@ -1596,24 +1734,28 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
             ? breakInfoUsed->valuePxInBreakCell
             : s_tileIndexByValueTrail[breakInfoUsed->endValuePxInTile]
                                      [breakInfoUsed->endTrailPxInTile];
+        out->useBlinkVariant = useBlinkOff;
         return;
 
     case CELL_TYPE_REGION_FULL:
         out->type = CELL_DECISION_STANDARD_FULL;
         out->strip = bodyStripUse;
         out->fillStripIndex = STRIP_INDEX_FULL;
+        out->useBlinkVariant = useBlinkOff;
         return;
 
     case CELL_TYPE_REGION_EMPTY:
         out->type = CELL_DECISION_STANDARD_EMPTY;
         out->strip = bodyStripUse;
         out->fillStripIndex = STRIP_INDEX_EMPTY;
+        out->useBlinkVariant = useBlinkOff;
         return;
 
     case CELL_TYPE_REGION_TRAIL:
         out->type = CELL_DECISION_STANDARD_TRAIL;
         out->strip = trailStripFinal;
         out->fillStripIndex = fullTrailIndex;
+        out->useBlinkVariant = useBlinkOff;
         return;
 
     case CELL_TYPE_DEFAULT:
@@ -1635,6 +1777,7 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
             out->type = CELL_DECISION_STANDARD_FULL;
             out->strip = defaultStrip;
             out->fillStripIndex = STRIP_INDEX_FULL;
+            out->useBlinkVariant = useBlinkOff;
         }
         else if (cellFillIndex > breakInfoUsed->valueFillIndex &&
                  cellFillIndex < breakInfoUsed->trailFillIndex)
@@ -1642,12 +1785,14 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
             out->type = CELL_DECISION_STANDARD_TRAIL;
             out->strip = trailStripFinal;
             out->fillStripIndex = fullTrailIndex;
+            out->useBlinkVariant = useBlinkOff;
         }
         else if (cellFillIndex > breakInfoUsed->trailFillIndex)
         {
             out->type = CELL_DECISION_STANDARD_EMPTY;
             out->strip = defaultStrip;
             out->fillStripIndex = STRIP_INDEX_EMPTY;
+            out->useBlinkVariant = useBlinkOff;
         }
         else
         {
@@ -1665,6 +1810,7 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
                 out->type = CELL_DECISION_PARTIAL_VALUE;
                 out->strip = defaultStrip;
                 out->fillStripIndex = s_tileIndexByValueTrail[valuePxInTile][trailPxInTile];
+                out->useBlinkVariant = useBlinkOff;
             }
             else if (cellFillIndex == breakInfoUsed->valueFillIndex)
             {
@@ -1672,6 +1818,7 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
                 out->type = CELL_DECISION_PARTIAL_VALUE;
                 out->strip = defaultStrip;
                 out->fillStripIndex = s_tileIndexByValueTrail[valuePxInTile][trailPxInTile];
+                out->useBlinkVariant = useBlinkOff;
             }
             else
             {
@@ -1679,6 +1826,7 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
                 out->type = CELL_DECISION_PARTIAL_TRAIL;
                 out->strip = defaultStrip;
                 out->fillStripIndex = s_tileIndexByValueTrail[valuePxInTile][trailPxInTile];
+                out->useBlinkVariant = useBlinkOff;
             }
         }
         return;
@@ -1689,6 +1837,7 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
     out->type = CELL_DECISION_STANDARD_EMPTY;
     out->strip = bodyStripUse;
     out->fillStripIndex = STRIP_INDEX_EMPTY;
+    out->useBlinkVariant = useBlinkOff;
 }
 
 
@@ -2398,6 +2547,7 @@ void GaugeLayout_initEx(GaugeLayout *layout,
         return;
 
     layout->fillOffset = 0;
+    layout->localEndOverrideEnabled = 1;
     layout->refCount = 0;
 
     layout_sync_optional_segment_tilesets_by_usage(
@@ -2494,6 +2644,14 @@ void GaugeLayout_setFillOffset(GaugeLayout *layout, u16 fillOffsetPixels)
     layout->fillOffset = fillOffsetPixels;
 }
 
+void GaugeLayout_setLocalEndOverride(GaugeLayout *layout, u8 enabled)
+{
+    if (!layout)
+        return;
+
+    layout->localEndOverrideEnabled = enabled ? 1 : 0;
+}
+
 /** Set fill direction to reverse: last cell fills first (right-to-left / bottom-to-top). */
 void GaugeLayout_setFillReverse(GaugeLayout *layout)
 {
@@ -2545,6 +2703,7 @@ void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src)
                        src->verticalFlip,
                        src->horizontalFlip);
     dst->fillOffset = src->fillOffset;
+    dst->localEndOverrideEnabled = src->localEndOverrideEnabled;
 
     /* Copy optional style groups through public setters (lazy allocations). */
     GaugeLayout_setCapTilesets(dst,
@@ -4216,6 +4375,540 @@ static void write_tilemap_fixed_init(GaugePart *part)
     } 
 }
 
+static inline GaugePart *gauge_get_master_part(const Gauge *gauge)
+{
+    if (!gauge || gauge->partCount == 0 || gauge->masterPartIndex >= gauge->partCount)
+        return NULL;
+    return gauge->parts[gauge->masterPartIndex];
+}
+
+static void gauge_build_master_fill_decisions(Gauge *gauge,
+                                              u16 valuePixels,
+                                              u16 trailPixelsRendered,
+                                              u16 trailPixelsActual,
+                                              u8 blinkOffActive,
+                                              u8 trailMode)
+{
+    GaugePart *masterPart = gauge_get_master_part(gauge);
+    if (!masterPart)
+        return;
+
+    const GaugeLayout *masterLayout = masterPart->layout;
+    FillLoopContext ctx;
+    init_fill_loop_context(masterLayout, valuePixels, trailPixelsRendered,
+                           trailPixelsActual, blinkOffActive, trailMode, &ctx);
+
+    for (u8 i = 0; i < GAUGE_MAX_LENGTH; i++)
+    {
+        gauge->masterDecisionTypeByFillIndex[i] = (u8)CELL_DECISION_STANDARD_EMPTY;
+        gauge->masterDecisionIdxByFillIndex[i] = STRIP_INDEX_EMPTY;
+        gauge->masterDecisionCapStartBreakByFillIndex[i] = 0;
+        gauge->masterDecisionCapStartTrailByFillIndex[i] = 0;
+        gauge->masterDecisionUseBlinkVariantByFillIndex[i] = 0;
+    }
+
+    for (u8 cellIndex = 0; cellIndex < masterLayout->length; cellIndex++)
+    {
+        const u8 fillIndex = masterLayout->fillIndexByCell[cellIndex];
+        const u8 segmentId = masterLayout->segmentIdByCell[cellIndex];
+        const u32 *bodyStrip = select_base_strip(
+            masterLayout->tilesetBySegment[segmentId],
+            masterLayout->gainTilesetBySegment[segmentId],
+            trailMode);
+
+        CellDecision decision;
+        compute_cell_decision(masterLayout, &ctx, cellIndex, fillIndex,
+                              segmentId, bodyStrip, &decision);
+
+        gauge->masterDecisionTypeByFillIndex[fillIndex] = (u8)decision.type;
+        gauge->masterDecisionIdxByFillIndex[fillIndex] = decision.fillStripIndex;
+        gauge->masterDecisionCapStartBreakByFillIndex[fillIndex] = decision.capStartUsesBreak;
+        gauge->masterDecisionCapStartTrailByFillIndex[fillIndex] = decision.capStartUsesTrail;
+        gauge->masterDecisionUseBlinkVariantByFillIndex[fillIndex] = decision.useBlinkVariant;
+    }
+}
+
+typedef struct
+{
+    CellDecisionType type;
+    const u32 *strip;
+    u8 fillStripIndex;
+    u8 capStartUsesBreak;
+    u8 capStartUsesTrail;
+    u8 terminalOverrideApplied;
+} LocalResolvedDecision;
+
+typedef struct
+{
+    u8 valid;
+    const u32 *body;
+    const u32 *end;
+    const u32 *trail;
+    const u32 *bridge;
+    const u32 *capStart;
+    const u32 *capStartBreak;
+    const u32 *capStartTrail;
+    const u32 *capEnd;
+} LocalStripSet;
+
+typedef struct
+{
+    LocalStripSet normalBySegment[GAUGE_MAX_SEGMENTS];
+    LocalStripSet blinkBySegment[GAUGE_MAX_SEGMENTS];
+} LocalStripCache;
+
+static inline void build_local_strip_set(const GaugeLayout *layout,
+                                         u8 segmentId,
+                                         u8 trailMode,
+                                         u8 useBlinkVariant,
+                                         LocalStripSet *set)
+{
+    set->body = select_base_strip(layout->tilesetBySegment[segmentId],
+                                  layout->gainTilesetBySegment[segmentId],
+                                  trailMode);
+    set->end = select_base_strip(layout->tilesetEndBySegment[segmentId],
+                                 layout->gainTilesetEndBySegment[segmentId],
+                                 trailMode);
+    set->trail = select_base_strip(layout->tilesetTrailBySegment[segmentId],
+                                   layout->gainTilesetTrailBySegment[segmentId],
+                                   trailMode);
+    set->bridge = select_base_strip(layout->tilesetBridgeBySegment[segmentId],
+                                    layout->gainTilesetBridgeBySegment[segmentId],
+                                    trailMode);
+    set->capStart = select_base_strip(layout->tilesetCapStartBySegment[segmentId],
+                                      layout->gainTilesetCapStartBySegment[segmentId],
+                                      trailMode);
+    set->capStartBreak = select_base_strip(layout->tilesetCapStartBreakBySegment[segmentId],
+                                           layout->gainTilesetCapStartBreakBySegment[segmentId],
+                                           trailMode);
+    set->capStartTrail = select_base_strip(layout->tilesetCapStartTrailBySegment[segmentId],
+                                           layout->gainTilesetCapStartTrailBySegment[segmentId],
+                                           trailMode);
+    set->capEnd = select_base_strip(layout->tilesetCapEndBySegment[segmentId],
+                                    layout->gainTilesetCapEndBySegment[segmentId],
+                                    trailMode);
+
+    if (useBlinkVariant)
+    {
+        const u32 *blinkBody = select_blink_strip(layout->blinkOffTilesetBySegment[segmentId],
+                                                  layout->gainBlinkOffTilesetBySegment[segmentId],
+                                                  trailMode);
+        const u32 *blinkEnd = select_blink_strip(layout->blinkOffTilesetEndBySegment[segmentId],
+                                                 layout->gainBlinkOffTilesetEndBySegment[segmentId],
+                                                 trailMode);
+        const u32 *blinkTrail = select_blink_strip(layout->blinkOffTilesetTrailBySegment[segmentId],
+                                                   layout->gainBlinkOffTilesetTrailBySegment[segmentId],
+                                                   trailMode);
+        const u32 *blinkBridge = select_blink_strip(layout->blinkOffTilesetBridgeBySegment[segmentId],
+                                                    layout->gainBlinkOffTilesetBridgeBySegment[segmentId],
+                                                    trailMode);
+        const u32 *blinkCapStart = select_blink_strip(layout->blinkOffTilesetCapStartBySegment[segmentId],
+                                                      layout->gainBlinkOffTilesetCapStartBySegment[segmentId],
+                                                      trailMode);
+        const u32 *blinkCapStartBreak = select_blink_strip(layout->blinkOffTilesetCapStartBreakBySegment[segmentId],
+                                                           layout->gainBlinkOffTilesetCapStartBreakBySegment[segmentId],
+                                                           trailMode);
+        const u32 *blinkCapStartTrail = select_blink_strip(layout->blinkOffTilesetCapStartTrailBySegment[segmentId],
+                                                           layout->gainBlinkOffTilesetCapStartTrailBySegment[segmentId],
+                                                           trailMode);
+        const u32 *blinkCapEnd = select_blink_strip(layout->blinkOffTilesetCapEndBySegment[segmentId],
+                                                    layout->gainBlinkOffTilesetCapEndBySegment[segmentId],
+                                                    trailMode);
+
+        if (blinkBody) set->body = blinkBody;
+        if (blinkEnd) set->end = blinkEnd;
+        if (blinkTrail) set->trail = blinkTrail;
+        if (blinkBridge) set->bridge = blinkBridge;
+        if (blinkCapStart) set->capStart = blinkCapStart;
+        if (blinkCapStartBreak) set->capStartBreak = blinkCapStartBreak;
+        if (blinkCapStartTrail) set->capStartTrail = blinkCapStartTrail;
+        if (blinkCapEnd) set->capEnd = blinkCapEnd;
+    }
+
+    set->valid = 1;
+}
+
+static inline const LocalStripSet *get_local_strip_set(const GaugeLayout *layout,
+                                                       u8 segmentId,
+                                                       u8 trailMode,
+                                                       u8 useBlinkVariant,
+                                                       LocalStripCache *cache)
+{
+    LocalStripSet *set = useBlinkVariant
+        ? &cache->blinkBySegment[segmentId]
+        : &cache->normalBySegment[segmentId];
+
+    if (!set->valid)
+        build_local_strip_set(layout, segmentId, trailMode, useBlinkVariant, set);
+
+    return set;
+}
+
+static inline const u32 *resolve_local_strip_from_master_type(const LocalStripSet *stripSet,
+                                                              CellDecisionType type,
+                                                              u8 capStartUsesBreak,
+                                                              u8 capStartUsesTrail)
+{
+    const u32 *bodyStrip = stripSet->body;
+    const u32 *endStrip = stripSet->end;
+    const u32 *trailStrip = stripSet->trail;
+    const u32 *bridgeStrip = stripSet->bridge;
+    const u32 *capStartStrip = stripSet->capStart;
+    const u32 *capStartBreakStrip = stripSet->capStartBreak;
+    const u32 *capStartTrailStrip = stripSet->capStartTrail;
+    const u32 *capEndStrip = stripSet->capEnd;
+
+    switch (type)
+    {
+    case CELL_DECISION_CAP_END:
+        return capEndStrip ? capEndStrip : (endStrip ? endStrip : bodyStrip);
+    case CELL_DECISION_CAP_START:
+        if (capStartUsesTrail)
+            return capStartTrailStrip ? capStartTrailStrip : (capStartStrip ? capStartStrip : bodyStrip);
+        if (capStartUsesBreak)
+            return capStartBreakStrip ? capStartBreakStrip : (capStartStrip ? capStartStrip : bodyStrip);
+        return capStartStrip ? capStartStrip : bodyStrip;
+    case CELL_DECISION_BRIDGE:
+        return bridgeStrip ? bridgeStrip : bodyStrip;
+    case CELL_DECISION_PARTIAL_END:
+        return endStrip ? endStrip : bodyStrip;
+    case CELL_DECISION_STANDARD_TRAIL:
+    case CELL_DECISION_PARTIAL_TRAIL:
+    case CELL_DECISION_PARTIAL_TRAIL2:
+        return trailStrip ? trailStrip : bodyStrip;
+    case CELL_DECISION_STANDARD_FULL:
+    case CELL_DECISION_STANDARD_EMPTY:
+    case CELL_DECISION_PARTIAL_VALUE:
+    default:
+        return bodyStrip;
+    }
+}
+
+static inline const u32 *resolve_local_body_strip(const LocalStripSet *stripSet)
+{
+    return stripSet->body;
+}
+
+static inline u8 update_slavepart_terminal_bridge_flag(u8 previousFlag,
+                                                       CellDecisionType terminalMasterType,
+                                                       u8 blinkOffActive)
+{
+    u8 bridgeFlag = previousFlag;
+
+    /* Update on visible frames (blinkOffActive == 0), freeze only on blink-off
+     * frames. This prevents stale bridge flags in long blink cycles where the
+     * gauge still renders normal frames between OFF phases. */
+    if (!blinkOffActive)
+        bridgeFlag = (terminalMasterType == CELL_DECISION_BRIDGE) ? 1 : 0;
+
+    return bridgeFlag;
+}
+
+static inline u8 compute_terminal_slavepart_override(const GaugeLayout *layout,
+                                                     u16 currentValuePixels,
+                                                     CellDecisionType terminalMasterType,
+                                                     u8 bridgeFlagActive,
+                                                     u8 valueReachedPartStart,
+                                                     u8 blinkActive,
+                                                     u8 blinkOffActive,
+                                                     u8 *forcedStripIndex)
+{
+    if (!layout || !layout->localEndOverrideEnabled || layout->length == 0)
+        return 0;
+
+    const u16 partEndPixel = (u16)(layout->fillOffset +
+                                   ((u16)layout->length << TILE_TO_PIXEL_SHIFT));
+    /* Use the current animated value (real frame value), not a latched trail-start value.
+     * Strict boundary: only "beyond part" when current value is strictly greater than end. */
+    const u8 valueBeyondPart = (currentValuePixels > partEndPixel) ? 1 : 0;
+    const u8 bridgeOverrideActive = (bridgeFlagActive && valueReachedPartStart) ? 1 : 0;
+    const u8 masterIsStandardFull = (terminalMasterType == CELL_DECISION_STANDARD_FULL) ? 1 : 0;
+
+    /* Outside bridge override, force TERM_END only when this local terminal maps to a
+     * master STANDARD_FULL cell and the current value is beyond this part range.
+     * This avoids overriding PARTIAL_VALUE / TRAIL states. */
+    if (!bridgeOverrideActive && (!valueBeyondPart || !masterIsStandardFull))
+        return 0;
+
+    if (forcedStripIndex)
+    {
+        if (!bridgeOverrideActive || !blinkActive)
+            *forcedStripIndex = STRIP_INDEX_FULL;
+        else
+            *forcedStripIndex = blinkOffActive ? STRIP_INDEX_FULL_TRAIL : STRIP_INDEX_FULL;
+    }
+
+    return 1;
+}
+
+typedef struct
+{
+    CellDecisionType terminalMasterType;
+    u8 terminalOverrideActive;
+    u8 terminalForcedIndex;
+} SlavepartTerminalOverrideContext;
+
+static inline void prepare_slavepart_terminal_override(const Gauge *gauge,
+                                                       GaugePart *part,
+                                                       const GaugeLayout *layout,
+                                                       u8 isSlavePart,
+                                                       u8 blinkActive,
+                                                       u8 blinkOffActive,
+                                                       SlavepartTerminalOverrideContext *ctx)
+{
+    if (!ctx)
+        return;
+
+    ctx->terminalMasterType = CELL_DECISION_STANDARD_EMPTY;
+    ctx->terminalOverrideActive = 0;
+    ctx->terminalForcedIndex = STRIP_INDEX_FULL;
+
+    if (!gauge || !part || !layout || !isSlavePart ||
+        !layout->localEndOverrideEnabled || layout->length == 0)
+    {
+        part->terminalBridgeFlagActive = 0;
+        return;
+    }
+
+    const u8 terminalFillIndex = (u8)(layout->length - 1);
+    const u8 terminalCellIndex = layout->cellIndexByFillIndex[terminalFillIndex];
+    const u8 terminalMappedMasterFill = part->masterFillIndexByCell[terminalCellIndex];
+    ctx->terminalMasterType =
+        (CellDecisionType)gauge->masterDecisionTypeByFillIndex[terminalMappedMasterFill];
+
+    const u8 valueReachedPartStart = (gauge->logic.valuePixels >= layout->fillOffset) ? 1 : 0;
+    u8 bridgeFlagActive = part->terminalBridgeFlagActive;
+
+    if (!gauge->masterPartHasBridge)
+    {
+        bridgeFlagActive = 0;
+    }
+    else
+    {
+        bridgeFlagActive = update_slavepart_terminal_bridge_flag(
+            bridgeFlagActive, ctx->terminalMasterType, blinkOffActive);
+    }
+
+    part->terminalBridgeFlagActive = bridgeFlagActive;
+    ctx->terminalOverrideActive = compute_terminal_slavepart_override(
+        layout, gauge->logic.valuePixels, ctx->terminalMasterType,
+        bridgeFlagActive, valueReachedPartStart,
+        blinkActive, blinkOffActive, &ctx->terminalForcedIndex);
+}
+
+static inline void project_master_decision_to_local(const LocalStripSet *stripSet,
+                                                    CellDecisionType masterType,
+                                                    u8 masterIdx,
+                                                    u8 capStartUsesBreak,
+                                                    u8 capStartUsesTrail,
+                                                    LocalResolvedDecision *resolved)
+{
+    resolved->type = masterType;
+    resolved->fillStripIndex = masterIdx;
+    resolved->capStartUsesBreak = capStartUsesBreak;
+    resolved->capStartUsesTrail = capStartUsesTrail;
+    resolved->terminalOverrideApplied = 0;
+    resolved->strip = resolve_local_strip_from_master_type(
+        stripSet, masterType, capStartUsesBreak, capStartUsesTrail);
+}
+
+static inline void apply_slavepart_terminal_override_to_local(const LocalStripSet *stripSet,
+                                                              u8 isTerminalCell,
+                                                              u8 terminalOverrideActive,
+                                                              u8 terminalForcedIndex,
+                                                              LocalResolvedDecision *resolved)
+{
+    if (!terminalOverrideActive || !isTerminalCell)
+        return;
+
+    resolved->type = CELL_DECISION_PARTIAL_END;
+    resolved->fillStripIndex = terminalForcedIndex;
+    resolved->capStartUsesBreak = 0;
+    resolved->capStartUsesTrail = 0;
+    resolved->terminalOverrideApplied = 1;
+    resolved->strip = resolve_local_strip_from_master_type(
+        stripSet, CELL_DECISION_PARTIAL_END, 0, 0);
+}
+
+static inline void apply_dynamic_constraints_to_local(const GaugePart *part,
+                                                      u8 segmentId,
+                                                      const u32 *fallbackBody,
+                                                      const u32 *fallbackTrail,
+                                                      CellDecisionType masterType,
+                                                      u8 isSlavePart,
+                                                      u8 isTerminalCell,
+                                                      u8 terminalOverrideActive,
+                                                      LocalResolvedDecision *resolved)
+{
+    if (part->vramMode != GAUGE_VRAM_DYNAMIC)
+        return;
+
+    if (resolved->type == CELL_DECISION_BRIDGE &&
+        part->dyn.vramTileBridge &&
+        part->dyn.vramTileBridge[segmentId] == 0)
+    {
+        resolved->type = CELL_DECISION_STANDARD_FULL;
+        resolved->fillStripIndex = STRIP_INDEX_FULL;
+        resolved->strip = fallbackBody;
+    }
+    else if (resolved->type == CELL_DECISION_CAP_START && part->dyn.vramTileCapStart == 0)
+    {
+        resolved->type = CELL_DECISION_PARTIAL_VALUE;
+        resolved->strip = fallbackBody;
+    }
+    else if (resolved->type == CELL_DECISION_CAP_END && part->dyn.vramTileCapEnd == 0)
+    {
+        resolved->type = CELL_DECISION_PARTIAL_END;
+    }
+
+    /* Dynamic mode only has one PARTIAL_END VRAM slot.
+     * If terminal override is active on a slave part, avoid a second
+     * PARTIAL_END decision on non-terminal cells (would overwrite shared slot). */
+    if (terminalOverrideActive &&
+        isSlavePart &&
+        !isTerminalCell &&
+        masterType == CELL_DECISION_PARTIAL_END)
+    {
+        resolved->type = CELL_DECISION_PARTIAL_VALUE;
+        resolved->strip = fallbackBody;
+    }
+
+    if (resolved->type == CELL_DECISION_PARTIAL_END && part->dyn.vramTilePartialEnd == 0)
+    {
+        resolved->type = CELL_DECISION_PARTIAL_VALUE;
+        resolved->strip = fallbackBody;
+    }
+
+    if (resolved->type == CELL_DECISION_PARTIAL_TRAIL2 &&
+        part->dyn.vramTilePartialTrailSecond == 0)
+    {
+        if (part->dyn.vramTilePartialTrail != 0)
+        {
+            resolved->type = CELL_DECISION_PARTIAL_TRAIL;
+            resolved->strip = fallbackTrail ? fallbackTrail : fallbackBody;
+        }
+        else
+        {
+            resolved->type = CELL_DECISION_PARTIAL_VALUE;
+            resolved->strip = fallbackBody;
+        }
+    }
+
+    if (resolved->type == CELL_DECISION_PARTIAL_TRAIL &&
+        part->dyn.vramTilePartialTrail == 0)
+    {
+        resolved->type = CELL_DECISION_PARTIAL_VALUE;
+        resolved->strip = fallbackBody;
+    }
+
+    if (resolved->type == CELL_DECISION_STANDARD_TRAIL &&
+        part->dyn.vramTileFullTrail &&
+        part->dyn.vramTileFullTrail[segmentId] == 0)
+    {
+        if (part->dyn.vramTilePartialTrail != 0)
+        {
+            resolved->type = CELL_DECISION_PARTIAL_TRAIL;
+            resolved->strip = fallbackTrail ? fallbackTrail : fallbackBody;
+            resolved->fillStripIndex = (resolved->strip == fallbackTrail &&
+                                        fallbackTrail != fallbackBody)
+                ? s_trailTileIndexByValueTrail[0][8]
+                : STRIP_INDEX_FULL_TRAIL;
+        }
+        else
+        {
+            resolved->type = CELL_DECISION_PARTIAL_VALUE;
+            resolved->strip = fallbackBody;
+            resolved->fillStripIndex = STRIP_INDEX_FULL_TRAIL;
+        }
+    }
+}
+
+static inline void clamp_local_decision_index(const u32 *bodyStrip,
+                                              const u32 *trailStrip,
+                                              LocalResolvedDecision *resolved)
+{
+    if (resolved->fillStripIndex > 63)
+        resolved->fillStripIndex = 63;
+
+    const u8 allow64 = (resolved->strip == trailStrip && trailStrip != bodyStrip) ? 1 : 0;
+    if (!allow64 && resolved->fillStripIndex > 44)
+        resolved->fillStripIndex = 44;
+}
+
+static void resolve_local_decision_for_part(const GaugePart *part,
+                                            u8 cellFillIndex,
+                                            u8 segmentId,
+                                            CellDecisionType masterType,
+                                            u8 masterIdx,
+                                            u8 capStartUsesBreak,
+                                            u8 capStartUsesTrail,
+                                            u8 isSlavePart,
+                                            u8 terminalOverrideActive,
+                                            u8 terminalForcedIndex,
+                                            u8 useBlinkVariant,
+                                            u8 trailMode,
+                                            LocalStripCache *stripCache,
+                                            LocalResolvedDecision *resolved)
+{
+    const GaugeLayout *layout = part->layout;
+    const LocalStripSet *stripSet = get_local_strip_set(
+        layout, segmentId, trailMode, useBlinkVariant, stripCache);
+    const u32 *fallbackBody = resolve_local_body_strip(stripSet);
+    const u32 *fallbackTrail = resolve_local_strip_from_master_type(
+        stripSet, CELL_DECISION_PARTIAL_TRAIL, 0, 0);
+
+    if (!fallbackBody)
+    {
+        fallbackBody = select_base_strip(layout->tilesetBySegment[segmentId],
+                                         layout->gainTilesetBySegment[segmentId],
+                                         trailMode);
+    }
+
+    const u8 terminalFillIndex = (u8)(layout->length - 1);
+    const u8 isTerminalCell = (cellFillIndex == terminalFillIndex) ? 1 : 0;
+    project_master_decision_to_local(stripSet, masterType, masterIdx,
+                                     capStartUsesBreak, capStartUsesTrail, resolved);
+    apply_slavepart_terminal_override_to_local(stripSet, isTerminalCell,
+                                               terminalOverrideActive, terminalForcedIndex,
+                                               resolved);
+
+    if (!resolved->strip)
+    {
+        resolved->strip = fallbackBody;
+        resolved->type = CELL_DECISION_PARTIAL_VALUE;
+    }
+
+    apply_dynamic_constraints_to_local(part, segmentId, fallbackBody, fallbackTrail,
+                                       masterType, isSlavePart, isTerminalCell,
+                                       terminalOverrideActive, resolved);
+    clamp_local_decision_index(fallbackBody, fallbackTrail, resolved);
+}
+
+static void gauge_build_master_pip_states(Gauge *gauge,
+                                          u16 valuePixels,
+                                          u16 trailPixelsRendered,
+                                          u16 trailPixelsActual,
+                                          u8 blinkOffActive,
+                                          u8 trailMode)
+{
+    GaugePart *masterPart = gauge_get_master_part(gauge);
+    if (!masterPart)
+        return;
+
+    const GaugeLayout *masterLayout = masterPart->layout;
+    for (u8 i = 0; i < GAUGE_MAX_LENGTH; i++)
+        gauge->masterPipStateByFillIndex[i] = PIP_STATE_EMPTY;
+
+    for (u8 fillIndex = 0; fillIndex < masterLayout->length; fillIndex++)
+    {
+        const u8 cellIndex = masterLayout->cellIndexByFillIndex[fillIndex];
+        gauge->masterPipStateByFillIndex[fillIndex] =
+            select_pip_state_for_cell(masterLayout, cellIndex,
+                                      valuePixels, trailPixelsRendered, trailPixelsActual,
+                                      blinkOffActive, trailMode);
+    }
+}
+
 /**
  * Process fixed mode: stream tiles for all cells via DMA.
  *
@@ -4224,9 +4917,9 @@ static void write_tilemap_fixed_init(GaugePart *part)
  * Change detection per cell (cachedFillIndex + cachedStrip) avoids
  * redundant DMA transfers.
  *
- * Cell classification is delegated to compute_cell_decision() (shared with
- * dynamic mode). This function only handles the mode-specific output:
- * a single upload_cell_if_needed() call per cell.
+ * Cell classification is computed once on the master PART for the frame.
+ * This function only projects local cells to master fill indices, resolves
+ * the local strip fallback, then uploads the selected tile if needed.
  *
  * @param part                 Part to render
  * @param valuePixels          Current value fill in pixels
@@ -4244,11 +4937,39 @@ static void process_fixed_mode(GaugePart *part,
                                u8 blinkOffActive,
                                u8 trailMode)
 {
+    (void)valuePixels;
+    (void)trailPixelsRendered;
+    (void)trailPixelsActual;
     const GaugeLayout *layout = part->layout;
+    Gauge *gauge = s_activeGaugeForRender;
+    if (!gauge)
+        return;
+    const u8 isSlavePart = (part != gauge_get_master_part(gauge)) ? 1 : 0;
+    const u8 blinkActive = (gauge->logic.blinkFramesRemaining > 0) ? 1 : 0;
+    SlavepartTerminalOverrideContext terminalCtx;
+    prepare_slavepart_terminal_override(gauge, part, layout, isSlavePart,
+                                        blinkActive, blinkOffActive, &terminalCtx);
+    LocalStripCache stripCache = {0};
 
-    FillLoopContext ctx;
-    init_fill_loop_context(layout, valuePixels, trailPixelsRendered,
-                           trailPixelsActual, blinkOffActive, trailMode, &ctx);
+#if GAUGE_ENABLE_TRACE
+    const u8 traceEnabled = s_traceContext.active;
+    typedef struct
+    {
+        u8 used;
+        u8 segmentId;
+        CellDecisionType masterType;
+        u8 masterIdx;
+        u8 terminalOverrideApplied;
+        CellDecision decision;
+    } FixedTraceCell;
+    FixedTraceCell traceByCell[GAUGE_MAX_LENGTH];
+
+    if (traceEnabled)
+    {
+        for (u8 cellIndex = 0; cellIndex < GAUGE_MAX_LENGTH; cellIndex++)
+            traceByCell[cellIndex].used = 0;
+    }
+#endif
 
     /* Countdown loop: 68000 zero-flag test is free after decrement (dbra) */
     u8 i = part->cellCount;
@@ -4257,25 +4978,72 @@ static void process_fixed_mode(GaugePart *part,
         GaugeStreamCell *cell = &part->cells[i];
         const u8 cellIndex = cell->cellIndex;
         const u8 cellFillIndex = layout->fillIndexByCell[cellIndex];
+        const u8 mappedMasterFillIndex = part->masterFillIndexByCell[cellIndex];
         const u8 segmentId = layout->segmentIdByCell[cellIndex];
-        const u32 *bodyStrip = select_base_strip(
-            layout->tilesetBySegment[segmentId],
-            layout->gainTilesetBySegment[segmentId],
-            trailMode);
+        const CellDecisionType masterType =
+            (CellDecisionType)gauge->masterDecisionTypeByFillIndex[mappedMasterFillIndex];
+        const u8 masterIdx = gauge->masterDecisionIdxByFillIndex[mappedMasterFillIndex];
+        const u8 capStartUsesBreak =
+            gauge->masterDecisionCapStartBreakByFillIndex[mappedMasterFillIndex];
+        const u8 capStartUsesTrail =
+            gauge->masterDecisionCapStartTrailByFillIndex[mappedMasterFillIndex];
+        const u8 useBlinkVariant =
+            gauge->masterDecisionUseBlinkVariantByFillIndex[mappedMasterFillIndex];
+        LocalResolvedDecision resolved;
+        resolve_local_decision_for_part(part, cellFillIndex, segmentId, masterType, masterIdx,
+                                        capStartUsesBreak, capStartUsesTrail,
+                                        isSlavePart,
+                                        terminalCtx.terminalOverrideActive,
+                                        terminalCtx.terminalForcedIndex,
+                                        useBlinkVariant, trailMode,
+                                        &stripCache, &resolved);
 
         CellDecision decision;
-        compute_cell_decision(layout, &ctx, cellIndex, cellFillIndex,
-                              segmentId, bodyStrip, &decision);
+        decision.type = resolved.type;
+        decision.strip = resolved.strip;
+        decision.fillStripIndex = resolved.fillStripIndex;
+        decision.capStartUsesBreak = resolved.capStartUsesBreak;
+        decision.capStartUsesTrail = resolved.capStartUsesTrail;
+        decision.useBlinkVariant = useBlinkVariant;
+
+#if GAUGE_ENABLE_TRACE
+        if (traceEnabled && cellIndex < GAUGE_MAX_LENGTH)
+        {
+            traceByCell[cellIndex].used = 1;
+            traceByCell[cellIndex].segmentId = segmentId;
+            traceByCell[cellIndex].masterType = masterType;
+            traceByCell[cellIndex].masterIdx = masterIdx;
+            traceByCell[cellIndex].terminalOverrideApplied = resolved.terminalOverrideApplied;
+            traceByCell[cellIndex].decision = decision;
+        }
+#endif
 
         upload_cell_if_needed(cell, decision.strip, decision.fillStripIndex);
     }
+
+#if GAUGE_ENABLE_TRACE
+    if (traceEnabled)
+    {
+        for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
+        {
+            if (!traceByCell[cellIndex].used)
+                continue;
+            trace_emit_cell_line(cellIndex,
+                                 traceByCell[cellIndex].segmentId,
+                                 traceByCell[cellIndex].masterType,
+                                 traceByCell[cellIndex].masterIdx,
+                                 traceByCell[cellIndex].terminalOverrideApplied,
+                                 &traceByCell[cellIndex].decision);
+        }
+    }
+#endif
 }
 
 /**
  * Process dynamic mode -- Tilemap-based rendering algorithm.
  *
- * Uses compute_cell_decision() for unified strip/index/type selection (shared
- * with fixed mode), then routes the decision to the appropriate VRAM slot.
+ * Uses master-cached strip decision metadata (type/index + flags), resolves
+ * local strips for this PART, then routes to the appropriate dynamic VRAM slot.
  * Standard tiles are pre-loaded; partial/cap/bridge tiles are streamed on demand.
  *
  * @param part               Part to process
@@ -4298,20 +5066,24 @@ static void process_dynamic_mode(GaugePart *part,
                                  u8 trailMode,
                                  u8 trailModeChanged)
 {
+    (void)valuePixels;
+    (void)trailPixelsRendered;
+    (void)trailPixelsActual;
     GaugeDynamic *dyn = &part->dyn;
     const GaugeLayout *layout = part->layout;
+    Gauge *gauge = s_activeGaugeForRender;
+    if (!gauge)
+        return;
+    const u8 isSlavePart = (part != gauge_get_master_part(gauge)) ? 1 : 0;
+    const u8 blinkActive = (gauge->logic.blinkFramesRemaining > 0) ? 1 : 0;
+    SlavepartTerminalOverrideContext terminalCtx;
+    prepare_slavepart_terminal_override(gauge, part, layout, isSlavePart,
+                                        blinkActive, blinkOffActive, &terminalCtx);
+    LocalStripCache stripCache = {0};
 
     /* Pre-compute tilemap attribute base (without tile index) */
     const u16 attrBase = TILE_ATTR_FULL(layout->palette, layout->priority,
                                         layout->verticalFlip, layout->horizontalFlip, 0);
-
-    FillLoopContext ctx;
-    init_fill_loop_context(layout, valuePixels, trailPixelsRendered,
-                           trailPixelsActual, blinkOffActive, trailMode, &ctx);
-
-    /* Dynamic mode also requires VRAM tiles to actually be allocated */
-    if (ctx.capStartEnabled && dyn->vramTileCapStart == 0) ctx.capStartEnabled = 0;
-    if (ctx.capEndEnabled && dyn->vramTileCapEnd == 0) ctx.capEndEnabled = 0;
 
     /* Dynamic mode caches tile data in VRAM. When blink toggles or trail mode
      * changes, the cached standard tiles (full/empty/trail) may now come from
@@ -4341,15 +5113,39 @@ static void process_dynamic_mode(GaugePart *part,
             continue;
 
         const u8 cellFillIndex = layout->fillIndexByCell[cellIndex];
+        const u8 mappedMasterFillIndex = part->masterFillIndexByCell[cellIndex];
         const u8 segmentId = layout->segmentIdByCell[cellIndex];
-        const u32 *bodyStrip = select_base_strip(
-            layout->tilesetBySegment[segmentId],
-            layout->gainTilesetBySegment[segmentId],
-            trailMode);
+        const CellDecisionType masterType =
+            (CellDecisionType)gauge->masterDecisionTypeByFillIndex[mappedMasterFillIndex];
+        const u8 masterIdx = gauge->masterDecisionIdxByFillIndex[mappedMasterFillIndex];
+        const u8 capStartUsesBreak =
+            gauge->masterDecisionCapStartBreakByFillIndex[mappedMasterFillIndex];
+        const u8 capStartUsesTrail =
+            gauge->masterDecisionCapStartTrailByFillIndex[mappedMasterFillIndex];
+        const u8 useBlinkVariant =
+            gauge->masterDecisionUseBlinkVariantByFillIndex[mappedMasterFillIndex];
+        LocalResolvedDecision resolved;
+        resolve_local_decision_for_part(part, cellFillIndex, segmentId, masterType, masterIdx,
+                                        capStartUsesBreak, capStartUsesTrail,
+                                        isSlavePart,
+                                        terminalCtx.terminalOverrideActive,
+                                        terminalCtx.terminalForcedIndex,
+                                        useBlinkVariant, trailMode,
+                                        &stripCache, &resolved);
 
         CellDecision decision;
-        compute_cell_decision(layout, &ctx, cellIndex, cellFillIndex,
-                              segmentId, bodyStrip, &decision);
+        decision.type = resolved.type;
+        decision.strip = resolved.strip;
+        decision.fillStripIndex = resolved.fillStripIndex;
+        decision.capStartUsesBreak = resolved.capStartUsesBreak;
+        decision.capStartUsesTrail = resolved.capStartUsesTrail;
+        decision.useBlinkVariant = useBlinkVariant;
+
+#if GAUGE_ENABLE_TRACE
+        if (s_traceContext.active)
+            trace_emit_cell_line(cellIndex, segmentId, masterType, masterIdx,
+                                 resolved.terminalOverrideApplied, &decision);
+#endif
 
         /* === VRAM routing: map decision type to VRAM slot + cache === */
         u16 vramTile = 0;
@@ -4530,7 +5326,15 @@ static void process_pip_mode(GaugePart *part,
                              u8 blinkOffActive,
                              u8 trailMode)
 {
+    (void)valuePixels;
+    (void)trailPixelsRendered;
+    (void)trailPixelsActual;
+    (void)blinkOffActive;
+    (void)trailMode;
     const GaugeLayout *layout = part->layout;
+    Gauge *gauge = s_activeGaugeForRender;
+    if (!gauge)
+        return;
 
     for (u8 i = 0; i < part->cellCount; i++)
     {
@@ -4554,9 +5358,8 @@ static void process_pip_mode(GaugePart *part,
         if (localTile >= pipWidth)
             localTile = 0;
 
-        const u8 pipState = select_pip_state_for_cell(layout, cellIndex,
-                                                      valuePixels, trailPixelsRendered, trailPixelsActual,
-                                                      blinkOffActive, trailMode);
+        const u8 mappedMasterFillIndex = part->masterFillIndexByCell[cellIndex];
+        const u8 pipState = gauge->masterPipStateByFillIndex[mappedMasterFillIndex];
         const u8 stripIndex = (u8)(pipState * pipWidth + localTile);
 
         upload_cell_if_needed(cell, pipStrip, stripIndex);
@@ -4664,6 +5467,7 @@ static u8 GaugePart_initInternal(GaugePart *part,
     part->layout = layout;
     part->cells = NULL;
     part->cellCount = 0;
+    part->terminalBridgeFlagActive = 0;
     part->dyn.segmentCount = 0;
     part->dyn.cellCount = 0;
 
@@ -4723,6 +5527,7 @@ static void GaugePart_releaseInternal(GaugePart *part)
     gauge_free_ptr((void **)&part->cells);
     free_dynamic_buffers(&part->dyn);
     part->cellCount = 0;
+    part->terminalBridgeFlagActive = 0;
 }
 
 static u8 ensure_part_capacity(Gauge *gauge, u8 requiredCount)
@@ -4997,6 +5802,9 @@ void Gauge_init(Gauge *gauge, const GaugeInit *init)
     gauge->logicTickHandler = resolve_logic_tick_handler(
         (GaugeTrailMode)gauge->logic.configuredTrailMode);
     gauge->runtimeLocked = GAUGE_RUNTIME_OPEN;
+    gauge->masterPartIndex = 0;
+    gauge->masterSpanPixels = maxFillPixels;
+    gauge->masterPartHasBridge = 0;
 
     /* VRAM allocation state */
     gauge->vramBase = init->vramBase;
@@ -5066,19 +5874,30 @@ void Gauge_setGainMode(Gauge *gauge,
     invalidate_render_cache(logic);
 }
 
-/** Override maxFillPixels (no-op if unchanged, OPEN state only). */
-void Gauge_setMaxFillPixels(Gauge *gauge, u16 maxFillPixels)
+void Gauge_setDebugMode(Gauge *gauge, u8 enabled)
 {
-    if (!gauge || gauge->runtimeLocked != GAUGE_RUNTIME_OPEN) return;
+    if (!gauge)
+        return;
+
+    gauge->debugMode = enabled ? 1 : 0;
+}
+
+u8 Gauge_getDebugMode(const Gauge *gauge)
+{
+    if (!gauge)
+        return 0;
+    return gauge->debugMode;
+}
+
+static void set_max_fill_pixels_internal(Gauge *gauge, u16 maxFillPixels)
+{
     GaugeLogic *logic = &gauge->logic;
 
-    /* No-op if unchanged */
     if (logic->maxFillPixels == maxFillPixels)
         return;
 
     logic->maxFillPixels = maxFillPixels;
 
-    /* Rebuild LUT buffer (or clear LUT pointer if 1:1). */
     if (gauge->valueMode == GAUGE_VALUE_MODE_FILL && logic->maxValue != maxFillPixels)
     {
         if (!logic->valueToPixelsData)
@@ -5100,16 +5919,187 @@ void Gauge_setMaxFillPixels(Gauge *gauge, u16 maxFillPixels)
     }
     else
     {
-        logic->valueToPixelsLUT = NULL;  /* 1:1 mapping */
+        logic->valueToPixelsLUT = NULL;
     }
 
-    /* Recompute pixel positions */
     logic->valueTargetPixels = value_to_pixels(logic, logic->currentValue);
     if (logic->valueTargetPixels > maxFillPixels)
         logic->valueTargetPixels = maxFillPixels;
     logic->valuePixels = logic->valueTargetPixels;
     apply_configured_trail_mode_state(logic, 0);
     invalidate_render_cache(logic);
+}
+
+static inline u16 gauge_get_part_span_pixels(const GaugePart *part)
+{
+    if (!part || !part->layout)
+        return 0;
+    return (u16)(part->layout->length * GAUGE_PIXELS_PER_TILE);
+}
+
+static inline u8 gauge_layout_has_bridge(const GaugeLayout *layout)
+{
+    if (!layout || layout->segmentCount == 0)
+        return 0;
+
+    return (segment_tileset_array_has_any(layout->tilesetBridgeBySegment, layout->segmentCount) ||
+            segment_tileset_array_has_any(layout->gainTilesetBridgeBySegment, layout->segmentCount) ||
+            segment_tileset_array_has_any(layout->blinkOffTilesetBridgeBySegment, layout->segmentCount) ||
+            segment_tileset_array_has_any(layout->gainBlinkOffTilesetBridgeBySegment, layout->segmentCount))
+        ? 1 : 0;
+}
+
+static void gauge_sync_pip_master_logic(Gauge *gauge)
+{
+    GaugePart *masterPart = gauge_get_master_part(gauge);
+    GaugeLogic *logic = &gauge->logic;
+    if (!masterPart || !masterPart->layout)
+        return;
+
+    const GaugeLayout *masterLayout = masterPart->layout;
+    u16 masterPipCount = masterLayout->pipCount;
+    if (masterPipCount == 0)
+        return;
+    if (masterPipCount > GAUGE_LUT_CAPACITY)
+        masterPipCount = GAUGE_LUT_CAPACITY;
+
+    u16 *newValueToPixels = (u16 *)gauge_alloc_bytes(
+        (u16)((masterPipCount + 1) * (u8)sizeof(u16)));
+    if (!newValueToPixels)
+    {
+        KLog("Gauge PIP master sync alloc failed");
+        logic->valueToPixelsLUT = logic->valueToPixelsData;
+        return;
+    }
+
+    fill_pip_value_lut(newValueToPixels, masterPipCount, masterLayout);
+    {
+        u16 *oldValueToPixels = logic->valueToPixelsData;
+        logic->valueToPixelsData = newValueToPixels;
+        logic->valueToPixelsLUT = newValueToPixels;
+        if (oldValueToPixels)
+            MEM_free(oldValueToPixels);
+    }
+    logic->maxValue = masterPipCount;
+    logic->maxFillPixels = compute_pip_total_pixels(masterLayout);
+
+    if (logic->currentValue > logic->maxValue)
+        logic->currentValue = logic->maxValue;
+
+    logic->valueTargetPixels = value_to_pixels(logic, logic->currentValue);
+    if (logic->valueTargetPixels > logic->maxFillPixels)
+        logic->valueTargetPixels = logic->maxFillPixels;
+    if (logic->valuePixels > logic->maxFillPixels)
+        logic->valuePixels = logic->maxFillPixels;
+    if (logic->trailPixels > logic->maxFillPixels)
+        logic->trailPixels = logic->maxFillPixels;
+
+    apply_configured_trail_mode_state(logic, 0);
+    invalidate_render_cache(logic);
+}
+
+static void gauge_reselect_master_if_needed(Gauge *gauge)
+{
+    if (!gauge || gauge->partCount == 0)
+    {
+        if (gauge)
+        {
+            gauge->masterPartIndex = 0;
+            gauge->masterSpanPixels = 0;
+            gauge->masterPartHasBridge = 0;
+        }
+        return;
+    }
+
+    u8 bestIndex = gauge->masterPartIndex;
+    u16 bestSpan = 0;
+    if (bestIndex < gauge->partCount)
+        bestSpan = gauge_get_part_span_pixels(gauge->parts[bestIndex]);
+
+    for (u8 i = 0; i < gauge->partCount; i++)
+    {
+        const u16 span = gauge_get_part_span_pixels(gauge->parts[i]);
+        if (span > bestSpan)
+        {
+            bestSpan = span;
+            bestIndex = i;
+        }
+    }
+
+    gauge->masterPartIndex = bestIndex;
+    gauge->masterSpanPixels = bestSpan;
+}
+
+static void gauge_rebuild_projection_maps(Gauge *gauge)
+{
+    GaugePart *masterPart = gauge_get_master_part(gauge);
+    if (!gauge || !masterPart || !masterPart->layout)
+        return;
+
+    const GaugeLayout *masterLayout = masterPart->layout;
+    for (u8 partIndex = 0; partIndex < gauge->partCount; partIndex++)
+    {
+        GaugePart *part = gauge->parts[partIndex];
+        if (!part || !part->layout)
+            continue;
+
+        const GaugeLayout *layout = part->layout;
+        for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
+        {
+            const u8 localFillIndex = layout->fillIndexByCell[cellIndex];
+            const u16 samplePixel = (u16)(layout->fillOffset +
+                                          FILL_IDX_TO_OFFSET(localFillIndex) + 4);
+            u8 dummyPx;
+            u8 mappedFillIndex = compute_fill_index_and_px(masterLayout, samplePixel, &dummyPx);
+            if (mappedFillIndex >= masterLayout->length)
+                mappedFillIndex = (u8)(masterLayout->length - 1);
+            part->masterFillIndexByCell[cellIndex] = mappedFillIndex;
+        }
+
+        for (u8 cellIndex = layout->length; cellIndex < GAUGE_MAX_LENGTH; cellIndex++)
+            part->masterFillIndexByCell[cellIndex] = 0;
+    }
+}
+
+static void gauge_apply_master_topology_state(Gauge *gauge)
+{
+    if (!gauge || gauge->partCount == 0)
+    {
+        if (gauge)
+        {
+            gauge->masterPartIndex = 0;
+            gauge->masterSpanPixels = 0;
+            gauge->masterPartHasBridge = 0;
+        }
+        return;
+    }
+
+    const u8 previousMaster = gauge->masterPartIndex;
+    const u16 previousSpan = gauge->masterSpanPixels;
+
+    gauge_reselect_master_if_needed(gauge);
+    gauge_rebuild_projection_maps(gauge);
+    {
+        GaugePart *masterPart = gauge_get_master_part(gauge);
+        gauge->masterPartHasBridge = (masterPart && masterPart->layout)
+            ? gauge_layout_has_bridge(masterPart->layout)
+            : 0;
+    }
+
+    if (gauge->valueMode == GAUGE_VALUE_MODE_FILL)
+        set_max_fill_pixels_internal(gauge, gauge->masterSpanPixels);
+    else
+        gauge_sync_pip_master_logic(gauge);
+
+    if (previousMaster != gauge->masterPartIndex || previousSpan != gauge->masterSpanPixels)
+        invalidate_render_cache(&gauge->logic);
+}
+
+/** Override maxFillPixels (no-op if unchanged, OPEN state only). */
+void Gauge_setMaxFillPixels(Gauge *gauge, u16 maxFillPixels)
+{
+    if (!gauge || gauge->runtimeLocked != GAUGE_RUNTIME_OPEN) return;
+    set_max_fill_pixels_internal(gauge, maxFillPixels);
 }
 
 u8 Gauge_addPart(Gauge *gauge,
@@ -5146,12 +6136,6 @@ u8 Gauge_addPartEx(Gauge *gauge,
     if (gauge->partCount >= GAUGE_MAX_PARTS)
         return 0;
 
-    if (gauge->valueMode == GAUGE_VALUE_MODE_PIP)
-    {
-        if (!validate_pip_layout(&gauge->logic, layout))
-            return 0;
-    }
-
     if (!ensure_part_capacity(gauge, (u8)(gauge->partCount + 1)))
         return 0;
 
@@ -5165,9 +6149,36 @@ u8 Gauge_addPartEx(Gauge *gauge,
         return 0;
     }
 
-    gauge->parts[gauge->partCount] = part;
-    gauge->partCount++;
+    const u8 newPartIndex = gauge->partCount;
+    gauge->parts[newPartIndex] = part;
+    gauge->partCount = (u8)(newPartIndex + 1);
     gauge->runtimeLocked = GAUGE_RUNTIME_HAS_PARTS;
+
+    gauge_apply_master_topology_state(gauge);
+
+    if (gauge->valueMode == GAUGE_VALUE_MODE_PIP)
+    {
+        GaugePart *masterPart = gauge_get_master_part(gauge);
+        if (!masterPart || !validate_pip_layout(&gauge->logic, masterPart->layout))
+        {
+            GaugePart_releaseInternal(part);
+            gauge_free_ptr((void **)&part);
+            gauge->parts[newPartIndex] = NULL;
+            gauge->partCount = newPartIndex;
+
+            if (gauge->partCount == 0)
+            {
+                gauge->masterPartIndex = 0;
+                gauge->masterSpanPixels = 0;
+                gauge->masterPartHasBridge = 0;
+            }
+            else
+            {
+                gauge_apply_master_topology_state(gauge);
+            }
+            return 0;
+        }
+    }
 
     /* Force next update to render */
     invalidate_render_cache(&gauge->logic);
@@ -5179,6 +6190,9 @@ void Gauge_release(Gauge *gauge)
 {
     if (!gauge)
         return;
+
+    if (s_activeGaugeForRender == gauge)
+        s_activeGaugeForRender = NULL;
 
     for (u8 i = 0; i < gauge->partCount; i++)
     {
@@ -5369,6 +6383,37 @@ static void gauge_tick_and_render_fill(Gauge *gauge)
                                        valuePixelsRaw, trailPixelsRaw))
         return;
 
+    gauge_build_master_fill_decisions(gauge, valuePixels, trailPixelsRendered,
+                                      trailPixelsActual, bs.blinkOffActive,
+                                      bs.trailMode);
+    s_activeGaugeForRender = gauge;
+
+#if GAUGE_ENABLE_TRACE
+    s_traceContext.active = 0;
+    if (gauge->debugMode)
+    {
+        gauge->debugTraceId++;
+        s_traceContext.active = 1;
+        s_traceContext.traceId = gauge->debugTraceId;
+
+        kprintf(
+            "GAUGE_TRACE FRAME traceId=%lu valuePixels=%u trailRendered=%u trailActual=%u trailMode=%s state=%s blinkOffActive=%u blinkOnChanged=%u trailModeChanged=%u partCount=%u masterPart=%u\n",
+            (unsigned long)gauge->debugTraceId,
+            (unsigned int)valuePixels,
+            (unsigned int)trailPixelsRendered,
+            (unsigned int)trailPixelsActual,
+            trail_mode_to_text(bs.trailMode),
+            render_state_to_text(bs.trailMode, bs.blinkOffActive,
+                                 valuePixels, trailPixelsRendered),
+            (unsigned int)bs.blinkOffActive,
+            (unsigned int)bs.blinkOnChanged,
+            (unsigned int)bs.trailModeChanged,
+            (unsigned int)gauge->partCount,
+            (unsigned int)gauge->masterPartIndex
+        );
+    }
+#endif
+
     /* --- Render all parts (countdown: 68000 dbra optimization) --- */
     u8 i = gauge->partCount;
     while (i--)
@@ -5376,10 +6421,18 @@ static void gauge_tick_and_render_fill(Gauge *gauge)
         GaugePart *part = gauge->parts[i];
         if (!part)
             continue;
+#if GAUGE_ENABLE_TRACE
+        s_traceContext.partIndex = i;
+#endif
         part->renderHandler(part, valuePixels, trailPixelsRendered, trailPixelsActual,
                             bs.blinkOffActive, bs.blinkOnChanged,
                             bs.trailMode, bs.trailModeChanged);
     }
+
+#if GAUGE_ENABLE_TRACE
+    s_traceContext.active = 0;
+#endif
+    s_activeGaugeForRender = NULL;
 }
 
 /**
@@ -5460,6 +6513,11 @@ static void gauge_tick_and_render_pip(Gauge *gauge)
                                        valuePixelsRaw, trailPixelsRaw))
         return;
 
+    gauge_build_master_pip_states(gauge, valuePixels, trailPixelsRendered,
+                                  trailPixelsActual, bs.blinkOffActive,
+                                  bs.trailMode);
+    s_activeGaugeForRender = gauge;
+
     /* --- Render all parts --- */
     u8 i = gauge->partCount;
     while (i--)
@@ -5471,6 +6529,8 @@ static void gauge_tick_and_render_pip(Gauge *gauge)
                             bs.blinkOffActive, bs.blinkOnChanged,
                             bs.trailMode, bs.trailModeChanged);
     }
+
+    s_activeGaugeForRender = NULL;
 }
 
 /* First update call: lock runtime configuration then delegate to steady handler. */

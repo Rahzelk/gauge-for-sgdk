@@ -359,6 +359,11 @@
 #define GAUGE_MAX_LENGTH      16   /* Maximum tiles per gauge */
 #define GAUGE_MAX_PARTS        8   /* Maximum parts per gauge (safety guard) */
 
+/* Compile-time trace switch:
+ * 0 = trace code compiled out
+ * 1 = trace code compiled in (runtime still requires Gauge_setDebugMode(..., 1)) */
+#define GAUGE_ENABLE_TRACE 1
+
 /* Maximum logical value (maxValue) supported by the LUT buffer.
  * Each Gauge allocates a value-to-pixels lookup table of
  * (GAUGE_LUT_CAPACITY + 1) entries when needed.
@@ -596,11 +601,16 @@ typedef void GaugePartRenderHandler(GaugePart *part,
      corresponding cellIndex. Used for O(1) lookups instead of scanning.
 
    fillOffset:
-     Pixel offset that shifts where this part's cells start sampling
-     the gauge value (default 0). Each cell computes its fill as:
+     Pixel offset used to project this layout onto the master PART span
+     (default 0). In a multi-part gauge, decision type/class/index is computed
+     once from the master PART, then each slave PART maps its local cells
+     to a master fill index using:
 
        cellStartPixel = fillOffset + fillIndex * 8
-       pixelsInCell   = clamp(valuePixels - cellStartPixel, 0, 8)
+       samplePixel    = cellStartPixel + 4
+
+     This keeps all PARTs visually synchronized on the same decision timeline
+     while still allowing shorter/shifted slave layouts.
 
      With fillOffset=0 (default), cell 0 reacts to pixels 0..7,
      cell 1 to pixels 8..15, etc. Increasing fillOffset shifts
@@ -641,9 +651,32 @@ typedef void GaugePartRenderHandler(GaugePart *part,
      cell of the bottom row should become completely full.
 
      Note: fillOffset is stored on GaugeLayout. Use a separate layout if
-     different parts need different offsets.
+     different parts need different projection windows.
 
      Configure via GaugeLayout_setFillOffset().
+
+   localEndOverrideEnabled:
+     Controls local terminal END override in multi-part projection.
+     Default is enabled (1). Applied on slave PARTs only.
+     When enabled, terminal local cell override rules are:
+     - "Bridge context" is real master BRIDGE only. PARTIAL_TRAIL2 alone does
+       not count as bridge.
+     - A persistent bridge flag is maintained per slave PART:
+         - set when master terminal is BRIDGE on visible frames
+           (`blinkOffActive == 0`)
+         - kept unchanged during blink-off frames
+         - cleared when master terminal is not BRIDGE on visible frames
+     - Bridge TERM_END applies while that flag is active and value has reached
+       this slave layout start:
+         valuePixels >= fillOffset
+     - Outside bridge, TERM_END can still apply with the existing rule:
+       valuePixels > fillOffset + length*8 and mapped master terminal type is
+       STANDARD_FULL.
+     Forced index policy:
+     - blink OFF frame: idx 8
+     - blink ON frame:  idx 44
+     - no blink active: idx 44
+     Configure via GaugeLayout_setLocalEndOverride().
 
 
    BODY TILESET -- tilesetBySegment[segmentId]:
@@ -735,7 +768,7 @@ typedef void GaugePartRenderHandler(GaugePart *part,
 typedef struct
 { 
     /* --- Geometry (u16 first for 68000 word alignment) --- */
-    u16 fillOffset;                              /* Pixel offset for fill calc */
+    u16 fillOffset;                              /* Projection offset to sample the master PART span */
     u8 length;                                   /* Number of cells (1..16) */
     u8 segmentCount;                             /* Number of active segment styles for this layout */
 
@@ -844,6 +877,7 @@ typedef struct
     u8 priority;                                 /* Tile priority (0-1) */
     u8 verticalFlip;                                    /* Vertical flip */
     u8 horizontalFlip;                                    /* Horizontal flip */
+    u8 localEndOverrideEnabled;                          /* 1=slave terminal END override enabled (real BRIDGE via persistent flag, or beyond-part + master STANDARD_FULL; blink idx: OFF=8 ON=44) */
 
     /* --- Cached flags (pre-computed at init, avoid runtime scans) --- */
     u8 hasBlinkOff;                              /* 1 if any segment has blink-off tilesets (damage) */
@@ -1070,6 +1104,24 @@ void GaugeLayout_initEx(GaugeLayout *layout,
  * @param fillOffsetPixels  Pixel offset (0 = starts at gauge pixel 0)
  */
 void GaugeLayout_setFillOffset(GaugeLayout *layout, u16 fillOffsetPixels);
+
+/**
+ * Enable or disable local terminal END override (default enabled).
+ *
+ * When enabled, in multi-part master projection mode (slave PARTs only),
+ * the last local fill cell can force END rendering with this policy:
+ * - mapped master terminal BRIDGE (persistent while blink is active) + valuePixels >= fillOffset -> force END
+ * - value beyond this slave layout range + mapped master terminal is
+ *   STANDARD_FULL -> force END idx 44
+ * Index policy while forced:
+ * - blink OFF frame -> idx 8
+ * - blink ON frame  -> idx 44
+ * - no blink active -> idx 44
+ *
+ * @param layout   Layout to configure
+ * @param enabled  0=disabled, non-zero=enabled
+ */
+void GaugeLayout_setLocalEndOverride(GaugeLayout *layout, u8 enabled);
 
 /**
  * Set fill direction to forward (cell 0 fills first).
@@ -1480,6 +1532,10 @@ typedef struct GaugePart
     /* --- Shared layout reference (retained) --- */
     const GaugeLayout *layout;
 
+    /* --- Master projection --- */
+    u8 masterFillIndexByCell[GAUGE_MAX_LENGTH]; /* [layout->length] Local cell -> master fill index LUT */
+    u8 terminalBridgeFlagActive;                /* Persistent bridge flag for slave-part terminal override */
+
     /* --- Fixed mode data --- */
     GaugeStreamCell *cells;                     /* [layout->length] Per-cell streaming data */
     u8 cellCount;                               /* Active cell count */
@@ -1527,12 +1583,18 @@ typedef struct GaugePart
    -------------------
    A single Gauge can drive multiple GaugeParts. All parts share the same
    GaugeLogic, so they always show the same value in perfect sync.
+   Runtime decisions are master-driven:
+   - The largest PART is automatically selected as the master PART.
+   - The master computes render decisions (type/class/index).
+   - Slave PARTs only project local cells to master fill indices and
+     reuse those decisions with their own local asset strips.
 
    Common use cases:
    - 2-lane gauge: 2 parts at Y and Y+1 for a 2-tile-tall bar
    - 2-lane with shorter bottom row: the shorter row uses a different fillOffset
-     to sample a subset of the value (see fillOffset field reference in GaugeLayout).
-     Because fillOffset is stored in the layout, use a separate layout for that row.
+     to project a subset of the master gauge span (see fillOffset field reference
+     in GaugeLayout). Because fillOffset is stored in the layout, use a separate
+     layout for that row.
 
    NOTE: For two independent gauges (e.g., P1 and P2 health bars), use
    two separate Gauge objects. A mirrored P2 layout is created with
@@ -1560,7 +1622,20 @@ struct Gauge
     GaugeLogicTickHandler *logicTickHandler;               /* Active logic tick path (trail mode specific) */
     u8 partCount;               /* Number of active parts */
     u8 partCapacity;            /* Allocated part pointer capacity */
+    u8 masterPartIndex;         /* Master part used to compute shared decisions */
+    u8 masterPartHasBridge;     /* 1 when master part has bridge topology */
     u8 runtimeLocked;           /* Runtime state: 0=open, 1=has parts, 2=closed after first update */
+    u8 debugMode;               /* Runtime debug traces (0=off, 1=on) */
+    u32 debugTraceId;           /* Monotonic trace block counter (increments per rendered frame) */
+    u16 masterSpanPixels;       /* Master part logical span in pixels (length * 8) */
+
+    /* --- Master decision cache (indexed by master fill index) --- */
+    u8 masterDecisionTypeByFillIndex[GAUGE_MAX_LENGTH];
+    u8 masterDecisionIdxByFillIndex[GAUGE_MAX_LENGTH];
+    u8 masterDecisionCapStartBreakByFillIndex[GAUGE_MAX_LENGTH];
+    u8 masterDecisionCapStartTrailByFillIndex[GAUGE_MAX_LENGTH];
+    u8 masterDecisionUseBlinkVariantByFillIndex[GAUGE_MAX_LENGTH];
+    u8 masterPipStateByFillIndex[GAUGE_MAX_LENGTH];
 
     /* --- VRAM allocation --- */
     u16 vramBase;                   /* Base VRAM tile index */
@@ -1673,6 +1748,29 @@ void Gauge_setGainMode(Gauge *gauge,
                        GaugeGainMode mode,
                        u8 shift,
                        u8 blinkShift);
+
+/**
+ * Enable or disable runtime debug traces for this gauge.
+ *
+ * This only has effect when GAUGE_ENABLE_TRACE is set to 1 at compile time.
+ *
+ * When enabled (and trace code compiled in), fill-mode render emits GAUGE_TRACE
+ * logs on visual changes:
+ * - one frame header
+ * - one line per rendered cell decision
+ *
+ * @param gauge    Gauge to modify
+ * @param enabled  0=off, non-zero=on
+ */
+void Gauge_setDebugMode(Gauge *gauge, u8 enabled);
+
+/**
+ * Get current debug mode state.
+ *
+ * @param gauge  Gauge to query
+ * @return 1 if debug mode is enabled, 0 otherwise
+ */
+u8 Gauge_getDebugMode(const Gauge *gauge);
 
 /**
  * Override the maximum fill pixel count.

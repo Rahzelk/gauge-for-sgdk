@@ -28,9 +28,30 @@ TILESET gauge_h_pip_mini_bar_strip "gauge_h_pip_mini_bar_strip.png" NONE NONE
 TILESET gauge_v_straight_yellow_strip "gauge_v_straight_yellow_strip.png"   NONE NONE 
 TILESET gauge_h_straight_small_blue_strip "gauge_h_straight_small_blue_strip.png" NONE NONE 
 
-TILESET gauge_h_bevel_yellow_strip_trail "gauge_h_bevel_yellow_strip_trail.png" NONE NONE 
-TILESET gauge_h_bevel_yellow_strip_end "gauge_h_bevel_yellow_strip_end.png" NONE NONE 
-TILESET gauge_h_bevel_yellow_strip_break "gauge_h_bevel_yellow_strip_break.png"     NONE NONE 
+TILESET gauge_seg0h_capstart_trail "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg0h_capstart_trail.png" NONE NONE 
+TILESET gauge_seg0h_capstart_body "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg0h_capstart_body.png" NONE NONE 
+TILESET gauge_seg0h_capstart_end "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg0h_capstart_end.png" NONE NONE 
+
+TILESET gauge_seg1h_trail "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg1h_trail2.png" NONE NONE 
+TILESET gauge_seg1h_body "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg1h_body.png" NONE NONE 
+TILESET gauge_seg1h_end "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg1h_end.png" NONE NONE 
+
+TILESET gauge_seg0l_capstart_trail "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg0l_capstart_trail.png" NONE NONE 
+TILESET gauge_seg0l_capstart_body "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg0l_capstart_body.png" NONE NONE 
+TILESET gauge_seg0l_capstart_end "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg0l_capstart_end.png" NONE NONE 
+
+TILESET gauge_seg1l_trail "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg1l_trail.png" NONE NONE 
+TILESET gauge_seg1l_body "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg1l_body.png" NONE NONE 
+TILESET gauge_seg1l_end "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg1l_end.png" NONE NONE 
+
+
+
+TILESET gauge_h_bevel_yellow_strip_trail "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg2_trail.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_strip_end "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg2_end.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_strip_break "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg2_body.png"     NONE NONE 
+
+
+
 
 TILESET gauge_h_bevel_blue_strip_break "gauge_h_bevel_blue_strip_break.png" NONE NONE 
 TILESET gauge_h_bevel_blue_strip_end "gauge_h_bevel_blue_strip_end.png" NONE NONE 
