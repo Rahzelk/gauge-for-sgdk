@@ -1936,6 +1936,83 @@ static void layout_copy_segment_bool_flags(u8 *destinationFlags,
                                            u8 segmentCount,
                                            const u8 *defaultView);
 
+/* GaugeLayout public-facing helpers are internal to this translation unit. */
+void GaugeLayout_build(GaugeLayout *layout, const GaugeLayoutInit *init);
+void GaugeLayout_init(GaugeLayout *layout,
+                      u8 length,
+                      GaugeFillDirection fillDirection,
+                      const u32 * const *tilesets,
+                      const u8 *segmentIdByCell,
+                      GaugeOrientation orientation,
+                      u8 palette,
+                      u8 priority,
+                      u8 verticalFlip,
+                      u8 horizontalFlip);
+void GaugeLayout_initEx(GaugeLayout *layout,
+                        u8 length,
+                        GaugeFillDirection fillDirection,
+                        const u32 * const *bodyTilesets,
+                        const u32 * const *endTilesets,
+                        const u32 * const *trailTilesets,
+                        const u32 * const *bridgeTilesets,
+                        const u8 *segmentIdByCell,
+                        GaugeOrientation orientation,
+                        u8 palette,
+                        u8 priority,
+                        u8 verticalFlip,
+                        u8 horizontalFlip);
+void GaugeLayout_setFillOffset(GaugeLayout *layout, u16 fillOffsetPixels);
+void GaugeLayout_setLocalEndOverride(GaugeLayout *layout, u8 enabled);
+void GaugeLayout_setFillForward(GaugeLayout *layout);
+void GaugeLayout_setFillReverse(GaugeLayout *layout);
+void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src);
+void GaugeLayout_retain(GaugeLayout *layout);
+void GaugeLayout_release(GaugeLayout *layout);
+void GaugeLayout_setCapTilesets(GaugeLayout *layout,
+                                const u32 * const *capStartTilesets,
+                                const u32 * const *capEndTilesets,
+                                const u32 * const *capStartBreakTilesets,
+                                const u32 * const *capStartTrailTilesets,
+                                const u8 *capEndBySegment);
+void GaugeLayout_setBlinkOffTilesets(GaugeLayout *layout,
+                                     const u32 * const *blinkOffBodyTilesets,
+                                     const u32 * const *blinkOffEndTilesets,
+                                     const u32 * const *blinkOffTrailTilesets,
+                                     const u32 * const *blinkOffBridgeTilesets,
+                                     const u32 * const *blinkOffCapStartTilesets,
+                                     const u32 * const *blinkOffCapEndTilesets,
+                                     const u32 * const *blinkOffCapStartBreakTilesets,
+                                     const u32 * const *blinkOffCapStartTrailTilesets);
+void GaugeLayout_setGainTrailTilesets(GaugeLayout *layout,
+                                      const u32 * const *gainBodyTilesets,
+                                      const u32 * const *gainEndTilesets,
+                                      const u32 * const *gainTrailTilesets,
+                                      const u32 * const *gainBridgeTilesets,
+                                      const u32 * const *gainCapStartTilesets,
+                                      const u32 * const *gainCapEndTilesets,
+                                      const u32 * const *gainCapStartBreakTilesets,
+                                      const u32 * const *gainCapStartTrailTilesets);
+void GaugeLayout_setGainBlinkOffTilesets(GaugeLayout *layout,
+                                         const u32 * const *gainBlinkOffBodyTilesets,
+                                         const u32 * const *gainBlinkOffEndTilesets,
+                                         const u32 * const *gainBlinkOffTrailTilesets,
+                                         const u32 * const *gainBlinkOffBridgeTilesets,
+                                         const u32 * const *gainBlinkOffCapStartTilesets,
+                                         const u32 * const *gainBlinkOffCapEndTilesets,
+                                         const u32 * const *gainBlinkOffCapStartBreakTilesets,
+                                         const u32 * const *gainBlinkOffCapStartTrailTilesets);
+void GaugeLayout_setPipStyles(GaugeLayout *layout,
+                              const u32 * const *pipTilesets,
+                              const u8 *pipWidthBySegment);
+
+/* Internal gauge-part builders used by GaugeBuilder_build(). */
+u8 Gauge_addPartEx(Gauge *gauge,
+                   GaugeLayout *layout,
+                   u16 originX,
+                   u16 originY,
+                   u16 vramBase,
+                   GaugeVramMode vramMode);
+
 /**
  * Build bridge/break lookup tables (by fillIndex).
  *
@@ -5698,6 +5775,17 @@ static void fill_pip_value_lut(u16 *dest, u16 maxValue, const GaugeLayout *layou
     }
 }
 
+/* Internal init payload kept private (public API uses GaugeBuilder). */
+typedef struct
+{
+    u16 maxValue;
+    u16 initialValue;
+    const GaugeLayout *layout;
+    u16 vramBase;
+    GaugeVramMode vramMode;
+    GaugeValueMode valueMode;
+} GaugeInit;
+
 /**
  * Initialize a Gauge from a GaugeInit config.
  *
@@ -5813,10 +5901,10 @@ void Gauge_init(Gauge *gauge, const GaugeInit *init)
 }
 
 /** Configure value animation (0=instant changes, 1=animated transitions).
- * No-op once runtime leaves OPEN state. */
+ * No-op after runtime is CLOSED (first Gauge_update already happened). */
 void Gauge_setValueAnim(Gauge *gauge, u8 enabled, u8 shift)
 {
-    if (!gauge || gauge->runtimeLocked != GAUGE_RUNTIME_OPEN)
+    if (!gauge || gauge->runtimeLocked == GAUGE_RUNTIME_CLOSED)
         return;
 
     GaugeLogic *logic = &gauge->logic;
@@ -5824,14 +5912,14 @@ void Gauge_setValueAnim(Gauge *gauge, u8 enabled, u8 shift)
     logic->valueAnimShift = (shift == 0) ? GAUGE_DEFAULT_VALUE_ANIM_SHIFT : shift;
 }
 
-/** Configure damage trail mode and timing (configuration-time only, OPEN state only). */
+/** Configure damage trail mode and timing (configuration-time only, before runtime CLOSE). */
 void Gauge_setTrailMode(Gauge *gauge,
                         GaugeTrailMode mode,
                         u16 criticalValue,
                         u8 shift,
                         u8 blinkShift)
 {
-    if (!gauge || gauge->runtimeLocked != GAUGE_RUNTIME_OPEN)
+    if (!gauge || gauge->runtimeLocked == GAUGE_RUNTIME_CLOSED)
         return;
 
     if (mode > GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK)
@@ -5851,13 +5939,13 @@ void Gauge_setTrailMode(Gauge *gauge,
     invalidate_render_cache(logic);
 }
 
-/** Configure gain mode and timing (configuration-time only, OPEN state only). */
+/** Configure gain mode and timing (configuration-time only, before runtime CLOSE). */
 void Gauge_setGainMode(Gauge *gauge,
                        GaugeGainMode mode,
                        u8 shift,
                        u8 blinkShift)
 {
-    if (!gauge || gauge->runtimeLocked != GAUGE_RUNTIME_OPEN)
+    if (!gauge || gauge->runtimeLocked == GAUGE_RUNTIME_CLOSED)
         return;
 
     if (mode > GAUGE_GAIN_MODE_RESERVED_2)
@@ -6095,10 +6183,10 @@ static void gauge_apply_master_topology_state(Gauge *gauge)
         invalidate_render_cache(&gauge->logic);
 }
 
-/** Override maxFillPixels (no-op if unchanged, OPEN state only). */
+/** Override maxFillPixels (no-op if unchanged, before runtime CLOSE). */
 void Gauge_setMaxFillPixels(Gauge *gauge, u16 maxFillPixels)
 {
-    if (!gauge || gauge->runtimeLocked != GAUGE_RUNTIME_OPEN) return;
+    if (!gauge || gauge->runtimeLocked == GAUGE_RUNTIME_CLOSED) return;
     set_max_fill_pixels_internal(gauge, maxFillPixels);
 }
 
@@ -6207,7 +6295,382 @@ void Gauge_release(Gauge *gauge)
 
     gauge_free_ptr((void **)&gauge->parts);
     gauge_free_ptr((void **)&gauge->logic.valueToPixelsData);
+
+    for (u8 layoutIndex = 0; layoutIndex < gauge->ownedLayoutCount; layoutIndex++)
+    {
+        GaugeLayout *ownedLayout = gauge->ownedLayouts[layoutIndex];
+        gauge_free_ptr((void **)&ownedLayout);
+        gauge->ownedLayouts[layoutIndex] = NULL;
+    }
+    gauge->ownedLayoutCount = 0;
+
     memset(gauge, 0, sizeof(*gauge));
+}
+
+/* =============================================================================
+   GaugeBuilder (public UX API)
+   ============================================================================= */
+
+static inline u8 sanitize_value_mode(u8 mode)
+{
+    return (mode == GAUGE_VALUE_MODE_PIP) ? GAUGE_VALUE_MODE_PIP : GAUGE_VALUE_MODE_FILL;
+}
+
+static inline u8 sanitize_orientation(u8 orientation)
+{
+    return (orientation == GAUGE_ORIENT_VERTICAL) ? GAUGE_ORIENT_VERTICAL : GAUGE_ORIENT_HORIZONTAL;
+}
+
+static inline u8 sanitize_fill_direction(u8 fillDirection)
+{
+    return (fillDirection == GAUGE_FILL_REVERSE) ? GAUGE_FILL_REVERSE : GAUGE_FILL_FORWARD;
+}
+
+static void builder_zero(GaugeBuilder *builder)
+{
+    if (!builder)
+        return;
+    memset(builder, 0, sizeof(*builder));
+}
+
+u8 GaugeBuilder_init(GaugeBuilder *builder, const GaugeDescription *description)
+{
+    if (!builder || !description)
+        return 0;
+
+    builder_zero(builder);
+
+    GaugeDescription sanitized = *description;
+    sanitized.mode = sanitize_value_mode((u8)sanitized.mode);
+    sanitized.orientation = sanitize_orientation((u8)sanitized.orientation);
+    sanitized.fillDirection = sanitize_fill_direction((u8)sanitized.fillDirection);
+    sanitized.palette = (u8)(sanitized.palette & 3);
+    sanitized.priority = sanitized.priority ? 1 : 0;
+    sanitized.verticalFlip = sanitized.verticalFlip ? 1 : 0;
+    sanitized.horizontalFlip = sanitized.horizontalFlip ? 1 : 0;
+    sanitized.capStartFixed = sanitized.capStartFixed ? 1 : 0;
+    sanitized.capEndFixed = sanitized.capEndFixed ? 1 : 0;
+
+    if (sanitized.maxValue > GAUGE_LUT_CAPACITY)
+        sanitized.maxValue = GAUGE_LUT_CAPACITY;
+
+    builder->description = sanitized;
+    builder->partCount = 1;
+    builder->partLength[0] = 0;
+    builder->partSegmentCount[0] = 0;
+    builder->partOriginX[0] = sanitized.originX;
+    builder->partOriginY[0] = sanitized.originY;
+    builder->partFillOffset[0] = 0;
+    builder->initialized = 1;
+
+    return 1;
+}
+
+u8 GaugeBuilder_addSegment(GaugeBuilder *builder,
+                           u8 partIndex,
+                           const GaugeSegmentDefinition *definition)
+{
+    if (!builder || !builder->initialized || !definition)
+        return 0;
+    if (partIndex >= builder->partCount)
+        return 0;
+
+    const u8 segmentIndex = builder->partSegmentCount[partIndex];
+    if (segmentIndex >= GAUGE_MAX_SEGMENTS)
+        return 0;
+
+    GaugeSegmentDefinition sanitized = *definition;
+    if (sanitized.cellCount == 0)
+        return 0;
+
+    if (builder->description.mode == GAUGE_VALUE_MODE_FILL)
+    {
+        if (!sanitized.normal.body)
+            return 0;
+    }
+    else
+    {
+        if (!sanitized.pipStrip)
+            return 0;
+        if (sanitized.pipWidth == 0)
+            sanitized.pipWidth = 1;
+    }
+
+    /* UX rule: bridge is exposed only on normal/base context. */
+    if (sanitized.gain.bridge || sanitized.blinkOff.bridge)
+    {
+        KLog("GaugeBuilder_addSegment: gain/blinkOff bridge ignored");
+        sanitized.gain.bridge = NULL;
+        sanitized.blinkOff.bridge = NULL;
+    }
+
+    builder->segmentDefinitions[partIndex][segmentIndex] = sanitized;
+    builder->partSegmentCount[partIndex] = (u8)(segmentIndex + 1);
+    return 1;
+}
+
+u8 GaugeBuilder_addSlave(GaugeBuilder *builder,
+                         const GaugeSlaveDescription *description,
+                         u8 *outPartIndex)
+{
+    if (!builder || !builder->initialized || !description)
+        return 0;
+    if (builder->partCount >= GAUGE_MAX_PARTS)
+        return 0;
+
+    const u8 partIndex = builder->partCount;
+    builder->partCount = (u8)(builder->partCount + 1);
+    builder->slaveDescriptions[partIndex - 1] = *description;
+    builder->partLength[partIndex] = 0;
+    builder->partSegmentCount[partIndex] = 0;
+    builder->partOriginX[partIndex] = description->originX;
+    builder->partOriginY[partIndex] = description->originY;
+    builder->partFillOffset[partIndex] = description->fillOffset;
+
+    if (outPartIndex)
+        *outPartIndex = partIndex;
+
+    return 1;
+}
+
+static u8 build_segment_id_by_cell(const GaugeBuilder *builder,
+                                   u8 partIndex,
+                                   u8 *outSegmentIdByCell,
+                                   u8 *outLength)
+{
+    if (!builder || !outSegmentIdByCell || !outLength)
+        return 0;
+
+    const u8 segmentCount = builder->partSegmentCount[partIndex];
+    if (segmentCount == 0)
+        return 0;
+
+    u8 segmentByFillIndex[GAUGE_MAX_LENGTH] = {0};
+    u8 cursor = 0;
+
+    for (u8 segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++)
+    {
+        const GaugeSegmentDefinition *definition =
+            &builder->segmentDefinitions[partIndex][segmentIndex];
+        const u8 cellCount = definition->cellCount;
+        if (cellCount == 0)
+            return 0;
+        if ((u16)cursor + (u16)cellCount > GAUGE_MAX_LENGTH)
+            return 0;
+
+        for (u8 i = 0; i < cellCount; i++)
+            segmentByFillIndex[cursor++] = segmentIndex;
+    }
+
+    if (cursor == 0)
+        return 0;
+
+    *outLength = cursor;
+
+    for (u8 cellIndex = 0; cellIndex < cursor; cellIndex++)
+    {
+        const u8 fillIndex =
+            (builder->description.fillDirection == GAUGE_FILL_REVERSE)
+                ? (u8)(cursor - 1 - cellIndex)
+                : cellIndex;
+        outSegmentIdByCell[cellIndex] = segmentByFillIndex[fillIndex];
+    }
+
+    return 1;
+}
+
+static void release_builder_layout(GaugeLayout **layoutPtr)
+{
+    if (!layoutPtr || !*layoutPtr)
+        return;
+
+    GaugeLayout *layout = *layoutPtr;
+    if (layout->length != 0 || layout->refCount != 0)
+        GaugeLayout_release(layout);
+    gauge_free_ptr((void **)layoutPtr);
+}
+
+u8 GaugeBuilder_build(GaugeBuilder *builder,
+                      Gauge *gauge,
+                      u16 vramBase,
+                      GaugeVramMode vramMode)
+{
+    if (!builder || !builder->initialized || !gauge)
+        return 0;
+
+    GaugeLayout *builtLayouts[GAUGE_MAX_PARTS] = {0};
+    u8 partLengths[GAUGE_MAX_PARTS] = {0};
+    u8 segmentIdByCellByPart[GAUGE_MAX_PARTS][GAUGE_MAX_LENGTH] = {{0}};
+    const u8 partCount = builder->partCount;
+    u16 resolvedMaxValue = builder->description.maxValue;
+
+    for (u8 partIndex = 0; partIndex < partCount; partIndex++)
+    {
+        if (!build_segment_id_by_cell(builder,
+                                      partIndex,
+                                      segmentIdByCellByPart[partIndex],
+                                      &partLengths[partIndex]))
+        {
+            goto fail;
+        }
+        builder->partLength[partIndex] = partLengths[partIndex];
+    }
+
+    for (u8 partIndex = 1; partIndex < partCount; partIndex++)
+    {
+        /* Master remains the largest timeline for deterministic projection. */
+        if (partLengths[partIndex] > partLengths[0])
+            goto fail;
+    }
+
+    if (builder->description.mode == GAUGE_VALUE_MODE_FILL && resolvedMaxValue == 0)
+        resolvedMaxValue = (u16)(partLengths[0] << TILE_TO_PIXEL_SHIFT);
+    if (resolvedMaxValue > GAUGE_LUT_CAPACITY)
+        resolvedMaxValue = GAUGE_LUT_CAPACITY;
+
+    for (u8 partIndex = 0; partIndex < partCount; partIndex++)
+    {
+        const u8 length = partLengths[partIndex];
+        const u8 segmentCount = builder->partSegmentCount[partIndex];
+        GaugeSegmentStyle segmentStyles[GAUGE_MAX_SEGMENTS] = {0};
+        const u32 *pipTilesets[GAUGE_MAX_SEGMENTS] = {0};
+        u8 pipWidths[GAUGE_MAX_SEGMENTS] = {0};
+
+        for (u8 segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++)
+        {
+            const GaugeSegmentDefinition *definition =
+                &builder->segmentDefinitions[partIndex][segmentIndex];
+            GaugeSegmentStyle *style = &segmentStyles[segmentIndex];
+
+            style->base.body = definition->normal.body;
+            style->base.end = definition->normal.end;
+            style->base.trail = definition->normal.trail;
+            style->base.bridge = definition->normal.bridge;
+
+            style->gain.body = definition->gain.body;
+            style->gain.end = definition->gain.end;
+            style->gain.trail = definition->gain.trail;
+            style->gain.bridge = NULL;
+
+            style->blinkOff.body = definition->blinkOff.body;
+            style->blinkOff.end = definition->blinkOff.end;
+            style->blinkOff.trail = definition->blinkOff.trail;
+            style->blinkOff.bridge = NULL;
+
+            /* No dedicated gain-blink API in V2 UX: reuse blinkOff as fallback. */
+            style->gainBlinkOff.body = definition->blinkOff.body;
+            style->gainBlinkOff.end = definition->blinkOff.end;
+            style->gainBlinkOff.trail = definition->blinkOff.trail;
+            style->gainBlinkOff.bridge = NULL;
+
+            if (builder->description.capStartFixed)
+            {
+                style->base.capStart = definition->normal.end ? definition->normal.end : definition->normal.body;
+                style->base.capStartBreak = definition->normal.body;
+                style->base.capStartTrail = definition->normal.trail;
+
+                style->gain.capStart = definition->gain.end ? definition->gain.end : definition->gain.body;
+                style->gain.capStartBreak = definition->gain.body;
+                style->gain.capStartTrail = definition->gain.trail;
+
+                style->blinkOff.capStart = definition->blinkOff.end ? definition->blinkOff.end : definition->blinkOff.body;
+                style->blinkOff.capStartBreak = definition->blinkOff.body;
+                style->blinkOff.capStartTrail = definition->blinkOff.trail;
+
+                style->gainBlinkOff.capStart = style->blinkOff.capStart;
+                style->gainBlinkOff.capStartBreak = style->blinkOff.capStartBreak;
+                style->gainBlinkOff.capStartTrail = style->blinkOff.capStartTrail;
+            }
+
+            if (builder->description.capEndFixed)
+            {
+                style->base.capEnd = definition->normal.end ? definition->normal.end : definition->normal.body;
+                style->gain.capEnd = definition->gain.end ? definition->gain.end : definition->gain.body;
+                style->blinkOff.capEnd = definition->blinkOff.end ? definition->blinkOff.end : definition->blinkOff.body;
+                style->gainBlinkOff.capEnd = style->blinkOff.capEnd;
+                style->capEndEnabled = 1;
+            }
+            else
+            {
+                style->capEndEnabled = 0;
+            }
+
+            if (builder->description.mode == GAUGE_VALUE_MODE_PIP)
+            {
+                pipTilesets[segmentIndex] = definition->pipStrip;
+                pipWidths[segmentIndex] = definition->pipWidth ? definition->pipWidth : 1;
+            }
+        }
+
+        GaugeLayout *layout = (GaugeLayout *)gauge_alloc_bytes((u16)sizeof(GaugeLayout));
+        if (!layout)
+            goto fail;
+
+        GaugeLayoutInit layoutInit;
+        layoutInit.length = length;
+        layoutInit.fillDirection = (GaugeFillDirection)builder->description.fillDirection;
+        layoutInit.orientation = (GaugeOrientation)builder->description.orientation;
+        layoutInit.palette = builder->description.palette;
+        layoutInit.priority = builder->description.priority;
+        layoutInit.verticalFlip = builder->description.verticalFlip;
+        layoutInit.horizontalFlip = builder->description.horizontalFlip;
+        layoutInit.segmentIdByCell = segmentIdByCellByPart[partIndex];
+        layoutInit.segmentStyles = segmentStyles;
+        GaugeLayout_build(layout, &layoutInit);
+        if (layout->length == 0 || layout->segmentCount == 0)
+            goto fail;
+
+        if (builder->partFillOffset[partIndex] != 0)
+            GaugeLayout_setFillOffset(layout, builder->partFillOffset[partIndex]);
+
+        if (builder->description.mode == GAUGE_VALUE_MODE_PIP)
+            GaugeLayout_setPipStyles(layout, pipTilesets, pipWidths);
+
+        builtLayouts[partIndex] = layout;
+    }
+
+    Gauge_release(gauge);
+    Gauge_init(gauge, &(GaugeInit){
+        .maxValue = resolvedMaxValue,
+        .initialValue = resolvedMaxValue,
+        .layout = builtLayouts[0],
+        .vramBase = vramBase,
+        .vramMode = vramMode,
+        .valueMode = (GaugeValueMode)builder->description.mode
+    });
+
+    if (!gauge->tickAndRenderHandler)
+        goto fail_after_init;
+
+    /* Default runtime preset requested for UX V2. */
+    Gauge_setValueAnim(gauge, 0, 0);
+    Gauge_setTrailMode(gauge, GAUGE_TRAIL_MODE_FOLLOW, 0, 0, 0);
+    Gauge_setGainMode(gauge, GAUGE_GAIN_MODE_DISABLED, 0, 0);
+
+    for (u8 partIndex = 0; partIndex < partCount; partIndex++)
+    {
+        if (!Gauge_addPart(gauge,
+                           builtLayouts[partIndex],
+                           builder->partOriginX[partIndex],
+                           builder->partOriginY[partIndex]))
+        {
+            goto fail_after_init;
+        }
+    }
+
+    gauge->ownedLayoutCount = partCount;
+    for (u8 partIndex = 0; partIndex < partCount; partIndex++)
+        gauge->ownedLayouts[partIndex] = builtLayouts[partIndex];
+
+    return 1;
+
+fail_after_init:
+    Gauge_release(gauge);
+
+fail:
+    for (u8 partIndex = 0; partIndex < partCount; partIndex++)
+        release_builder_layout(&builtLayouts[partIndex]);
+    return 0;
 }
 
 /**

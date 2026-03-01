@@ -31,7 +31,6 @@ extern const TileSet gauge_h_bevel_lightblue_strip_break;
 extern const TileSet gauge_h_bevel_lightblue_strip_end;
 extern const TileSet gauge_h_bevel_lightblue_strip_trail;
 extern const TileSet gauge_h_bevel_lightblue_to_blue_strip_bridge;
-extern const TileSet gauge_h_bevel_lightblue_to_blue_strip_bridge_part2;
 extern const TileSet gauge_h_bevel_yellow_gain_strip_trail;
 extern const TileSet gauge_h_bevel_yellow_gain_strip_end;
 extern const TileSet gauge_h_bevel_yellow_gain_strip_break;

@@ -17,6 +17,15 @@
      [################............]   value = 60%
       <-- filled -->  <-- empty -->
 
+   PUBLIC API NOTE (V2):
+   ---------------------
+   Gauge initialization is done through the GaugeBuilder UX API:
+     GaugeBuilder_init -> GaugeBuilder_addSegment -> (optional) GaugeBuilder_addSlave
+     -> GaugeBuilder_build
+
+   GaugeLayout/GaugePart are internal architecture details kept documented below
+   to explain rendering behavior, but they are not part of the public init API.
+
 
    ============================================================================
    VISUAL CONCEPTS
@@ -72,7 +81,9 @@
 
    BRIDGE strip (45 tiles, optional): see BRIDGE section below.
 
-   CAP strips (45 tiles each, optional): see CAPS section below.
+   CAP strips are internal renderer concepts.
+   In the public Builder V2 API, caps are auto-derived from segment assets
+   (no dedicated cap strips are declared explicitly).
 
 
    TRAIL (DAMAGE AND GAIN)
@@ -138,13 +149,19 @@
    Caps are decorative border tiles at the ends of the gauge. They always
    stay in place but change their tileset depending on the gauge state.
 
-   CAP END: the last cell in fill order. Always uses its dedicated tileset.
-     It shows partial fill like a normal cell, but with a rounded/bordered look.
+   CAP END: the last cell in fill order.
+     In Builder V2, it maps to the end segment:
+     - uses segment.end when available, else segment.body.
 
    CAP START: the first cell in fill order. Has 3 visual variants:
      - capStart:      used when the value edge is in this cell (normal fill)
      - capStartBreak: used when the cell is fully filled or empty
      - capStartTrail: used when the trail zone covers this cell
+
+     In Builder V2, these variants are auto-mapped from the start segment:
+     - capStart      <- segment.end (fallback segment.body)
+     - capStartBreak <- segment.body
+     - capStartTrail <- segment.trail
 
    Example (8-cell gauge with caps):
 
@@ -177,6 +194,10 @@
    one segment's fill style doesn't align with the next. A bridge is a
    special tileset for the last cell of a segment that smoothly transitions
    to the next segment's visual style.
+
+   Builder V2 UX rule:
+   - bridge is exposed only on normal assets.
+   - gain/blinkOff bridges are ignored.
 
    Without bridge (2 segments: green, red):
      Cell:     [grn|grn|grn|grn|red|red|red|red]
@@ -214,11 +235,10 @@
    - Fill direction (forward or reverse)
    - Optional feature buffers (allocated lazily when configured)
 
-   You typically create one GaugeLayout per gauge visual design, then pass
-   it to Gauge_addPart(). The layout is retained by each part (refcounted).
-   Rebuilding geometry with GaugeLayout_init* / GaugeLayout_build requires
-   refCount == 0. Optional style setters can still be used while retained
-   and apply to all attached parts.
+   Layouts are created internally by GaugeBuilder_build() (one layout per part).
+   Each part retains its layout (refcounted), and Gauge_release() releases all
+   retained references and builder-owned layout allocations.
+   Direct layout rebuild/mutation is an internal concern of gauge.c.
 
 
    GaugeLogic -- "What is the gauge's current value?"
@@ -261,7 +281,8 @@
    IMPORTANT: all parts of a Gauge share the SAME GaugeLogic (same value).
    For two independent gauges (e.g., P1 and P2 health bars with different HP),
    you need two separate Gauge objects, each with its own GaugeLogic.
-   A mirrored P2 gauge uses GaugeLayout_makeMirror() on a SEPARATE Gauge.
+   For a mirrored P2 gauge, use a separate Gauge configured with its own
+   GaugeDescription (fill direction / flips / origin as needed).
 
    VRAM MODES:
    - FIXED:   Each cell gets its own VRAM tile. Tile data is DMA'd from
@@ -278,10 +299,10 @@
    High-level container that binds everything together:
    - 1 embedded GaugeLogic (value state machine)
    - N GaugeParts (rendering units, allocated internally)
-   - VRAM allocation state (auto-increments as parts are added)
+   - VRAM allocation state (auto-increments as parts are built)
 
    This is the only struct most users need to interact with.
-   Call Gauge_init() once, add parts, then Gauge_update() every frame.
+   Build it once via GaugeBuilder_build(), then call Gauge_update() every frame.
 
 
    ============================================================================
@@ -290,7 +311,7 @@
 
    FILL MODE (default):
    Classic continuous gauge. Each tile fills pixel by pixel (0..8 px).
-   Total fill resolution = cellCount * 8 pixels.
+   Total fill resolution = (sum of segment cellCount) * 8 pixels.
 
      value=0:    [........|........|........|........]
      value=16:   [########|########|........|........]
@@ -316,35 +337,32 @@
 
    ```c
    static Gauge myGauge;
-   static GaugeLayout myLayout;
+   static GaugeBuilder builder;
 
-   // 1. Initialize layout with visual properties
-   GaugeLayout_init(&myLayout, 8, GAUGE_FILL_FORWARD, tilesets, segments,
-                    GAUGE_ORIENT_HORIZONTAL, PAL0, 1, 0, 0);
-
-   // 2. Initialize gauge (maxFillPixels = myLayout.length * 8 = 64, auto)
-   Gauge_init(&myGauge, &(GaugeInit){
+   GaugeBuilder_init(&builder, &(GaugeDescription){
+       .mode = GAUGE_VALUE_MODE_FILL,
+       .orientation = GAUGE_ORIENT_HORIZONTAL,
+       .fillDirection = GAUGE_FILL_FORWARD,
+       .originX = 2,
+       .originY = 5,
        .maxValue = 100,
-       .initialValue = 100,
-       .layout = &myLayout,
-       .vramBase = VRAM_BASE,
-       .vramMode = GAUGE_VRAM_DYNAMIC,
-       .valueMode = GAUGE_VALUE_MODE_FILL
+       .capStartFixed = 1,
+       .capEndFixed = 1,
+       .palette = PAL0,
+       .priority = 1
    });
 
-   // 3. Add parts (VRAM auto-allocated sequentially)
-   Gauge_addPart(&myGauge, &myLayout, 2, 5);
-   Gauge_addPart(&myGauge, &myLayout, 2, 6);
+   GaugeBuilder_addSegment(&builder, 0, &(GaugeSegmentDefinition){
+       .cellCount = 8,
+       .normal = { .body = stripBody, .trail = stripTrail, .end = stripEnd }
+   });
 
-   // 4. Game loop
-   while(1) {
-       Gauge_update(&myGauge);  // Tick logic + render all parts
+   GaugeBuilder_build(&builder, &myGauge, VRAM_BASE, GAUGE_VRAM_DYNAMIC);
+
+   while (1) {
+       Gauge_update(&myGauge);
        SYS_doVBlankProcess();
    }
-
-   // 5. Change value
-   Gauge_decrease(&myGauge, 10, 20, 60);  // Damage with trail effect
-   Gauge_increase(&myGauge, 5, 20, 60);   // Heal with gain trail
    ```
 
    2-LANE SIMULATION:
@@ -368,7 +386,7 @@
  * Each Gauge allocates a value-to-pixels lookup table of
  * (GAUGE_LUT_CAPACITY + 1) entries when needed.
  *
- * Any maxValue passed to Gauge_init() must be <= GAUGE_LUT_CAPACITY.
+ * Any GaugeDescription.maxValue must be <= GAUGE_LUT_CAPACITY.
  * Set this to the largest maxValue you'll use across all gauges.
  *
  * Default: 160 (= 20 tiles * 8 pixels/tile).
@@ -455,8 +473,9 @@ typedef enum
  *       Example: [VALUE] [VALUE] [VALUE] [LOSS ] [EMPTY]  (3/5 pips filled)
  *
  *       PIP setup requires:
- *       - Configure compact strips via GaugeLayout_setPipStyles()
- *       - maxValue must equal the layout pip count
+ *       - Provide pipStrip + pipWidth in each GaugeSegmentDefinition
+ *       - Pip count is computed from segment geometry
+ *       - maxValue is auto-adjusted to pip count during GaugeBuilder_build()
  */
 typedef enum
 {
@@ -547,7 +566,7 @@ typedef void GaugeLogicTickHandler(GaugeLogic *logic);
 
 /**
  * Per-part render handler.
- * Selected once when the part is added, based on value mode and VRAM mode.
+ * Selected once when the part is created, based on value mode and VRAM mode.
  */
 typedef void GaugePartRenderHandler(GaugePart *part,
                                     u16 valuePixels,
@@ -594,7 +613,7 @@ typedef void GaugePartRenderHandler(GaugePart *part,
      Maps each cell to its position in fill order. In FORWARD mode,
      fillIndex == cellIndex. In REVERSE mode, the order is flipped so
      the last cell fills first.
-     Set automatically by GaugeLayout_setFillForward/Reverse().
+     Auto-computed during build from fillDirection.
 
    cellIndexByFillIndex[fillIndex]:
      Inverse of fillIndexByCell. Given a fill position, returns the
@@ -650,10 +669,8 @@ typedef void GaugePartRenderHandler(GaugePart *part,
      where triggerPixel is the gauge pixel value at which the last
      cell of the bottom row should become completely full.
 
-     Note: fillOffset is stored on GaugeLayout. Use a separate layout if
-     different parts need different projection windows.
-
-     Configure via GaugeLayout_setFillOffset().
+     In Builder V2, this is provided per slave via GaugeSlaveDescription.fillOffset,
+     so each slave can define its own projection window.
 
    localEndOverrideEnabled:
      Controls local terminal END override in multi-part projection.
@@ -676,7 +693,7 @@ typedef void GaugePartRenderHandler(GaugePart *part,
      - blink OFF frame: idx 8
      - blink ON frame:  idx 44
      - no blink active: idx 44
-     Configure via GaugeLayout_setLocalEndOverride().
+     This is an internal rendering policy configured during build.
 
 
    BODY TILESET -- tilesetBySegment[segmentId]:
@@ -890,7 +907,7 @@ typedef struct
 
 
 /* -----------------------------------------------------------------------------
-   GaugeLayout init API (simplified initialization)
+   Internal legacy layout style structs (for renderer internals)
    ----------------------------------------------------------------------------- */
 
 /**
@@ -974,31 +991,10 @@ typedef struct
 } GaugeSegmentStyle;
 
 /**
- * Full layout initialization config (preferred API for new code).
+ * Legacy internal layout initialization config.
  *
- * Bundles all layout parameters into a single struct passed to GaugeLayout_build().
- * This is the easiest way to set up a layout -- it configures all tilesets
- * (body, end, trail, bridge, caps, gain, blink-off) for all segments at once
- * via the segmentStyles array.
- *
- * Example:
- *   GaugeSegmentStyle styles[3] = {
- *       { .base = { .body = greenStrip.tiles, .end = greenEnd.tiles } },
- *       { .base = { .body = yellowStrip.tiles, .end = yellowEnd.tiles } },
- *       { .base = { .body = redStrip.tiles, .end = redEnd.tiles } },
- *   };
- *   u8 segments[9] = { 0,0,0, 1,1,1, 2,2,2 };
- *
- *   GaugeLayoutInit init = {
- *       .length = 9,
- *       .fillDirection = GAUGE_FILL_FORWARD,
- *       .orientation = GAUGE_ORIENT_HORIZONTAL,
- *       .palette = PAL0,
- *       .priority = 1,
- *       .segmentIdByCell = segments,
- *       .segmentStyles = styles
- *   };
- *   GaugeLayout_build(&myLayout, &init);
+ * Kept for internal build plumbing in gauge.c.
+ * Public initialization should use GaugeBuilder_* APIs instead.
  */
 typedef struct
 {
@@ -1013,248 +1009,6 @@ typedef struct
     const GaugeSegmentStyle *segmentStyles;  /* Style per segment (NULL => no tilesets) */
 } GaugeLayoutInit;
 
-
-/* -----------------------------------------------------------------------------
-   GaugeLayout API
-   ----------------------------------------------------------------------------- */
-
-/**
- * Build a layout from an initialization config.
- * Equivalent in behavior to GaugeLayout_initEx + optional style configuration.
- */
-void GaugeLayout_build(GaugeLayout *layout, const GaugeLayoutInit *init);
-
-/**
- * Initialize layout with complete configuration.
- *
- * @param layout        Layout to initialize
- * @param length        Number of cells (1..GAUGE_MAX_LENGTH)
- * @param fillDirection       GAUGE_FILL_FORWARD or GAUGE_FILL_REVERSE
- * @param tilesets      Array indexed by segmentId (at least segmentCount entries),
- *                      BODY tileset pointers (45-tile strips), or NULL
- * @param segmentIdByCell Array of length elements specifying segment ID per cell
- *                      Can be NULL, all cells will use segment 0
- * @param orientation   GAUGE_ORIENT_HORIZONTAL or GAUGE_ORIENT_VERTICAL
- * @param palette   Palette line (0-3, typically PAL0-PAL3)
- * @param priority      Tile priority (0 or 1)
- * @param verticalFlip         Vertical flip (0 or 1)
- * @param horizontalFlip         Horizontal flip (0 or 1)
- */
-void GaugeLayout_init(GaugeLayout *layout,
-                      u8 length,
-                      GaugeFillDirection fillDirection,
-                      const u32 * const *tilesets,
-                      const u8 *segmentIdByCell,
-                      GaugeOrientation orientation,
-                      u8 palette,
-                      u8 priority,
-                      u8 verticalFlip,
-                      u8 horizontalFlip);
-
-/**
- * Initialize layout with BODY + optional END/TRAIL/BRIDGE tilesets.
- *
- * Fallback rules:
- * - If END tileset is NULL for a segment, BODY is used everywhere.
- * - BREAK cells (logical transition) always use BODY tileset.
- *
- * @param layout        Layout to initialize
- * @param length        Number of cells (1..GAUGE_MAX_LENGTH)
- * @param fillDirection       GAUGE_FILL_FORWARD or GAUGE_FILL_REVERSE
- * @param bodyTilesets  Array indexed by segmentId (at least segmentCount entries),
- *                      BODY tileset pointers (45-tile strips)
- * @param endTilesets   Array indexed by segmentId (optional, can be NULL)
- * @param trailTilesets Array indexed by segmentId (optional, can be NULL)
- * @param bridgeTilesets Array indexed by segmentId (optional, can be NULL)
- * @param segmentIdByCell Array of length elements specifying segment ID per cell
- * @param orientation   GAUGE_ORIENT_HORIZONTAL or GAUGE_ORIENT_VERTICAL
- * @param palette   Palette line (0-3, typically PAL0-PAL3)
- * @param priority      Tile priority (0 or 1)
- * @param verticalFlip         Vertical flip (0 or 1)
- * @param horizontalFlip         Horizontal flip (0 or 1)
- */
-void GaugeLayout_initEx(GaugeLayout *layout,
-                        u8 length,
-                        GaugeFillDirection fillDirection,
-                        const u32 * const *bodyTilesets,
-                        const u32 * const *endTilesets,
-                        const u32 * const *trailTilesets,
-                        const u32 * const *bridgeTilesets,
-                        const u8 *segmentIdByCell,
-                        GaugeOrientation orientation,
-                        u8 palette,
-                        u8 priority,
-                        u8 verticalFlip,
-                        u8 horizontalFlip);
-
-/**
- * Set pixel fill offset for a layout.
- *
- * Shifts where this part's cells start sampling the gauge value.
- * See the fillOffset field reference in GaugeLayout for a detailed
- * visual explanation with examples.
- *
- * Quick formula for a shorter bottom row (like Sample 7):
- *   fillOffset = triggerPixel - (partLength * GAUGE_PIXELS_PER_TILE)
- *
- * Example: Part2 is 3 cells, should become fully filled at pixel 32:
- *   fillOffset = 32 - (3 * 8) = 8
- *
- * @param layout            Layout to configure (shared by all parts that retain it)
- * @param fillOffsetPixels  Pixel offset (0 = starts at gauge pixel 0)
- */
-void GaugeLayout_setFillOffset(GaugeLayout *layout, u16 fillOffsetPixels);
-
-/**
- * Enable or disable local terminal END override (default enabled).
- *
- * When enabled, in multi-part master projection mode (slave PARTs only),
- * the last local fill cell can force END rendering with this policy:
- * - mapped master terminal BRIDGE (persistent while blink is active) + valuePixels >= fillOffset -> force END
- * - value beyond this slave layout range + mapped master terminal is
- *   STANDARD_FULL -> force END idx 44
- * Index policy while forced:
- * - blink OFF frame -> idx 8
- * - blink ON frame  -> idx 44
- * - no blink active -> idx 44
- *
- * @param layout   Layout to configure
- * @param enabled  0=disabled, non-zero=enabled
- */
-void GaugeLayout_setLocalEndOverride(GaugeLayout *layout, u8 enabled);
-
-/**
- * Set fill direction to forward (cell 0 fills first).
- * Use for gauges that fill from left or top.
- * Configuration-time only; affects all parts that share this layout.
- */
-void GaugeLayout_setFillForward(GaugeLayout *layout);
-
-/**
- * Set fill direction to reverse (last cell fills first).
- * Use for gauges that fill from right or bottom.
- * Configuration-time only; affects all parts that share this layout.
- */
-void GaugeLayout_setFillReverse(GaugeLayout *layout);
-
-/**
- * Create mirrored layout for P2/opponent side.
- * - Reverses segment order
- * - Reverses fill direction
- * - Copies flip flags from the source layout (no automatic flip)
- *
- * @param dst   Destination layout (will be initialized)
- * @param src   Source layout to mirror
- */
-void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src);
-
-/**
- * Configure optional start/end cap tilesets for a layout.
- * Call AFTER GaugeLayout_init/initEx. Each tileset parameter is an array
- * indexed by segmentId (at least segmentCount entries); pass NULL for the
- * entire array to skip
- * or set individual entries to NULL to disable caps for that segment.
- *
- * @param layout                Layout to configure (must be initialized)
- * @param capStartTilesets      45-tile strips for cap start (cell 0 in fill order)
- * @param capEndTilesets        45-tile strips for cap end (last cell in fill order)
- * @param capStartBreakTilesets 45-tile strips for cap start in break/full state
- * @param capStartTrailTilesets 45-tile strips for cap start in trail zone
- * @param capEndBySegment       Array of flags: 1=enable cap end for segment, 0=disabled
- */
-void GaugeLayout_setCapTilesets(GaugeLayout *layout,
-                                const u32 * const *capStartTilesets,
-                                const u32 * const *capEndTilesets,
-                                const u32 * const *capStartBreakTilesets,
-                                const u32 * const *capStartTrailTilesets,
-                                const u8 *capEndBySegment);
-
-/**
- * Configure optional gain trail tilesets (used during gain trail when value increases).
- * Pass NULL for any array to fall back to normal tilesets for that element.
- *
- * @param layout                   Layout to configure (must be initialized)
- * @param gainBodyTilesets         BODY gain strips (45 tiles)
- * @param gainEndTilesets          END gain strips (45 tiles)
- * @param gainTrailTilesets        TRAIL gain strips (64 tiles)
- * @param gainBridgeTilesets       BRIDGE gain strips (45 tiles)
- * @param gainCapStartTilesets     CAP START gain strips (45 tiles)
- * @param gainCapEndTilesets       CAP END gain strips (45 tiles)
- * @param gainCapStartBreakTilesets CAP START BREAK gain strips (45 tiles)
- * @param gainCapStartTrailTilesets CAP START TRAIL gain strips (45 tiles)
- */
-void GaugeLayout_setGainTrailTilesets(GaugeLayout *layout,
-                                      const u32 * const *gainBodyTilesets,
-                                      const u32 * const *gainEndTilesets,
-                                      const u32 * const *gainTrailTilesets,
-                                      const u32 * const *gainBridgeTilesets,
-                                      const u32 * const *gainCapStartTilesets,
-                                      const u32 * const *gainCapEndTilesets,
-                                      const u32 * const *gainCapStartBreakTilesets,
-                                      const u32 * const *gainCapStartTrailTilesets);
-
-/**
- * Configure optional blink-off tilesets (used during trail blink OFF frames).
- * Pass NULL for any array to disable blink-off for that element.
- *
- * Blink-off is applied only to END/TRAIL/BREAK cells while blinkFramesRemaining > 0.
- * Missing blink-off tilesets fall back to the normal rendering behavior.
- *
- * @param layout                   Layout to configure (must be initialized)
- * @param blinkOffBodyTilesets     BODY blink-off strips (45 tiles)
- * @param blinkOffEndTilesets      END blink-off strips (45 tiles)
- * @param blinkOffTrailTilesets    TRAIL blink-off strips (64 tiles)
- * @param blinkOffBridgeTilesets   BRIDGE blink-off strips (45 tiles)
- * @param blinkOffCapStartTilesets CAP START blink-off strips (45 tiles)
- * @param blinkOffCapEndTilesets   CAP END blink-off strips (45 tiles)
- * @param blinkOffCapStartBreakTilesets CAP START BREAK blink-off strips (45 tiles)
- * @param blinkOffCapStartTrailTilesets CAP START TRAIL blink-off strips (45 tiles)
- */
-void GaugeLayout_setBlinkOffTilesets(GaugeLayout *layout,
-                                     const u32 * const *blinkOffBodyTilesets,
-                                     const u32 * const *blinkOffEndTilesets,
-                                     const u32 * const *blinkOffTrailTilesets,
-                                     const u32 * const *blinkOffBridgeTilesets,
-                                     const u32 * const *blinkOffCapStartTilesets,
-                                     const u32 * const *blinkOffCapEndTilesets,
-                                     const u32 * const *blinkOffCapStartBreakTilesets,
-                                     const u32 * const *blinkOffCapStartTrailTilesets);
-
-/**
- * Configure optional gain blink-off tilesets (used during gain trail blink OFF frames).
- * Pass NULL for any array to disable gain blink-off for that element.
- *
- * @param layout                   Layout to configure (must be initialized)
- * @param gainBlinkOffBodyTilesets     BODY gain blink-off strips (45 tiles)
- * @param gainBlinkOffEndTilesets      END gain blink-off strips (45 tiles)
- * @param gainBlinkOffTrailTilesets    TRAIL gain blink-off strips (64 tiles)
- * @param gainBlinkOffBridgeTilesets   BRIDGE gain blink-off strips (45 tiles)
- * @param gainBlinkOffCapStartTilesets CAP START gain blink-off strips (45 tiles)
- * @param gainBlinkOffCapEndTilesets   CAP END gain blink-off strips (45 tiles)
- * @param gainBlinkOffCapStartBreakTilesets CAP START BREAK gain blink-off strips (45 tiles)
- * @param gainBlinkOffCapStartTrailTilesets CAP START TRAIL gain blink-off strips (45 tiles)
- */
-void GaugeLayout_setGainBlinkOffTilesets(GaugeLayout *layout,
-                                         const u32 * const *gainBlinkOffBodyTilesets,
-                                         const u32 * const *gainBlinkOffEndTilesets,
-                                         const u32 * const *gainBlinkOffTrailTilesets,
-                                         const u32 * const *gainBlinkOffBridgeTilesets,
-                                         const u32 * const *gainBlinkOffCapStartTilesets,
-                                         const u32 * const *gainBlinkOffCapEndTilesets,
-                                         const u32 * const *gainBlinkOffCapStartBreakTilesets,
-                                         const u32 * const *gainBlinkOffCapStartTrailTilesets);
-
-/**
- * Configure compact PIP styles (used by GAUGE_VALUE_MODE_PIP renderer).
- * Call after GaugeLayout_init/initEx.
- *
- * @param layout            Layout to configure
- * @param pipTilesets       Array indexed by segmentId (at least segmentCount entries)
- * @param pipWidthBySegment Array indexed by segmentId, width in tiles (0 => default 1)
- */
-void GaugeLayout_setPipStyles(GaugeLayout *layout,
-                              const u32 * const *pipTilesets,
-                              const u8 *pipWidthBySegment);
 
 /* =============================================================================
    GaugeLogic -- Value/trail state machine
@@ -1489,7 +1243,7 @@ typedef struct
    the tilemap so the correct tiles appear at the correct screen position.
 
    Users don't interact with GaugePart directly -- it's managed internally
-   by the Gauge container and allocated by Gauge_addPart().
+   by the Gauge container and allocated during GaugeBuilder_build().
 
    WHAT'S INSIDE A PART:
    - A retained GaugeLayout reference (shared safely via refcount)
@@ -1559,22 +1313,20 @@ typedef struct GaugePart
    1. Allocate:
         static Gauge myGauge;
 
-   2. Initialize:
-        Gauge_init(&myGauge, &config);  // sets up logic, no rendering yet
+   2. Build (initialization + parts allocation):
+        GaugeBuilder_init(&builder, &description);
+        GaugeBuilder_addSegment(&builder, 0, &segmentDef);
+        GaugeBuilder_build(&builder, &myGauge, vramBase, GAUGE_VRAM_DYNAMIC);
 
-   3. Configure animations (optional):
+   3. Configure runtime behavior (optional, before first Gauge_update):
         Gauge_setValueAnim(&myGauge, 1, 4);   // enable smooth value changes
         Gauge_setTrailMode(&myGauge, GAUGE_TRAIL_MODE_FOLLOW, 0, 4, 3); // damage mode
         Gauge_setGainMode(&myGauge, GAUGE_GAIN_MODE_FOLLOW, 4, 3);       // gain mode
 
-   4. Add parts (each call allocates part + VRAM and sets up rendering):
-        Gauge_addPart(&myGauge, &layout, x, y);
-        Gauge_addPart(&myGauge, &layout, x, y+1); // 2-lane
-
-   5. Game loop:
+   4. Game loop:
         Gauge_update(&myGauge);  // call once per frame (tick + render)
 
-   6. Change value:
+   5. Change value:
         Gauge_decrease(&myGauge, 10, 20, 60); // damage: -10, hold 20f, blink 60f
         Gauge_increase(&myGauge, 5, 20, 60);  // heal: +5, hold 20f, blink 60f
         Gauge_setValue(&myGauge, 50);          // instant set (no trail)
@@ -1592,22 +1344,16 @@ typedef struct GaugePart
    Common use cases:
    - 2-lane gauge: 2 parts at Y and Y+1 for a 2-tile-tall bar
    - 2-lane with shorter bottom row: the shorter row uses a different fillOffset
-     to project a subset of the master gauge span (see fillOffset field reference
-     in GaugeLayout). Because fillOffset is stored in the layout, use a separate
-     layout for that row.
+     to project a subset of the master gauge span (set this in
+     GaugeSlaveDescription.fillOffset for that slave).
 
    NOTE: For two independent gauges (e.g., P1 and P2 health bars), use
-   two separate Gauge objects. A mirrored P2 layout is created with
-   GaugeLayout_makeMirror() on the P2 Gauge's own layout.
+   two separate Gauge objects, each with its own builder configuration.
 
    VRAM ALLOCATION:
    ----------------
-   VRAM is auto-allocated sequentially. Each Gauge_addPart() call reserves
-   the VRAM tiles needed for that part, starting from vramBase.
-   The gauge tracks vramNextOffset internally -- you don't need to manage it.
-
-   To know how many tiles a part will need (for manual planning):
-     u16 size = Gauge_getVramSize(&gauge, &layout);
+   VRAM is auto-allocated sequentially during GaugeBuilder_build().
+   The gauge tracks vramNextOffset internally.
 
    ============================================================================= */
 struct Gauge
@@ -1637,6 +1383,10 @@ struct Gauge
     u8 masterDecisionUseBlinkVariantByFillIndex[GAUGE_MAX_LENGTH];
     u8 masterPipStateByFillIndex[GAUGE_MAX_LENGTH];
 
+    /* --- Builder-owned layouts (allocated by GaugeBuilder_build) --- */
+    GaugeLayout *ownedLayouts[GAUGE_MAX_PARTS];
+    u8 ownedLayoutCount;
+
     /* --- VRAM allocation --- */
     u16 vramBase;                   /* Base VRAM tile index */
     u16 vramNextOffset;             /* Offset for next part allocation */
@@ -1646,65 +1396,192 @@ struct Gauge
 
 
 /* -----------------------------------------------------------------------------
-   Gauge API
+   Gauge Builder UX API (public initialization path)
    ----------------------------------------------------------------------------- */
 
 /**
- * Gauge initialization config.
- * Pass this to Gauge_init() to configure runtime mode and VRAM defaults.
+ * Segment assets for one visual state.
  *
- * KEY FIELDS:
- *   maxValue:      The maximum logical value (e.g., 100 for "100 HP").
- *                  Values above GAUGE_LUT_CAPACITY are clamped at init.
- *   layout:        Main layout (must be fully configured before Gauge_init).
- *                  maxFillPixels is derived as layout->length * GAUGE_PIXELS_PER_TILE.
- *                  If maxValue != maxFillPixels, a LUT is auto-generated at init
- *                  to map between them (e.g., 100 HP -> 128 pixels).
- *                  Override with Gauge_setMaxFillPixels() after init if needed.
- *   initialValue:  Starting value (e.g., maxValue for "full health").
- *   vramBase:      First VRAM tile index reserved for this gauge.
- *                  Parts will be allocated sequentially from this base.
- *   vramMode:      Default VRAM mode for all parts added to this gauge.
- *                  Can be overridden per-part with Gauge_addPartEx().
- *   valueMode:     FILL (continuous) or PIP (discrete).
- *                  In PIP mode, maxValue is expected to equal layout pipCount;
- *                  Gauge_init adjusts and logs if mismatch.
+ * All strips are optional except where required by the selected value mode:
+ * - FILL mode requires normal.body
+ * - PIP mode requires pipStrip and pipWidth in GaugeSegmentDefinition
+ *
+ * UX rule:
+ * - bridge is intended for normal assets.
+ * - gain.bridge and blinkOff.bridge are ignored by GaugeBuilder_addSegment().
  */
 typedef struct
 {
-    u16 maxValue;                /* Maximum logical value (clamped to GAUGE_LUT_CAPACITY at init) */
-    u16 initialValue;            /* Starting value (clamped to maxValue) */
-    const GaugeLayout *layout;   /* Main layout (maxFillPixels = length * 8) */
-    u16 vramBase;                /* First VRAM tile index for this gauge */
-    GaugeVramMode vramMode;      /* GAUGE_VRAM_FIXED or GAUGE_VRAM_DYNAMIC */
-    GaugeValueMode valueMode;    /* GAUGE_VALUE_MODE_FILL or GAUGE_VALUE_MODE_PIP */
-} GaugeInit;
+    const u32 *body;
+    const u32 *trail;
+    const u32 *end;
+    const u32 *bridge;
+} GaugeSegmentAssets;
 
 /**
- * Retain a layout reference (increments refcount).
+ * Segment definition in fill order.
+ *
+ * IMPORTANT:
+ * segment index 0 is ALWAYS the start of fill order.
+ * - Horizontal + forward: segment 0 is leftmost.
+ * - Horizontal + reverse: segment 0 is rightmost.
+ * - Vertical + forward:   segment 0 is topmost.
+ * - Vertical + reverse:   segment 0 is bottommost.
+ *
+ * Cap mapping in Builder V2:
+ * - cap-start uses start segment assets (end/body/trail mapping).
+ * - cap-end uses end segment assets (end fallback body).
+ * No dedicated cap tilesets are required in the public API.
  */
-void GaugeLayout_retain(GaugeLayout *layout);
+typedef struct
+{
+    u8 cellCount;                    /* Number of cells covered by this segment */
+    GaugeSegmentAssets normal;       /* Base strips (FILL mode) */
+    GaugeSegmentAssets gain;         /* Gain strips (FILL mode) */
+    GaugeSegmentAssets blinkOff;     /* Blink-off strips (FILL mode) */
+    const u32 *pipStrip;             /* Compact pip strip (PIP mode) */
+    u8 pipWidth;                     /* Width in tiles for one pip (PIP mode) */
+} GaugeSegmentDefinition;
 
 /**
- * Release a layout reference (decrements refcount and frees dynamic buffers at 0).
+ * Builder convenience macros (SGDK-friendly).
+ *
+ * GAUGE_SEGMENT_TILESETS(...) converts TileSet pointers to GaugeSegmentAssets.
+ * GAUGE_SEGMENT_ATTR(...) builds a FILL-mode segment definition.
+ *
+ * Example:
+ *   GaugeSegmentDefinition segment = GAUGE_SEGMENT_ATTR(
+ *       8,
+ *       GAUGE_SEGMENT_TILESETS(&gauge_h_straight_yellow_strip, NULL, NULL, NULL),
+ *       GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
+ *       GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL));
  */
-void GaugeLayout_release(GaugeLayout *layout);
+#define GAUGE_SEGMENT_TILESETS(bodyTileset, trailTileset, endTileset, bridgeTileset) \
+    ((GaugeSegmentAssets){ \
+        .body = ((bodyTileset) ? ((const TileSet *)(bodyTileset))->tiles : NULL), \
+        .trail = ((trailTileset) ? ((const TileSet *)(trailTileset))->tiles : NULL), \
+        .end = ((endTileset) ? ((const TileSet *)(endTileset))->tiles : NULL), \
+        .bridge = ((bridgeTileset) ? ((const TileSet *)(bridgeTileset))->tiles : NULL) \
+    })
+
+#define GAUGE_SEGMENT_ATTR(cellCountValue, normalAssets, gainAssets, blinkOffAssets) \
+    ((GaugeSegmentDefinition){ \
+        .cellCount = (cellCountValue), \
+        .normal = (normalAssets), \
+        .gain = (gainAssets), \
+        .blinkOff = (blinkOffAssets), \
+        .pipStrip = NULL, \
+        .pipWidth = 0 \
+    })
 
 /**
- * Initialize gauge from GaugeInit configuration.
- * Trail mode defaults to disabled, gain mode defaults to disabled,
- * and value animation defaults to instant.
- * Use Gauge_setTrailMode(), Gauge_setGainMode() and Gauge_setValueAnim()
- * to configure animations.
- * Call Gauge_release() before re-initializing an already-used Gauge.
+ * Master gauge description.
+ * initialValue is implicitly set to maxValue when built.
+ * In FILL mode, if maxValue is 0, build defaults it to
+ * (master sum of segment cellCount * 8).
+ * Segment count is implicit: one segment per GaugeBuilder_addSegment() call
+ * on partIndex 0 before build.
  */
-void Gauge_init(Gauge *gauge, const GaugeInit *init);
+typedef struct
+{
+    GaugeValueMode mode;                 /* GAUGE_VALUE_MODE_FILL or GAUGE_VALUE_MODE_PIP */
+    GaugeOrientation orientation;
+    GaugeFillDirection fillDirection;
+    u16 originX;                         /* Master tile X position */
+    u16 originY;                         /* Master tile Y position */
+    u16 maxValue;                        /* Logical max value (initial is maxValue) */
+    u8 capStartFixed;                    /* Auto-cap on fill start */
+    u8 capEndFixed;                      /* Auto-cap on fill end */
+    u8 palette;                          /* Palette line (0..3) */
+    u8 priority;                         /* Tile priority (0 or 1) */
+    u8 verticalFlip;                     /* Vertical flip flag (0 or 1) */
+    u8 horizontalFlip;                   /* Horizontal flip flag (0 or 1) */
+} GaugeDescription;
+
+/**
+ * Slave part description.
+ * Segment order follows the same "start of fill order = segment 0" rule.
+ * Segment count is implicit: one segment per GaugeBuilder_addSegment() call
+ * on the returned slave part index before build.
+ */
+typedef struct
+{
+    u16 originX;                         /* Slave tile X position */
+    u16 originY;                         /* Slave tile Y position */
+    u16 fillOffset;                      /* Projection offset in pixels (default 0) */
+} GaugeSlaveDescription;
+
+/**
+ * GaugeBuilder opaque state (public storage, internal behavior).
+ */
+typedef struct
+{
+    GaugeDescription description;
+    GaugeSlaveDescription slaveDescriptions[GAUGE_MAX_PARTS - 1];
+    GaugeSegmentDefinition segmentDefinitions[GAUGE_MAX_PARTS][GAUGE_MAX_SEGMENTS];
+    u8 partLength[GAUGE_MAX_PARTS];                 /* Derived during build from segment cellCount sums */
+    u8 partSegmentCount[GAUGE_MAX_PARTS];           /* Derived from number of addSegment calls */
+    u16 partOriginX[GAUGE_MAX_PARTS];
+    u16 partOriginY[GAUGE_MAX_PARTS];
+    u16 partFillOffset[GAUGE_MAX_PARTS];
+    u8 partCount;
+    u8 initialized;
+} GaugeBuilder;
+
+/**
+ * Initialize builder from a master gauge description.
+ * Resets any previous builder state.
+ * Part lengths are not provided in descriptions: they are derived at build
+ * time from the sum of segment cellCount for each part.
+ * Segment count is also derived from the number of addSegment calls per part.
+ */
+u8 GaugeBuilder_init(GaugeBuilder *builder, const GaugeDescription *description);
+
+/**
+ * Append one segment definition to a target part.
+ * partIndex = 0 for master, >=1 for slaves (in add order).
+ * Segment order is call order (first add = segment 0).
+ */
+u8 GaugeBuilder_addSegment(GaugeBuilder *builder,
+                           u8 partIndex,
+                           const GaugeSegmentDefinition *definition);
+
+/**
+ * Add one slave part.
+ * Slave length is derived from sum of segment cellCount during build.
+ * Build fails if derived slave length exceeds derived master length.
+ * Returns its part index via outPartIndex (>= 1).
+ */
+u8 GaugeBuilder_addSlave(GaugeBuilder *builder,
+                         const GaugeSlaveDescription *description,
+                         u8 *outPartIndex);
+
+/**
+ * Build gauge runtime + all parts from the builder configuration.
+ *
+ * Default runtime preset applied at build:
+ * - Gauge_setValueAnim(..., 0, default)
+ * - Gauge_setTrailMode(..., GAUGE_TRAIL_MODE_FOLLOW, ...)
+ * - Gauge_setGainMode(..., GAUGE_GAIN_MODE_DISABLED, ...)
+ *
+ * In FILL mode, maxValue==0 defaults to (derived master length * 8).
+ * In PIP mode, maxValue is auto-aligned to computed pipCount.
+ */
+u8 GaugeBuilder_build(GaugeBuilder *builder,
+                      Gauge *gauge,
+                      u16 vramBase,
+                      GaugeVramMode vramMode);
+
+
+/* -----------------------------------------------------------------------------
+   Gauge Runtime API
+   ----------------------------------------------------------------------------- */
 
 /**
  * Configure value animation.
  *
  * Configuration-time only:
- * - no-op once the first part has been added
+ * - allowed before first Gauge_update() call
  * - no-op after first Gauge_update() call (runtime closed)
  *
  * @param gauge    Gauge to configure
@@ -1717,7 +1594,7 @@ void Gauge_setValueAnim(Gauge *gauge, u8 enabled, u8 shift);
  * Configure damage trail behavior mode and timing.
  *
  * Configuration-time only:
- * - no-op once the first part has been added
+ * - allowed before first Gauge_update() call
  * - no-op after first Gauge_update() call (runtime closed)
  *
  * @param gauge         Gauge to configure
@@ -1736,7 +1613,7 @@ void Gauge_setTrailMode(Gauge *gauge,
  * Configure gain behavior mode and timing.
  *
  * Configuration-time only:
- * - no-op once the first part has been added
+ * - allowed before first Gauge_update() call
  * - no-op after first Gauge_update() call (runtime closed)
  *
  * @param gauge      Gauge to configure
@@ -1773,58 +1650,6 @@ void Gauge_setDebugMode(Gauge *gauge, u8 enabled);
 u8 Gauge_getDebugMode(const Gauge *gauge);
 
 /**
- * Override the maximum fill pixel count.
- * By default, maxFillPixels = layout->length * 8 (set at Gauge_init).
- * No-op if the new value equals the current maxFillPixels.
- * Configuration-time only:
- * - no-op once the first part has been added
- * - no-op after first Gauge_update() call (runtime closed)
- *
- * If maxValue != new maxFillPixels, the embedded LUT is repopulated.
- * If maxValue == new maxFillPixels, the LUT is cleared (1:1 mapping).
- *
- * @param gauge         Gauge to modify
- * @param maxFillPixels New total pixel span
- */
-void Gauge_setMaxFillPixels(Gauge *gauge, u16 maxFillPixels);
-
-/**
- * Add a part to the gauge (simplified).
- * VRAM is allocated automatically from gauge's vramBase.
- * Allowed while runtime state is OPEN or HAS_PARTS.
- * No-op after first Gauge_update() call (runtime CLOSED).
- *
- * @param gauge     Parent gauge
- * @param layout    Layout configuration (retained via refCount)
- * @param originX   Tilemap X position
- * @param originY   Tilemap Y position
- */
-u8 Gauge_addPart(Gauge *gauge,
-                 GaugeLayout *layout,
-                 u16 originX,
-                 u16 originY);
-
-/**
- * Add a part with custom VRAM configuration.
- * Use when you need specific VRAM placement or different VRAM mode.
- * Allowed while runtime state is OPEN or HAS_PARTS.
- * No-op after first Gauge_update() call (runtime CLOSED).
- *
- * @param gauge     Parent gauge
- * @param layout    Layout configuration (retained via refCount)
- * @param originX   Tilemap X position
- * @param originY   Tilemap Y position
- * @param vramBase  Custom VRAM base tile index
- * @param vramMode  Custom VRAM mode (overrides gauge default)
- */
-u8 Gauge_addPartEx(Gauge *gauge,
-                   GaugeLayout *layout,
-                   u16 originX,
-                   u16 originY,
-                   u16 vramBase,
-                   GaugeVramMode vramMode);
-
-/**
  * Release all allocations owned by the gauge (parts, buffers, retained layouts, LUTs).
  * Safe to call multiple times.
  */
@@ -1833,7 +1658,7 @@ void Gauge_release(Gauge *gauge);
 /**
  * Update gauge: tick logic + render all parts.
  * Call once per frame.
- * First call locks runtime configuration APIs (trail mode, part additions, etc.).
+ * First call locks runtime configuration APIs.
  *
  * Performs:
  * - Value animation (if enabled)
@@ -1905,26 +1730,5 @@ static inline u8 Gauge_isFull(const Gauge *gauge)
 {
     return gauge->logic.currentValue == gauge->logic.maxValue;
 }
-
-
-/* -----------------------------------------------------------------------------
-   Utility functions
-   ----------------------------------------------------------------------------- */
-
-/**
- * Compute VRAM tiles needed for a layout (for manual allocation).
- *
- * The size is derived from the current gauge configuration:
- * - gauge->vramMode
- * - gauge->logic.trailEnabled
- * - gauge->valueMode
- *
- * @param gauge       Gauge configuration source (must be initialized)
- * @param layout      Layout configuration
- * @return Number of VRAM tiles needed
- */
-u16 Gauge_getVramSize(const Gauge *gauge,
-                      const GaugeLayout *layout);
-
 
 #endif /* GAUGE_H */

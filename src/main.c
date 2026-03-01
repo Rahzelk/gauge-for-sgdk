@@ -1,286 +1,137 @@
-/* =============================================================================
-   GAUGE MODULE - USAGE GUIDE
-   =============================================================================
-
-   This file demonstrates how to use the Gauge module for SGDK.
-   Each sample is self-contained and shows a different use case.
-
-   STEPS TO USE THE GAUGE MODULE:
-   ------------------------------
-
-   1. INCLUDE THE MODULE
-      #include "gauge.h"
-
-   2. CREATE A LAYOUT (describes the visual appearance)
-      - Define tilesets array (pointers to 45-tile strips from your resources)
-      - Define segments array (which tileset index for each cell/tile)
-      - Call GaugeLayout_init() with orientation, palette, priority, flip flags
-
-   3. CREATE A GAUGE (manages the value and animation logic)
-      - Declare a Gauge struct and a GaugePart array
-      - Fill a GaugeInit and call Gauge_init(&gauge, &gaugeInit)
-      - Optionally configure animations:
-        * Gauge_setValueAnim() for smooth value transitions
-        * Gauge_setTrailMode() for damage trail/blink behavior
-        * Gauge_setGainMode() for increase/gain behavior
-
-   4. ADD PARTS TO THE GAUGE (visual representation on screen)
-      - Call Gauge_addPart() for each visual instance
-      - One gauge can have multiple parts (they share the same logic/value)
-      - Each part can be at a different screen position
-
-   5. UPDATE EVERY FRAME
-      - Call Gauge_update() once per frame for each Gauge
-      - This handles animation ticks and rendering
-
-   6. MODIFY VALUES
-      - Gauge_setValue(gauge, value) : instant change, no animation
-      - Gauge_increase(gauge, amount, holdFrames, blinkFrames) : behavior depends on gain mode
-      - Gauge_decrease(gauge, amount, holdFrames, blinkFrames) : damage with trail
-
-   VRAM MODES:
-   -----------
-   - GAUGE_VRAM_DYNAMIC : Fewer VRAM tiles, more CPU (recommended for most cases)
-   - GAUGE_VRAM_FIXED   : More VRAM tiles (1 per cell), less CPU (for many gauges)
-
-   ============================================================================= */
-
-
 #include <genesis.h>
 #include "gauge.h"
 #include "gauge_assets.h"
 
-
 /* =============================================================================
-   CONSTANTS
+   Gauge Builder V2 demo (all samples use GaugeBuilder API only)
    ============================================================================= */
 
-/* VRAM base address for all gauges (after system tiles) */
-#define VRAM_BASE   TILE_USER_INDEX
+#define VRAM_BASE            TILE_USER_INDEX
 
-/* Tile lengths for each sample */
-#define SAMPLE1_LENGTH      12      /* Sample 1: 12-tile yellow gauge */
-#define SAMPLE2_LENGTH      14      /* Sample 2: 7 pips, 2 tiles each */
-#define SAMPLE3_LENGTH      14      /* Sample 3: cap start + segment1 + yellow */
-#define SAMPLE3_PART2_LENGTH 2      /* Sample 3: */
-#define SAMPLE4_LENGTH      14      /* Sample 4: cap start/end + blue segment demo */
-#define SAMPLE5_LENGTH      16      /* Sample 5: 16 tiles multi-bridge */
-#define SAMPLE6_LENGTH      12      /* Sample 6: 12 tiles vertical (3 segments) */
-#define SAMPLE7_PART1_LEN   12      /* Sample 7 Part1: 12 tiles (3 segments) */
-#define SAMPLE7_PART2_LEN    3      /* Sample 7 Part2: 3 tiles lightblue bevel */
-#define SAMPLE7_PIP_LEN      8      /* Sample 7 mini PIP: 4 pips, 2 tiles each */
+#define SAMPLE1_LENGTH       12
+#define SAMPLE2_LENGTH       14
+#define SAMPLE3_LENGTH       14
+#define SAMPLE4_LENGTH       14
+#define SAMPLE5_LENGTH       16
+#define SAMPLE6_LENGTH       12
+#define SAMPLE7_LENGTH       12
+#define SAMPLE7_SLAVE_LENGTH  3
+#define SAMPLE7_PIP_LENGTH    8
 
-/* Screen positions (in tiles) */
-#define SAMPLE1_X           2
-#define SAMPLE1_Y           9
-#define SAMPLE2_X       (SAMPLE1_X + SAMPLE1_LENGTH + 4)    /* Right of Sample1 with gap */
-#define SAMPLE2_Y       SAMPLE1_Y                       /* Same row as Sample1 */
+#define SAMPLE1_X  2
+#define SAMPLE1_Y  9
+#define SAMPLE2_X  (SAMPLE1_X + SAMPLE1_LENGTH + 4)
+#define SAMPLE2_Y  SAMPLE1_Y
 
-#define SAMPLE3_X           2
-#define SAMPLE3_Y           14      /* Below Sample1 */
+#define SAMPLE3_X  2
+#define SAMPLE3_Y 14
 
-#define SAMPLE4_X           (SAMPLE3_X + SAMPLE3_LENGTH + 3)     /* Right of Sample3, shifted 2 tiles left */
-#define SAMPLE4_Y           SAMPLE3_Y
+#define SAMPLE4_X  (SAMPLE3_X + SAMPLE3_LENGTH + 3)
+#define SAMPLE4_Y  SAMPLE3_Y
 
-#define SAMPLE5_X           2
-#define SAMPLE5_Y           18      /* Below Sample3 */
+#define SAMPLE5_X  2
+#define SAMPLE5_Y 18
 
-#define SAMPLE6_X           36      /* Right side of screen */
-#define SAMPLE6_Y           10      /* Top, extends down to row 21 */
+#define SAMPLE6_X 36
+#define SAMPLE6_Y 10
 
-#define SAMPLE7_X           2
-#define SAMPLE7_Y           23      /* Below Sample5 */
-#define SAMPLE7_PART2_X     2
-#define SAMPLE7_PART2_Y     (SAMPLE7_Y + 1)      /* Below Sample7 Part1 */
-#define SAMPLE7_PIP_X       (SAMPLE7_PART2_X + SAMPLE7_PART2_LEN)   /* Right of Part2 */
-#define SAMPLE7_PIP_Y       SAMPLE7_PART2_Y
+#define SAMPLE7_X       2
+#define SAMPLE7_Y      23
+#define SAMPLE7_SLAVE_X 2
+#define SAMPLE7_SLAVE_Y (SAMPLE7_Y + 1)
+#define SAMPLE7_PIP_X   (SAMPLE7_SLAVE_X + SAMPLE7_SLAVE_LENGTH)
+#define SAMPLE7_PIP_Y   SAMPLE7_SLAVE_Y
 
-/* Number of gauges for selection */
-#define GAUGE_COUNT     7
+#define GAUGE_COUNT 7
 
+/* -----------------------------------------------------------------------------
+   Runtime objects
+   ----------------------------------------------------------------------------- */
+static Gauge g_sample1Gauge;
+static Gauge g_sample2Gauge;
+static Gauge g_sample3Gauge;
+static Gauge g_sample4Gauge;
+static Gauge g_sample5Gauge;
+static Gauge g_sample6Gauge;
+static Gauge g_sample7Gauge;
+static Gauge g_sample7PipGauge;
 
-/* =============================================================================
-   GLOBAL VARIABLES
-   ============================================================================= */
+/* Builder workspace reused across all sample initializations.
+ * Keeping a single instance avoids large static RAM usage. */
+static GaugeBuilder s_builder;
 
-/* --- Layouts (define visual appearance) --- */
-static GaugeLayout s_layoutSample1;         /* Yellow 12 tiles h_bevel */
-static GaugeLayout s_layoutSample2;         /* 7-point PIP gauge (14 tiles) */
-static GaugeLayout s_layoutSample3;         /* 14 tiles: cap start + seg1 + yellow */
-static GaugeLayout s_layoutSample3Part2;    /* Lightblue bevel 3 tiles */
+/* Input state */
+static u16 g_previousPad = 0;
+static u8 g_selectedGauge = 0;
+static u8 g_holdA = 0;
+static u8 g_holdB = 0;
 
-static GaugeLayout s_layoutSample4;         /* Cap start/end demo */
-static GaugeLayout s_layoutSample4Mirror;   /* Cap start/end demo (mirror) */
-static GaugeLayout s_layoutSample5;         /* Multi-bridge (ciel -> blue -> yellow) */
-static GaugeLayout s_layoutSample6;         /* Multi-segment vertical */
-static GaugeLayout s_layoutSample7Part1;    /* Multi-segment: lightblue(4) + blue(4) + yellow(4) */
-static GaugeLayout s_layoutSample7Part2;    /* Lightblue bevel 3 tiles */
-static GaugeLayout s_layoutSample7Pip;      /* Mini PIP 4 points */
-
-/* --- Gauges (manage value and logic) --- */
-static Gauge g_gaugeSample1;
-static Gauge g_gaugeSample2;        /* Separate gauge (PIP mode) */
-static Gauge g_gaugeSample3;
-static Gauge g_gaugeSample4;
-static Gauge g_gaugeSample5;
-static Gauge g_gaugeSample6;
-static Gauge g_gaugeSample7;        /* Has 2 parts: Part1 + Part2 */
-static Gauge g_gaugeSample7Pip;     /* Independent mini PIP gauge */
-
-/* --- Input state --- */
-static u16 g_prevPad = 0;
-static u8 g_selectedGauge = 0;          /* Currently controlled gauge (0-6) */
-static u8 g_holdA = 0;                  /* Hold counter for button A */
-static u8 g_holdB = 0;                  /* Hold counter for button B */
-
-/* --- Sample 7 mini PIP auto-wrap state --- */
-static u16 g_sample7PipValue = 0;       /* 0-4 */
+/* Mini PIP auto wrap */
+static u16 g_sample7PipValue = 0;
 static u16 g_frameCount = 0;
 
-/* Debug/test helpers removed (returning control to manual inputs). */
-
-
-/* =============================================================================
-   HELPER FUNCTIONS
-   ============================================================================= */
-
-/**
- * Get pointer to currently selected gauge.
- * Used by input handling to modify the right gauge.
- */
-static Gauge* getSelectedGauge(void)
+/* -----------------------------------------------------------------------------
+   Small helpers
+   ----------------------------------------------------------------------------- */
+static void logVramUsage(const char *name, u16 vramBase, u16 tileCount)
 {
-    switch (g_selectedGauge)
-    {
-        case 0: return &g_gaugeSample1;
-        case 1: return &g_gaugeSample2;
-        case 2: return &g_gaugeSample3;
-        case 3: return &g_gaugeSample4;
-        case 4: return &g_gaugeSample5;
-        case 5: return &g_gaugeSample6;
-        case 6: return &g_gaugeSample7;
-        default: return &g_gaugeSample1;
-    }
-}
-
-/**
- * Get name of currently selected gauge for display.
- */
-static const char* getSelectedGaugeName(void)
-{
-    switch (g_selectedGauge)
-    {
-        case 0: return "Sample 1           ";
-        case 1: return "Sample 2 PIP (7 pts)  ";
-        case 2: return "Sample 3 Bevel        ";
-        case 3: return "Sample 4 Cap Start/End";
-        case 4: return "Sample 5 Bridge & Gain  ";
-        case 5: return "Sample 6 Vertical     ";
-        case 6: return "Sample 7 Multi Part   ";
-        default: return "Unknown               ";
-    }
-}
-
-/**
- * Log VRAM usage for a gauge.
- * Displays the VRAM base address and number of tiles used.
- */
-static void logVramUsage(const char* name, u16 vramBase, u16 tileCount)
-{
-    KLog((char*)name);
+    KLog((char *)name);
     KLog_U2(" VRAM base=", vramBase, " tiles=", tileCount);
 }
 
-/**
- * Log dynamic VRAM tiles for a part (debugging overlaps).
- */
-static void logDynamicVramTiles(const char* name, const GaugePart* part)
+static u8 buildGaugeFromBuilder(const char *name,
+                                GaugeBuilder *builder,
+                                Gauge *gauge,
+                                u16 *nextVram,
+                                GaugeVramMode vramMode)
 {
-    KLog((char*)name);
-    if (!part || part->dyn.segmentCount == 0)
+    const u16 vramBase = *nextVram;
+    if (!GaugeBuilder_build(builder, gauge, vramBase, vramMode))
     {
-        KLog("  part unavailable");
-        return;
+        KLog((char *)"GaugeBuilder_build failed");
+        KLog((char *)name);
+        return 0;
     }
 
-    KLog_U1("  partial V=", part->dyn.vramTilePartialValue);
-    KLog_U1("  partial T=", part->dyn.vramTilePartialTrail);
-    KLog_U1("  partial E=", part->dyn.vramTilePartialEnd);
-    KLog_U1("  partial T2=", part->dyn.vramTilePartialTrailSecond);
-    KLog_U3("  seg0 E=", part->dyn.vramTileEmpty[0],
-            " F=", part->dyn.vramTileFullValue[0],
-            " T=", part->dyn.vramTileFullTrail[0]);
-    if (part->dyn.segmentCount > 1)
+    const u16 usedTiles = gauge->vramNextOffset;
+    logVramUsage(name, vramBase, usedTiles);
+    *nextVram = (u16)(vramBase + usedTiles);
+    return 1;
+}
+
+static Gauge *getSelectedGauge(void)
+{
+    switch (g_selectedGauge)
     {
-        KLog_U3("  seg1 E=", part->dyn.vramTileEmpty[1],
-                " F=", part->dyn.vramTileFullValue[1],
-                " T=", part->dyn.vramTileFullTrail[1]);
-    }
-    if (part->dyn.segmentCount > 2)
-    {
-        KLog_U3("  seg2 E=", part->dyn.vramTileEmpty[2],
-                " F=", part->dyn.vramTileFullValue[2],
-                " T=", part->dyn.vramTileFullTrail[2]);
+        case 0: return &g_sample1Gauge;
+        case 1: return &g_sample2Gauge;
+        case 2: return &g_sample3Gauge;
+        case 3: return &g_sample4Gauge;
+        case 4: return &g_sample5Gauge;
+        case 5: return &g_sample6Gauge;
+        case 6: return &g_sample7Gauge;
+        default: return &g_sample1Gauge;
     }
 }
 
-static void setDebugModeSample7Only(void)
+static const char *getSelectedGaugeName(void)
 {
-    Gauge_setDebugMode(&g_gaugeSample1, 0);
-    Gauge_setDebugMode(&g_gaugeSample2, 0);
-    Gauge_setDebugMode(&g_gaugeSample3, 1);
-    Gauge_setDebugMode(&g_gaugeSample4, 0);
-    Gauge_setDebugMode(&g_gaugeSample5, 0);
-    Gauge_setDebugMode(&g_gaugeSample6, 0);
-    Gauge_setDebugMode(&g_gaugeSample7, 1);
-    Gauge_setDebugMode(&g_gaugeSample7Pip, 0);
+    switch (g_selectedGauge)
+    {
+        case 0: return "Sample 1";
+        case 1: return "Sample 2 PIP";
+        case 2: return "Sample 3 Caps";
+        case 3: return "Sample 4 Border";
+        case 4: return "Sample 5 Bridges";
+        case 5: return "Sample 6 Vertical";
+        case 6: return "Sample 7 MultiPart";
+        default: return "Sample 1";
+    }
 }
 
-static void dumpSample3AssetPointers(void)
-{
-    KLog("=== SAMPLE 3 ASSET POINTERS ===");
-    kprintf("GAUGE_TRACE SAMPLE3_ASSET gauge_seg0h_capstart_body.tiles=0x%08lX\n",
-            (unsigned long)(u32)gauge_seg0h_capstart_body.tiles);
-    kprintf("GAUGE_TRACE SAMPLE3_ASSET gauge_seg0h_capstart_end.tiles=0x%08lX\n",
-            (unsigned long)(u32)gauge_seg0h_capstart_end.tiles);
-    kprintf("GAUGE_TRACE SAMPLE3_ASSET gauge_seg0h_capstart_trail.tiles=0x%08lX\n",
-            (unsigned long)(u32)gauge_seg0h_capstart_trail.tiles);
-    kprintf("GAUGE_TRACE SAMPLE3_ASSET gauge_seg1h_body.tiles=0x%08lX\n",
-            (unsigned long)(u32)gauge_seg1h_body.tiles);
-    kprintf("GAUGE_TRACE SAMPLE3_ASSET gauge_seg1h_end.tiles=0x%08lX\n",
-            (unsigned long)(u32)gauge_seg1h_end.tiles);
-    kprintf("GAUGE_TRACE SAMPLE3_ASSET gauge_seg1h_trail.tiles=0x%08lX\n",
-            (unsigned long)(u32)gauge_seg1h_trail.tiles);
-
-    kprintf("GAUGE_TRACE SAMPLE3_ASSET gauge_seg0l_capstart_body.tiles=0x%08lX\n",
-            (unsigned long)(u32)gauge_seg0l_capstart_body.tiles);
-    kprintf("GAUGE_TRACE SAMPLE3_ASSET gauge_seg0l_capstart_end.tiles=0x%08lX\n",
-            (unsigned long)(u32)gauge_seg0l_capstart_end.tiles);
-    kprintf("GAUGE_TRACE SAMPLE3_ASSET gauge_seg0l_capstart_trail.tiles=0x%08lX\n",
-            (unsigned long)(u32)gauge_seg0l_capstart_trail.tiles);
-    kprintf("GAUGE_TRACE SAMPLE3_ASSET gauge_seg1l_body.tiles=0x%08lX\n",
-            (unsigned long)(u32)gauge_seg1l_body.tiles);
-    kprintf("GAUGE_TRACE SAMPLE3_ASSET gauge_seg1l_end.tiles=0x%08lX\n",
-            (unsigned long)(u32)gauge_seg1l_end.tiles);
-    kprintf("GAUGE_TRACE SAMPLE3_ASSET gauge_seg1l_trail.tiles=0x%08lX\n",
-            (unsigned long)(u32)gauge_seg1l_trail.tiles);
-
-            
-            kprintf("GAUGE_TRACE SAMPLE3_ASSET gauge_h_bevel_yellow_strip_break.tiles=0x%08lX\n",
-            (unsigned long)(u32)gauge_h_bevel_yellow_strip_break.tiles);
-    kprintf("GAUGE_TRACE SAMPLE3_ASSET gauge_h_bevel_yellow_strip_end.tiles=0x%08lX\n",
-            (unsigned long)(u32)gauge_h_bevel_yellow_strip_end.tiles);
-    kprintf("GAUGE_TRACE SAMPLE3_ASSET gauge_h_bevel_yellow_strip_trail.tiles=0x%08lX\n",
-            (unsigned long)(u32)gauge_h_bevel_yellow_strip_trail.tiles);
-}
-
-/* =============================================================================
-   SETUP FUNCTIONS
-   ============================================================================= */
-
-/**
- * Configure WINDOW plane for full-screen gauge display.
- */
+/* -----------------------------------------------------------------------------
+   Display helpers
+   ----------------------------------------------------------------------------- */
 static void setupWindowFullScreen(void)
 {
     VDP_setPlaneSize(64, 32, TRUE);
@@ -291,995 +142,512 @@ static void setupWindowFullScreen(void)
     VDP_setTextPlane(WINDOW);
 }
 
-/**
- * Draw header text with controls information.
- */
 static void drawHeader(void)
-{   
-    VDP_drawText("A:increase gauge   B:decrease gauge", 2, 1);
-    VDP_drawText("C:select gauge", 2, 3);
-    VDP_drawText("-------------------------------------", 0, 5);
-    VDP_drawText("| Selected:                         |", 0, 6);
-    VDP_drawText("-------------------------------------", 0, 7);
+{
+    VDP_drawText("A: increase   B: decrease", 2, 1);
+    VDP_drawText("C: select gauge", 2, 3);
+    VDP_drawText("------------------------------", 0, 5);
+    VDP_drawText("Selected:", 0, 6);
+    VDP_drawText("------------------------------", 0, 7);
 }
 
-/**
- * Update the display of currently selected gauge.
- */
 static void updateSelectedDisplay(void)
 {
-    VDP_drawText(getSelectedGaugeName(), 12, 6);
+    VDP_drawText("                ", 10, 6);
+    VDP_drawText(getSelectedGaugeName(), 10, 6);
 }
 
-
-/* =============================================================================
-   SAMPLE 1 + SAMPLE 2: Simple yellow gauge + PIP gauge (7 points)
-   =============================================================================
-
-   This sample shows the basic usage:
-   - Single-segment gauge (all tiles use the same tileset)
-   - Two separate gauges side by side (independent logic instances)
-   - Trail animation enabled for damage effect
-*/
-
+/* -----------------------------------------------------------------------------
+   Samples
+   ----------------------------------------------------------------------------- */
 static void initSample1(u16 *nextVram)
 {
-    u16 vramBase;
-    u16 vramSize;
-
-    /* -------------------------------------------------------------------------
-       SAMPLE 1A: Left yellow gauge
-       ------------------------------------------------------------------------- */
-
-    /* Step 1: Define the tileset array
-       - Index 0 = h_bevel yellow fill strip (45 tiles)
-       - Unused segment slots default to NULL */
-    const u32 *sample1Tilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_straight_yellow_strip.tiles  /* Segment 0: yellow */
+    GaugeDescription description = {
+        .mode = GAUGE_VALUE_MODE_FILL,
+        .orientation = GAUGE_ORIENT_HORIZONTAL,
+        .fillDirection = GAUGE_FILL_FORWARD,
+        .originX = SAMPLE1_X,
+        .originY = SAMPLE1_Y,
+        .maxValue = (u16)(SAMPLE1_LENGTH * GAUGE_PIXELS_PER_TILE),
+        .capStartFixed = 0,
+        .capEndFixed = 0,
+        .palette = PAL0,
+        .priority = 1,
+        .verticalFlip = 0,
+        .horizontalFlip = 0
     };
 
-    /* Step 2: Define which segment each cell uses
-       - All 12 cells use segment 0 (yellow) */
-    const u8 sample1Segments[SAMPLE1_LENGTH] = {
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-    };
+    GaugeBuilder_init(&s_builder, &description);
 
-    /* Step 3: Initialize the layout
-       - 12 tiles long
-       - Fill direction: forward (left to right)
-       - h_bevel orientation
-       - Palette 0, priority 1, no flip */
-    GaugeLayout_init(&s_layoutSample1,
-                     SAMPLE1_LENGTH,                 /* length in tiles */
-                     GAUGE_FILL_FORWARD,         /* fill direction */
-                     sample1Tilesets,                /* tilesets array */
-                     sample1Segments,                /* segment per cell */
-                     GAUGE_ORIENT_HORIZONTAL,    /* orientation */
-                     PAL0,                       /* palette line */
-                     1,                          /* priority (1=high) */
-                     0,                          /* verticalFlip */
-                     0);                         /* horizontalFlip */
+    GaugeSegmentDefinition segment = GAUGE_SEGMENT_ATTR(
+        SAMPLE1_LENGTH,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_straight_yellow_strip, NULL, NULL, NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
+    );
+    GaugeBuilder_addSegment(&s_builder, 0, &segment);
 
-    /* Step 4: Initialize the gauge
-       - maxFillPixels auto-derived from layout (12 * 8 = 96)
-       - maxValue = maxFillPixels for 1:1 mapping (no LUT needed)
-       - Starts at full value
-       - Uses VRAM_DYNAMIC mode (fewer tiles, more CPU efficient for single gauge) */
-    const u16 sample1MaxPixels = (u16)(SAMPLE1_LENGTH * GAUGE_PIXELS_PER_TILE);
+    if (!buildGaugeFromBuilder("Sample 1", &s_builder, &g_sample1Gauge, nextVram, GAUGE_VRAM_DYNAMIC))
+        return;
 
-    vramBase = *nextVram;
-    Gauge_init(&g_gaugeSample1, &(GaugeInit){
-        .maxValue = sample1MaxPixels,
-        .initialValue = sample1MaxPixels,
-        .layout = &s_layoutSample1,
-        .vramBase = vramBase,
-        .vramMode = GAUGE_VRAM_DYNAMIC,
-        .valueMode = GAUGE_VALUE_MODE_FILL
-    });
-
-    /* Step 6: Static loss trail (no blink, no catch-up). */
-    Gauge_setTrailMode(&g_gaugeSample1,
+    /* Original Sample 1 behavior (historical mode). */
+    Gauge_setValueAnim(&g_sample1Gauge, 0, 0);
+    Gauge_setTrailMode(&g_sample1Gauge,
                        GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK,
                        30,
-                       0,
-                       0);
- 
-    /* Step 7: Add the visual part at screen position */
-    Gauge_addPart(&g_gaugeSample1,
-                  &s_layoutSample1,
-                  SAMPLE1_X, SAMPLE1_Y);
+                       5,
+                       8);
+    Gauge_setGainMode(&g_sample1Gauge, GAUGE_GAIN_MODE_DISABLED, 0, 0);
 
-    /* Step 8: Log VRAM usage */
-    vramSize = Gauge_getVramSize(&g_gaugeSample1, &s_layoutSample1);
-    logVramUsage("Sample 1", vramBase, vramSize);
-    *nextVram = (u16)(vramBase + vramSize);
-
-    /* Step 9: Draw label under gauge */
     VDP_drawText("Sample 1", SAMPLE1_X, SAMPLE1_Y + 1);
+}
 
-    /* -------------------------------------------------------------------------
-       SAMPLE 2: Right PIP gauge (7 value points, 2 tiles per point)
-       ------------------------------------------------------------------------- */
-    const u32 *sample2BodyTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_straight_yellow_strip.tiles
-    };
-    const u32 *sample2CompactTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_pip_basic_strip.tiles
-    };
-    const u8 sample2Widths[GAUGE_MAX_SEGMENTS] = {
-        [0] = 2  /* segment 0: 2 tiles per pip */
-    };
-    const u8 sample2Segments[SAMPLE2_LENGTH] = {
-        0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0
-    };
-
-    GaugeLayout_init(&s_layoutSample2,
-                     SAMPLE2_LENGTH,
-                     GAUGE_FILL_FORWARD,
-                     sample2BodyTilesets,
-                     sample2Segments,
-                     GAUGE_ORIENT_HORIZONTAL,
-                     PAL0,
-                     1,
-                     0,
-                     0);
-    GaugeLayout_setPipStyles(&s_layoutSample2, sample2CompactTilesets, sample2Widths);
-
-    /* maxValue=7 with 14 tiles in PIP mode => 2 tiles per value point */
-    vramBase = *nextVram;
-    Gauge_init(&g_gaugeSample2, &(GaugeInit){
+static void initSample2(u16 *nextVram)
+{
+    GaugeDescription description = {
+        .mode = GAUGE_VALUE_MODE_PIP,
+        .orientation = GAUGE_ORIENT_HORIZONTAL,
+        .fillDirection = GAUGE_FILL_FORWARD,
+        .originX = SAMPLE2_X,
+        .originY = SAMPLE2_Y,
         .maxValue = 7,
-        .initialValue = 7,
-        .layout = &s_layoutSample2,
-        .vramBase = vramBase,
-        .vramMode = GAUGE_VRAM_DYNAMIC,
-        .valueMode = GAUGE_VALUE_MODE_PIP
-    });
+        .capStartFixed = 0,
+        .capEndFixed = 0,
+        .palette = PAL0,
+        .priority = 1,
+        .verticalFlip = 0,
+        .horizontalFlip = 0
+    };
 
-    Gauge_setValueAnim(&g_gaugeSample2, 1, 2);
-    Gauge_setTrailMode(&g_gaugeSample2,
-                       GAUGE_TRAIL_MODE_FOLLOW,
-                       0,
-                       0,
-                       0);
-    Gauge_setGainMode(&g_gaugeSample2,
-                      GAUGE_GAIN_MODE_FOLLOW,
-                      0,
-                      0);
+    GaugeBuilder_init(&s_builder, &description);
 
-    Gauge_addPart(&g_gaugeSample2,
-                  &s_layoutSample2,
-                  SAMPLE2_X, SAMPLE2_Y);
+    GaugeSegmentDefinition segment = GAUGE_SEGMENT_ATTR(
+        SAMPLE2_LENGTH,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_straight_yellow_strip, NULL, NULL, NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
+    );
+    segment.pipStrip = gauge_h_pip_basic_strip.tiles;
+    segment.pipWidth = 2;
+    GaugeBuilder_addSegment(&s_builder, 0, &segment);
 
-    vramSize = Gauge_getVramSize(&g_gaugeSample2, &s_layoutSample2);
-    logVramUsage("Sample 2 (PIP)", vramBase, vramSize);
-    *nextVram = (u16)(vramBase + vramSize);
+    if (!buildGaugeFromBuilder("Sample 2 (PIP)", &s_builder, &g_sample2Gauge, nextVram, GAUGE_VRAM_DYNAMIC))
+        return;
 
-    /* Draw label under gauge */
+    Gauge_setValueAnim(&g_sample2Gauge, 1, 2);
+    Gauge_setTrailMode(&g_sample2Gauge, GAUGE_TRAIL_MODE_FOLLOW, 0, 0, 0);
+    Gauge_setGainMode(&g_sample2Gauge, GAUGE_GAIN_MODE_FOLLOW, 0, 0);
+
     VDP_drawText("Sample 2 PIP", SAMPLE2_X, SAMPLE2_Y + 1);
 }
 
-
-/* =============================================================================
-   SAMPLE 3: 14-tile gauge (cap start + segment1 + yellow segment2)
-   ============================================================================= */
-
 static void initSample3(u16 *nextVram)
 {
-    u16 vramBase;
-    u16 vramSize;
-
-    /* Step 1: Define BODY/END/TRAIL tilesets
-       Segment 0 = custom CAP START family
-       Segment 1 = custom segment
-       Segment 2 = existing yellow bevel family */
-    const u32 *sample3BodyTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_seg0h_capstart_body.tiles,
-        [1] = gauge_seg1h_body.tiles,
-        [2] = gauge_h_bevel_yellow_strip_break.tiles
-    };
-    const u32 *sample3EndTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_seg0h_capstart_end.tiles,
-        [1] = gauge_seg1h_end.tiles,
-        [2] = gauge_h_bevel_yellow_strip_end.tiles
-    };
-    const u32 *sample3TrailTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_seg0h_capstart_trail.tiles,
-        [1] = gauge_seg1h_trail.tiles,
-        [2] = gauge_h_bevel_yellow_strip_trail.tiles
+    GaugeDescription description = {
+        .mode = GAUGE_VALUE_MODE_FILL,
+        .orientation = GAUGE_ORIENT_HORIZONTAL,
+        .fillDirection = GAUGE_FILL_FORWARD,
+        .originX = SAMPLE3_X,
+        .originY = SAMPLE3_Y,
+        .maxValue = (u16)(SAMPLE3_LENGTH * GAUGE_PIXELS_PER_TILE),
+        .capStartFixed = 1,
+        .capEndFixed = 1,
+        .palette = PAL0,
+        .priority = 1,
+        .verticalFlip = 0,
+        .horizontalFlip = 0
     };
 
-    /* Cap start mapping for segment 0 */
-    const u32 *sample3CapStartTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_seg0h_capstart_end.tiles
-    };
-    const u32 *sample3CapStartBreakTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_seg0h_capstart_body.tiles
-    };
-    const u32 *sample3CapStartTrailTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_seg0h_capstart_trail.tiles
-    };
-    const u8 sample3CapEndBySegment[GAUGE_MAX_SEGMENTS] = {
-        [0] = GAUGE_CAP_INACTIVE,
-        [1] = GAUGE_CAP_INACTIVE,
-        [2] = GAUGE_CAP_INACTIVE
-    };
+    GaugeBuilder_init(&s_builder, &description);
 
-    /* Step 2: Define segments (1 cap-start + 1 seg1 + 12 yellow seg2) */
-    const u8 sample3Segments[SAMPLE3_LENGTH] = {
-        0, 1,
-        2, 2, 2, 2, 2, 2, 2,
-        2, 2, 2, 2, 2
-    };
+    GaugeSegmentDefinition segment0 = GAUGE_SEGMENT_ATTR(
+        1,
+        GAUGE_SEGMENT_TILESETS(&gauge_seg0h_capstart_body, &gauge_seg0h_capstart_trail,
+                   &gauge_seg0h_capstart_end, NULL),
+        GAUGE_SEGMENT_TILESETS(&gauge_seg0l_capstart_body, &gauge_seg0l_capstart_trail,
+                   &gauge_seg0l_capstart_end, NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
+    );
 
-    /* Step 3: Initialize layout */
-    GaugeLayout_initEx(&s_layoutSample3,
-                       SAMPLE3_LENGTH,
-                       GAUGE_FILL_FORWARD,
-                       sample3BodyTilesets,
-                       sample3EndTilesets,
-                       sample3TrailTilesets,
-                       NULL,
-                       sample3Segments,
-                       GAUGE_ORIENT_HORIZONTAL,
-                       PAL0, 1, 0, 0);
+    GaugeSegmentDefinition segment1 = GAUGE_SEGMENT_ATTR(
+        1,
+        GAUGE_SEGMENT_TILESETS(&gauge_seg1h_body, &gauge_seg1h_trail, &gauge_seg1h_end, NULL),
+        GAUGE_SEGMENT_TILESETS(&gauge_seg1l_body, &gauge_seg1l_trail, &gauge_seg1l_end, NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
+    );
 
-    GaugeLayout_setCapTilesets(&s_layoutSample3,
-                               sample3CapStartTilesets,
-                               NULL,
-                               sample3CapStartBreakTilesets,
-                               sample3CapStartTrailTilesets,
-                               sample3CapEndBySegment);
+    GaugeSegmentDefinition segment2 = GAUGE_SEGMENT_ATTR(
+        12,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_strip_break,
+                   &gauge_h_bevel_yellow_strip_trail,
+                   &gauge_h_bevel_yellow_strip_end,
+                   NULL),
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_gain_strip_break,
+                   &gauge_h_bevel_yellow_gain_strip_trail,
+                   &gauge_h_bevel_yellow_gain_strip_end,
+                   NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
+    );
 
+    GaugeBuilder_addSegment(&s_builder, 0, &segment0);
+    GaugeBuilder_addSegment(&s_builder, 0, &segment1);
+    GaugeBuilder_addSegment(&s_builder, 0, &segment2);
 
-    /* Step 3: Define layout for Part2 (2 tiles with END). */
-    const u32 *sample3Part2BodyTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_seg0l_capstart_body.tiles,
-        [1] = gauge_seg1l_body.tiles
-    };
-    const u32 *sample3Part2EndTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_seg0l_capstart_end.tiles,
-        [1] = gauge_seg1l_end.tiles
-    };
-    const u32 *sample3Part2TrailTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_seg0l_capstart_trail.tiles,
-        [1] = gauge_seg1l_trail.tiles
-    }; 
+    if (!buildGaugeFromBuilder("Sample 3", &s_builder, &g_sample3Gauge, nextVram, GAUGE_VRAM_DYNAMIC))
+        return;
 
+    Gauge_setTrailMode(&g_sample3Gauge, GAUGE_TRAIL_MODE_FOLLOW, 0, 0, 0);
 
-    /* Cap start mapping for segment 0 */
-    const u32 *sample3Part2CapStartTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_seg0l_capstart_end.tiles
-    };
-    const u32 *sample3Part2CapStartBreakTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_seg0l_capstart_body.tiles
-    };
-    const u32 *sample3Part2CapStartTrailTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_seg0l_capstart_trail.tiles
-    };
-    const u8 sample3Part2CapEndBySegment[GAUGE_MAX_SEGMENTS] = {
-        [0] = GAUGE_CAP_INACTIVE,
-        [1] = GAUGE_CAP_INACTIVE
-    };
-
-    const u8 sample3Part2Segments[SAMPLE3_PART2_LENGTH] = { 0, 1 };
-
-    GaugeLayout_initEx(&s_layoutSample3Part2,
-                       SAMPLE3_PART2_LENGTH,
-                       GAUGE_FILL_FORWARD,
-                       sample3Part2BodyTilesets,
-                       sample3Part2EndTilesets,
-                       sample3Part2TrailTilesets,
-                       NULL,
-                       sample3Part2Segments,
-                       GAUGE_ORIENT_HORIZONTAL,
-                       PAL0, 1, 0, 0);
-
-    GaugeLayout_setCapTilesets(&s_layoutSample3Part2,
-                               sample3Part2CapStartTilesets,
-                               NULL,
-                               sample3Part2CapStartBreakTilesets,
-                               sample3Part2CapStartTrailTilesets,
-                               sample3Part2CapEndBySegment);
-
-
-    /* Step 4: Initialize gauge (14 tiles max) */
-    const u16 sample3MaxPixels = (u16)(SAMPLE3_LENGTH * GAUGE_PIXELS_PER_TILE);
-
-    vramBase = *nextVram;
-    Gauge_init(&g_gaugeSample3, &(GaugeInit){
-        .maxValue = sample3MaxPixels,
-        .initialValue = sample3MaxPixels,
-        .layout = &s_layoutSample3,
-        .vramBase = vramBase,
-        .vramMode = GAUGE_VRAM_FIXED,
-        .valueMode = GAUGE_VALUE_MODE_FILL
-    });
-
-    Gauge_setTrailMode(&g_gaugeSample3,
-                       GAUGE_TRAIL_MODE_FOLLOW,
-                       30,
-                       0,
-                       0);
-
-    /* Step 5: Add part */
-    Gauge_addPart(&g_gaugeSample3,
-                  &s_layoutSample3,
-                  SAMPLE3_X, SAMPLE3_Y);
-
-    /* Step 6: Add Part2 (3-tile secondary display)
-       - Shares the same gauge logic as Part1
-       - Value changes are synchronized */
-    Gauge_addPart(&g_gaugeSample3,
-                  &s_layoutSample3Part2,
-                  SAMPLE3_X, SAMPLE3_Y+1);
-
-    /* Step 6: Log VRAM */
-    vramSize = Gauge_getVramSize(&g_gaugeSample3, &s_layoutSample3);
-    logVramUsage("Sample 3 (cap->seg1->yellow)", vramBase, vramSize);
-    *nextVram = (u16)(vramBase + vramSize);
-
-    /* Draw label under gauge */
-    //VDP_drawText("Sample 3", SAMPLE3_X, SAMPLE3_Y + 1);
-    VDP_drawText("Cap->Seg1->Yellow", SAMPLE3_X, SAMPLE3_Y + 2);
-}
-
-
-/* =============================================================================
-   SAMPLE 4: Cap start/end guide (single segment)
-
-   Goals:
-   - Demonstrate CAP START (cell 0) and CAP END (last cell) behavior.
-   - CAP START behaves like a classic cell:
-       * If this cell is END -> cap tileset + END LUT
-       * If this cell is TRAIL_BREAK/TRAIL_BREAK2/TRAIL_FULL -> cap_trail tileset + trail LUT
-       * If next cell is END -> cap_break tileset + END index
-       * Else -> cap_break tileset + index 44 (full)
-   - CAP END always uses its own tileset (cap_end) and follows the END LUT.
-
-   Assets used:
-   - yellow cap start:     gauge_h_bevel_yellow_with_border_cap_start_strip_end
-   - yellow cap start break: gauge_h_bevel_yellow_with_border_cap_start_strip_break
-   - yellow cap start trail: gauge_h_bevel_yellow_with_border_cap_start_strip_trail
-   - yellow end:           gauge_h_bevel_yellow_with_border_strip_end
-   - yellow cap end:       gauge_h_bevel_yellow_with_border_cap_end_strip_end
-   - yellow body/trail:    gauge_h_bevel_yellow_with_border_strip_break / trail
-   - blue body/trail:      gauge_h_bevel_blue_with_border_strip_break / trail
-   - blue end:             gauge_h_bevel_blue_with_border_strip_end
-   - bridges:              gauge_h_bevel_yellow_to_blue_with_border_strip_bridge
-                           gauge_h_bevel_blue_to_yellow_with_border_strip_bridge
-   - yellow blink off cap start:  gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_end
-   - yellow blink off cap end:    gauge_h_bevel_yellow_with_border_cap_end_blink_off_strip_end
-   - yellow blink off cap start trail:  gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_trail
-   - yellow blink off cap start break:  gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_break
-   - yellow blink off end:        gauge_h_bevel_yellow_with_border_blink_off_strip_end
-   - yellow blink off break:      gauge_h_bevel_yellow_with_border_blink_off_strip_break
-   - yellow blink off trail:      gauge_h_bevel_yellow_with_border_blink_off_strip_trail
-   - blue blink off body/trail:   gauge_h_bevel_blue_with_border_blink_off_strip_break / trail
-   - blue blink off end:          gauge_h_bevel_blue_with_border_blink_off_strip_end
-   - blink off bridges:           gauge_h_bevel_yellow_to_blue_with_border_blink_off_strip_bridge
-                           gauge_h_bevel_blue_to_yellow_with_border_blink_off_strip_bridge
-   ============================================================================= */
-
-static void initSample4Layout(void)
-{
-    /* Step 1: Define tilesets (cap style) */
-    const u32 *sample4BodyTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_yellow_with_border_strip_break.tiles,
-        [1] = gauge_h_bevel_blue_with_border_strip_break.tiles
-    };
-    const u32 *sample4EndTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_yellow_with_border_strip_end.tiles,
-        [1] = gauge_h_bevel_blue_with_border_strip_end.tiles
-    };
-    const u32 *sample4TrailTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_yellow_with_border_strip_trail.tiles,
-        [1] = gauge_h_bevel_blue_with_border_strip_trail.tiles
-    };
-    const u32 *sample4BridgeTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_yellow_to_blue_with_border_strip_bridge.tiles,
-        [1] = gauge_h_bevel_blue_to_yellow_with_border_strip_bridge.tiles
-    };
-    const u32 *sample4CapStartTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_yellow_with_border_cap_start_strip_end.tiles
-    };
-    const u32 *sample4CapEndTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_yellow_with_border_cap_end_strip_end.tiles
-    };
-    const u32 *sample4CapStartBreakTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_yellow_with_border_cap_start_strip_break.tiles
-    };
-    const u32 *sample4CapStartTrailTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_yellow_with_border_cap_start_strip_trail.tiles
-    };
-    const u32 *sample4BlinkOffBodyTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_yellow_with_border_blink_off_strip_break.tiles,
-        [1] = gauge_h_bevel_blue_with_border_blink_off_strip_break.tiles
-    };
-    const u32 *sample4BlinkOffEndTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_yellow_with_border_blink_off_strip_end.tiles,
-        [1] = gauge_h_bevel_blue_with_border_blink_off_strip_end.tiles
-    };
-    const u32 *sample4BlinkOffTrailTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_yellow_with_border_blink_off_strip_trail.tiles,
-        [1] = gauge_h_bevel_blue_with_border_blink_off_strip_trail.tiles
-    };
-    const u32 *sample4BlinkOffBridgeTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_yellow_to_blue_with_border_blink_off_strip_bridge.tiles,
-        [1] = gauge_h_bevel_blue_to_yellow_with_border_blink_off_strip_bridge.tiles
-    };
-    const u32 *sample4BlinkOffCapStartTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_end.tiles
-    };
-    const u32 *sample4BlinkOffCapEndTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_yellow_with_border_cap_end_blink_off_strip_end.tiles
-    };
-    const u32 *sample4BlinkOffCapStartBreakTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_break.tiles
-    };
-    const u32 *sample4BlinkOffCapStartTrailTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_trail.tiles
-    };
-    const u8 sample4CapEndBySegment[GAUGE_MAX_SEGMENTS] = {
-        [0] = GAUGE_CAP_ACTIVE
-    };
-
-    /* Step 2: Define segments (all cap style) */
-    const u8 sample4Segments[SAMPLE4_LENGTH] = {
-        0, 0, 0, 0,
-        1, 1, 1, 1, 1, 1,
-        0, 0, 0, 0
-    };
-
-    /* Step 3: Initialize layout */
-    GaugeLayout_initEx(&s_layoutSample4,
-                       SAMPLE4_LENGTH,
-                       GAUGE_FILL_FORWARD,
-                       sample4BodyTilesets,
-                       sample4EndTilesets,
-                       sample4TrailTilesets,
-                       sample4BridgeTilesets,
-                       sample4Segments,
-                       GAUGE_ORIENT_HORIZONTAL,
-                       PAL0, 1, 0, 0);
-
-    /* Step 4: Configure caps (start tileset + end flag)
-       Cap behavior summary:
-       - Cap start behaves like a classic cell (END, TRAIL, BREAK or FULL)
-       - Cap end always uses its own tileset and follows the END LUT */
-    GaugeLayout_setCapTilesets(&s_layoutSample4,
-                               sample4CapStartTilesets,
-                               sample4CapEndTilesets,
-                               sample4CapStartBreakTilesets,
-                               sample4CapStartTrailTilesets,
-                               sample4CapEndBySegment);
-
-    GaugeLayout_setBlinkOffTilesets(&s_layoutSample4,
-                                    sample4BlinkOffBodyTilesets,
-                                    sample4BlinkOffEndTilesets,
-                                    sample4BlinkOffTrailTilesets,
-                                    sample4BlinkOffBridgeTilesets,
-                                    sample4BlinkOffCapStartTilesets,
-                                    sample4BlinkOffCapEndTilesets,
-                                    sample4BlinkOffCapStartBreakTilesets,
-                                    sample4BlinkOffCapStartTrailTilesets);
-
-    GaugeLayout_makeMirror(&s_layoutSample4Mirror, &s_layoutSample4);
+    VDP_drawText("Sample 3 Caps", SAMPLE3_X, SAMPLE3_Y + 1);
 }
 
 static void initSample4(u16 *nextVram)
 {
-    u16 vramBase;
-    u16 vramSize;
-
-    initSample4Layout();
-
-    /* Step 5: Initialize gauge */
-    const u16 sample4MaxPixels = (u16)(SAMPLE4_LENGTH * GAUGE_PIXELS_PER_TILE);
-
-    vramBase = *nextVram;
-    Gauge_init(&g_gaugeSample4, &(GaugeInit){
-        .maxValue = sample4MaxPixels,
-        .initialValue = sample4MaxPixels,
-        .layout = &s_layoutSample4,
-        .vramBase = vramBase,
-        .vramMode = GAUGE_VRAM_DYNAMIC,
-        .valueMode = GAUGE_VALUE_MODE_FILL
-    });
-
-    Gauge_setTrailMode(&g_gaugeSample4,
-                       GAUGE_TRAIL_MODE_FOLLOW,
-                       0,
-                       0,
-                       0);
-
-    /* Step 6: Add part */
-    Gauge_addPart(&g_gaugeSample4,
-                  &s_layoutSample4Mirror,
-                  SAMPLE4_X, SAMPLE4_Y);
-
-    /* Step 7: Log VRAM */
-    vramSize = Gauge_getVramSize(&g_gaugeSample4, &s_layoutSample4Mirror);
-    logVramUsage("Sample 4 (Cap Start/End Mirror)", vramBase, vramSize);
-    *nextVram = (u16)(vramBase + vramSize);
-
-    /* Draw label under gauge */
-    VDP_drawText("Sample 4 Mirror", SAMPLE4_X, SAMPLE4_Y + 1);
-    VDP_drawText("Cap Start/End", SAMPLE4_X, SAMPLE4_Y + 2);
-}
-
-
-/* =============================================================================
-   SAMPLE 5: 16-tile gauge with multi-bridge segments
-   ============================================================================= */
-
-static void initSample5(u16 *nextVram)
-{
-    u16 vramBase;
-    u16 vramSize;
-
-    /* Step 1: Define segment styles (ciel -> blue -> yellow) */
-    const GaugeSegmentStyle sample5SegmentStyles[GAUGE_MAX_SEGMENTS] = {
-        /* Segment 0: lightblue */
-        {
-            .base = {
-                .body = gauge_h_bevel_lightblue_strip_break.tiles,
-                .end = gauge_h_bevel_lightblue_strip_end.tiles,
-                .trail = gauge_h_bevel_lightblue_strip_trail.tiles,
-                .bridge = gauge_h_bevel_lightblue_to_blue_strip_bridge.tiles
-            },
-            .gain = {
-                .body = gauge_h_bevel_lightblue_gain_strip_break.tiles,
-                .end = gauge_h_bevel_lightblue_gain_strip_end.tiles,
-                .trail = gauge_h_bevel_lightblue_gain_strip_trail.tiles,
-                .bridge = gauge_h_bevel_lightblue_gain_to_blue_strip_bridge.tiles
-            }
-        },
-        /* Segment 1: blue */
-        {
-            .base = {
-                .body = gauge_h_bevel_blue_strip_break.tiles,
-                .end = gauge_h_bevel_blue_strip_end.tiles,
-                .trail = gauge_h_bevel_blue_strip_trail.tiles,
-                .bridge = gauge_h_bevel_blue_to_yellow_strip_bridge.tiles
-            },
-            .gain = {
-                .body = gauge_h_bevel_blue_gain_strip_break.tiles,
-                .end = gauge_h_bevel_blue_gain_strip_end.tiles,
-                .trail = gauge_h_bevel_blue_gain_strip_trail.tiles,
-                .bridge = gauge_h_bevel_blue_to_yellow_gain_strip_bridge.tiles
-            }
-        },
-        /* Segment 2: yellow */
-        {
-            .base = {
-                .body = gauge_h_bevel_yellow_strip_break.tiles,
-                .end = gauge_h_bevel_yellow_strip_end.tiles,
-                .trail = gauge_h_bevel_yellow_strip_trail.tiles
-            },
-            .gain = {
-                .body = gauge_h_bevel_yellow_gain_strip_break.tiles,
-                .end = gauge_h_bevel_yellow_gain_strip_end.tiles,
-                .trail = gauge_h_bevel_yellow_gain_strip_trail.tiles
-            }
-        }
-    };
-
-    /* Step 2: Define segments (5 ciel + 5 blue + 6 yellow) */
-    const u8 sample5Segments[SAMPLE5_LENGTH] = {
-        0, 0, 0, 0, 0,
-        1, 1, 1, 1, 1,
-        2, 2, 2, 2, 2, 2
-    };
-
-    /* Step 3: Initialize layout from init config */
-    const GaugeLayoutInit sample5LayoutInit = {
-        .length = SAMPLE5_LENGTH,
-        .fillDirection = GAUGE_FILL_FORWARD,
+    GaugeDescription description = {
+        .mode = GAUGE_VALUE_MODE_FILL,
         .orientation = GAUGE_ORIENT_HORIZONTAL,
+        .fillDirection = GAUGE_FILL_FORWARD,
+        .originX = SAMPLE4_X,
+        .originY = SAMPLE4_Y,
+        .maxValue = (u16)(SAMPLE4_LENGTH * GAUGE_PIXELS_PER_TILE),
+        .capStartFixed = 1,
+        .capEndFixed = 1,
         .palette = PAL0,
         .priority = 1,
         .verticalFlip = 0,
-        .horizontalFlip = 0,
-        .segmentIdByCell = sample5Segments,
-        .segmentStyles = sample5SegmentStyles
+        .horizontalFlip = 0
     };
-    GaugeLayout_build(&s_layoutSample5, &sample5LayoutInit);
 
-    /* Step 4: Initialize gauge
-       - maxValue=100 with 16 tiles (128px): scaling LUT is built automatically
-       - initialValue=100 (starts full, clamped to maxValue) */
-    vramBase = *nextVram;
-    Gauge_init(&g_gaugeSample5, &(GaugeInit){
+    GaugeBuilder_init(&s_builder, &description);
+
+    GaugeSegmentDefinition segment0 = GAUGE_SEGMENT_ATTR(
+        7,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_with_border_strip_break,
+                   &gauge_h_bevel_blue_with_border_strip_trail,
+                   &gauge_h_bevel_blue_with_border_strip_end,
+                   &gauge_h_bevel_blue_to_yellow_with_border_strip_bridge),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_with_border_blink_off_strip_break,
+                   &gauge_h_bevel_blue_with_border_blink_off_strip_trail,
+                   &gauge_h_bevel_blue_with_border_blink_off_strip_end,
+                   NULL)
+    );
+
+    GaugeSegmentDefinition segment1 = GAUGE_SEGMENT_ATTR(
+        7,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_with_border_strip_break,
+                   &gauge_h_bevel_yellow_with_border_strip_trail,
+                   &gauge_h_bevel_yellow_with_border_strip_end,
+                   NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_with_border_blink_off_strip_break,
+                   &gauge_h_bevel_yellow_with_border_blink_off_strip_trail,
+                   &gauge_h_bevel_yellow_with_border_blink_off_strip_end,
+                   NULL)
+    );
+
+    GaugeBuilder_addSegment(&s_builder, 0, &segment0);
+    GaugeBuilder_addSegment(&s_builder, 0, &segment1);
+
+    if (!buildGaugeFromBuilder("Sample 4", &s_builder, &g_sample4Gauge, nextVram, GAUGE_VRAM_DYNAMIC))
+        return;
+
+    Gauge_setTrailMode(&g_sample4Gauge, GAUGE_TRAIL_MODE_FOLLOW, 0, 0, 0);
+
+    VDP_drawText("Sample 4 Border", SAMPLE4_X, SAMPLE4_Y + 1);
+}
+
+static void initSample5(u16 *nextVram)
+{
+    GaugeDescription description = {
+        .mode = GAUGE_VALUE_MODE_FILL,
+        .orientation = GAUGE_ORIENT_HORIZONTAL,
+        .fillDirection = GAUGE_FILL_FORWARD,
+        .originX = SAMPLE5_X,
+        .originY = SAMPLE5_Y,
         .maxValue = 100,
-        .initialValue = 100,
-        .layout = &s_layoutSample5,
-        .vramBase = vramBase,
-        .vramMode = GAUGE_VRAM_DYNAMIC,
-        .valueMode = GAUGE_VALUE_MODE_FILL
-    });
+        .capStartFixed = 0,
+        .capEndFixed = 0,
+        .palette = PAL0,
+        .priority = 1,
+        .verticalFlip = 0,
+        .horizontalFlip = 0
+    };
 
-    /* Step 6: Enable value animation + critical damage mode + gain FOLLOW mode. */
-    Gauge_setValueAnim(&g_gaugeSample5, 1, 2);      /* enabled, default speed */
-    Gauge_setTrailMode(&g_gaugeSample5,
+    GaugeBuilder_init(&s_builder, &description);
+
+    GaugeSegmentDefinition segment0 = GAUGE_SEGMENT_ATTR(
+        4,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_strip_break,
+                   &gauge_h_bevel_lightblue_strip_trail,
+                   &gauge_h_bevel_lightblue_strip_end,
+                   &gauge_h_bevel_lightblue_to_blue_strip_bridge),
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_gain_strip_break,
+                   &gauge_h_bevel_lightblue_gain_strip_trail,
+                   &gauge_h_bevel_lightblue_gain_strip_end,
+                   NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
+    );
+
+    GaugeSegmentDefinition segment1 = GAUGE_SEGMENT_ATTR(
+        6,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_strip_break,
+                   &gauge_h_bevel_blue_strip_trail,
+                   &gauge_h_bevel_blue_strip_end,
+                   &gauge_h_bevel_blue_to_yellow_strip_bridge),
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_gain_strip_break,
+                   &gauge_h_bevel_blue_gain_strip_trail,
+                   &gauge_h_bevel_blue_gain_strip_end,
+                   NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
+    );
+
+    GaugeSegmentDefinition segment2 = GAUGE_SEGMENT_ATTR(
+        6,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_strip_break,
+                   &gauge_h_bevel_yellow_strip_trail,
+                   &gauge_h_bevel_yellow_strip_end,
+                   NULL),
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_gain_strip_break,
+                   &gauge_h_bevel_yellow_gain_strip_trail,
+                   &gauge_h_bevel_yellow_gain_strip_end,
+                   NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
+    );
+
+    GaugeBuilder_addSegment(&s_builder, 0, &segment0);
+    GaugeBuilder_addSegment(&s_builder, 0, &segment1);
+    GaugeBuilder_addSegment(&s_builder, 0, &segment2);
+
+    if (!buildGaugeFromBuilder("Sample 5", &s_builder, &g_sample5Gauge, nextVram, GAUGE_VRAM_DYNAMIC))
+        return;
+
+    Gauge_setValueAnim(&g_sample5Gauge, 1, 2);
+    Gauge_setTrailMode(&g_sample5Gauge,
                        GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK,
                        30,
                        3,
                        2);
-    Gauge_setGainMode(&g_gaugeSample5,
-                      GAUGE_GAIN_MODE_FOLLOW,
-                      3,
-                      2);
+    Gauge_setGainMode(&g_sample5Gauge, GAUGE_GAIN_MODE_FOLLOW, 3, 2);
 
-    /* Step 7: Add part */
-    Gauge_addPart(&g_gaugeSample5,
-                  &s_layoutSample5,
-                  SAMPLE5_X, SAMPLE5_Y);
-
-    /* Step 8: Log VRAM */
-    vramSize = Gauge_getVramSize(&g_gaugeSample5, &s_layoutSample5);
-    logVramUsage("Sample 5 (VRAM DYNAMIC)", vramBase, vramSize);
-    *nextVram = (u16)(vramBase + vramSize);
-
-    /* Draw label under gauge */
-    VDP_drawText("Sample 5", SAMPLE5_X, SAMPLE5_Y + 1);
-    VDP_drawText("Bevel, Bridge and Gain Trail", SAMPLE5_X, SAMPLE5_Y + 2);
+    VDP_drawText("Sample 5 Bridges", SAMPLE5_X, SAMPLE5_Y + 1);
 }
-
-/* =============================================================================
-   SAMPLE 6: Vertical multi-segment gauge with FIXED VRAM mode
-   =============================================================================
-
-   This sample shows:
-   - Vertical orientation
-   - Same multi-segment layout as Sample7 (b1 + b2 + yellow)
-   - GAUGE_VRAM_FIXED mode (more VRAM, less CPU)
-   - Reverse fill direction (bottom to top)
-*/
 
 static void initSample6(u16 *nextVram)
 {
-    u16 vramBase;
-    u16 vramSize;
-
-    /* Step 1: Define tilesets (same 3 segments as Sample7, but vertical versions) */
-    const u32 *sample6Tilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_v_straight_blue_strip.tiles,       /* Segment 0: b1 vertical */
-        [1] = gauge_v_straight_lightblue_strip.tiles,  /* Segment 1: b2 vertical */
-        [2] = gauge_v_straight_yellow_strip.tiles      /* Segment 2: yellow vertical */
-    };
-
-    /* Step 2: Define segments (same pattern as Sample7 Part1) */
-    const u8 sample6Segments[SAMPLE6_LENGTH] = {
-        0, 0, 0,                    /* 3 tiles b1 */
-        1, 1, 1, 1, 1,              /* 5 tiles b2 */
-        2, 2, 2, 2                  /* 4 tiles yellow */
-    };
-
-    /* Step 3: Initialize layout
-       - Vertical orientation
-       - Reverse fill (bottom to top, typical for vertical gauges) */
-    GaugeLayout_init(&s_layoutSample6,
-                     SAMPLE6_LENGTH,
-                     GAUGE_FILL_REVERSE,         /* Fill from bottom to top */
-                     sample6Tilesets,
-                     sample6Segments,
-                     GAUGE_ORIENT_VERTICAL,      /* Vertical */
-                     PAL0, 1, 0, 0);
-
-    /* Step 4: Initialize gauge with FIXED VRAM mode
-       - FIXED mode: allocates 1 VRAM tile per cell (12 tiles)
-       - More VRAM usage, but less CPU per frame
-       - Good for many gauges or when CPU is tight */
-    const u16 sample6MaxPixels = (u16)(SAMPLE6_LENGTH * GAUGE_PIXELS_PER_TILE);
-
-    vramBase = *nextVram;
-    Gauge_init(&g_gaugeSample6, &(GaugeInit){
-        .maxValue = sample6MaxPixels,
-        .initialValue = sample6MaxPixels,
-        .layout = &s_layoutSample6,
-        .vramBase = vramBase,
-        .vramMode = GAUGE_VRAM_FIXED,
-        .valueMode = GAUGE_VALUE_MODE_FILL
-    });
-
-    Gauge_setTrailMode(&g_gaugeSample6,
-                       GAUGE_TRAIL_MODE_FOLLOW,
-                       0,
-                       0,
-                       0);
-
-    /* Step 5: Add part */
-    Gauge_addPart(&g_gaugeSample6,
-                  &s_layoutSample6,
-                  SAMPLE6_X, SAMPLE6_Y);
-
-    /* Step 6: Log VRAM (FIXED mode uses more tiles) */
-    vramSize = Gauge_getVramSize(&g_gaugeSample6, &s_layoutSample6);
-    logVramUsage("Sample 6 (VRAM FIXED)", vramBase, vramSize);
-    *nextVram = (u16)(vramBase + vramSize);
-
-    /* Draw label under gauge (vertical gauge: label below bottom) */
-    VDP_drawText("Sample 6", SAMPLE6_X-5, SAMPLE6_Y + SAMPLE6_LENGTH);
-    VDP_drawText("Vertical", SAMPLE6_X-5, SAMPLE6_Y + SAMPLE6_LENGTH+1);
-}
-
-
-/* =============================================================================
-   SAMPLE 7: Multi-segment bevel gauge with two parts + independent mini PIP
-   =============================================================================
-
-   This sample shows:
-   - Bevel styles from Sample 5 bridge set (lightblue -> blue -> yellow)
-   - Part1: 4 lightblue + 4 blue + 4 yellow
-   - Part2: 3 lightblue
-   - Two parts sharing the same gauge logic (synchronized value)
-   - Independent mini PIP gauge with auto-wrap demo
-*/
-
-static void initSample7(u16 *nextVram)
-{
-    u16 vramBase;
-    u16 vramSize;
-
-    /* -------------------------------------------------------------------------
-       SAMPLE 7A: Multi-segment bevel gauge (Part1 = 12 tiles, Part2 = 3 tiles)
-       ------------------------------------------------------------------------- */
-
-    /* Step 1: Define bevel segment styles (same family as Sample 5 bridge demo). */
-    const GaugeSegmentStyle sample7SegmentStyles[GAUGE_MAX_SEGMENTS] = {
-        /* Segment 0: lightblue */
-        {
-            .base = {
-                .body = gauge_h_bevel_lightblue_strip_break.tiles,
-                .end = gauge_h_bevel_lightblue_strip_end.tiles,
-                .trail = gauge_h_bevel_lightblue_strip_trail.tiles,
-                .bridge = gauge_h_bevel_lightblue_to_blue_strip_bridge.tiles
-            },
-            .gain = {
-                .body = gauge_h_bevel_lightblue_gain_strip_break.tiles,
-                .end = gauge_h_bevel_lightblue_gain_strip_end.tiles,
-                .trail = gauge_h_bevel_lightblue_gain_strip_trail.tiles,
-                .bridge = gauge_h_bevel_lightblue_gain_to_blue_strip_bridge.tiles
-            }
-        },
-        /* Segment 1: blue */
-        {
-            .base = {
-                .body = gauge_h_bevel_blue_strip_break.tiles,
-                .end = gauge_h_bevel_blue_strip_end.tiles,
-                .trail = gauge_h_bevel_blue_strip_trail.tiles,
-                .bridge = gauge_h_bevel_blue_to_yellow_strip_bridge.tiles
-            },
-            .gain = {
-                .body = gauge_h_bevel_blue_gain_strip_break.tiles,
-                .end = gauge_h_bevel_blue_gain_strip_end.tiles,
-                .trail = gauge_h_bevel_blue_gain_strip_trail.tiles,
-                .bridge = gauge_h_bevel_blue_to_yellow_gain_strip_bridge.tiles
-            }
-        },
-        /* Segment 2: yellow */
-        {
-            .base = {
-                .body = gauge_h_bevel_yellow_strip_break.tiles,
-                .end = gauge_h_bevel_yellow_strip_end.tiles,
-                .trail = gauge_h_bevel_yellow_strip_trail.tiles
-            },
-            .gain = {
-                .body = gauge_h_bevel_yellow_gain_strip_break.tiles,
-                .end = gauge_h_bevel_yellow_gain_strip_end.tiles,
-                .trail = gauge_h_bevel_yellow_gain_strip_trail.tiles
-            }
-        }
-    };
-
-    /* Step 2: Define segment assignments for Part1 (12 tiles).
-       4 lightblue + 4 blue + 4 yellow. */
-    const u8 sample7Part1Segments[SAMPLE7_PART1_LEN] = {
-        0, 0, 0, 0,
-        1, 1, 1, 1,
-        2, 2, 2, 2
-    };
-    const GaugeLayoutInit sample7Part1LayoutInit = {
-        .length = SAMPLE7_PART1_LEN,
-        .fillDirection = GAUGE_FILL_FORWARD,
-        .orientation = GAUGE_ORIENT_HORIZONTAL,
+    GaugeDescription description = {
+        .mode = GAUGE_VALUE_MODE_FILL,
+        .orientation = GAUGE_ORIENT_VERTICAL,
+        .fillDirection = GAUGE_FILL_REVERSE,
+        .originX = SAMPLE6_X,
+        .originY = SAMPLE6_Y,
+        .maxValue = (u16)(SAMPLE6_LENGTH * GAUGE_PIXELS_PER_TILE),
+        .capStartFixed = 0,
+        .capEndFixed = 0,
         .palette = PAL0,
         .priority = 1,
         .verticalFlip = 0,
-        .horizontalFlip = 0,
-        .segmentIdByCell = sample7Part1Segments,
-        .segmentStyles = sample7SegmentStyles
+        .horizontalFlip = 0
     };
-    GaugeLayout_build(&s_layoutSample7Part1, &sample7Part1LayoutInit);
 
-    /* Step 3: Define layout for Part2 (3 tiles lightblue bevel with END). */
-    const u32 *sample7Part2BodyTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_lightblue_strip_break.tiles
-    };
-    const u32 *sample7Part2EndTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_lightblue_strip_end.tiles
-    };
-    const u32 *sample7Part2TrailTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_lightblue_strip_trail.tiles
-    };
-    const u32 *sample7Part2BridgeTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_lightblue_to_blue_strip_bridge_part2.tiles
-    };    
-    const u32 *sample7Part2GainBodyTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_lightblue_gain_strip_break.tiles
-    };
-    const u32 *sample7Part2GainEndTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_lightblue_gain_strip_end.tiles
-    };
-    const u32 *sample7Part2GainTrailTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_bevel_lightblue_gain_strip_trail.tiles
-    };
-    const u8 sample7Part2Segments[SAMPLE7_PART2_LEN] = { 0, 0, 0 };
+    GaugeBuilder_init(&s_builder, &description);
 
-    GaugeLayout_initEx(&s_layoutSample7Part2,
-                       SAMPLE7_PART2_LEN,
-                       GAUGE_FILL_FORWARD,
-                       sample7Part2BodyTilesets,
-                       sample7Part2EndTilesets,
-                       sample7Part2TrailTilesets,
-                       sample7Part2BridgeTilesets,
-                       sample7Part2Segments,
-                       GAUGE_ORIENT_HORIZONTAL,
-                       PAL0, 1, 0, 0);
-    /* Visual trigger tweak for bevel part: start reacting around valuePx ~= 32.
-     * Formula: fillOffset = triggerPx - partWidthPx => 32 - (3*8) = 8. */
-    GaugeLayout_setFillOffset(&s_layoutSample7Part2, 8);
-    GaugeLayout_setGainTrailTilesets(&s_layoutSample7Part2,
-                                     sample7Part2GainBodyTilesets,
-                                     sample7Part2GainEndTilesets,
-                                     sample7Part2GainTrailTilesets,
-                                     NULL,
-                                     NULL,
-                                     NULL,
-                                     NULL,
-                                     NULL);
+    GaugeSegmentDefinition segment0 = GAUGE_SEGMENT_ATTR(
+        3,
+        GAUGE_SEGMENT_TILESETS(&gauge_v_straight_blue_strip, &gauge_v_straight_blue_strip,
+                   &gauge_v_straight_blue_strip, NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
+    );
 
-    /* Step 4: Initialize gauge (max pixels = Part1 only)
-       - maxValue = Part1 pixels (12 tiles = 96 pixels)
-       - Part2 will show the "overflow" visually */
-    const u16 sample7MaxPixels = (u16)(SAMPLE7_PART1_LEN * GAUGE_PIXELS_PER_TILE);
+    GaugeSegmentDefinition segment1 = GAUGE_SEGMENT_ATTR(
+        5,
+        GAUGE_SEGMENT_TILESETS(&gauge_v_straight_lightblue_strip, &gauge_v_straight_lightblue_strip,
+                   &gauge_v_straight_lightblue_strip, NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
+    );
 
-    vramBase = *nextVram;
-    Gauge_init(&g_gaugeSample7, &(GaugeInit){
-        .maxValue = sample7MaxPixels,
-        .initialValue = sample7MaxPixels,
-        .layout = &s_layoutSample7Part1,
-        .vramBase = vramBase,
-        .vramMode = GAUGE_VRAM_DYNAMIC,
-        .valueMode = GAUGE_VALUE_MODE_FILL
-    });
+    GaugeSegmentDefinition segment2 = GAUGE_SEGMENT_ATTR(
+        4,
+        GAUGE_SEGMENT_TILESETS(&gauge_v_straight_yellow_strip, &gauge_v_straight_yellow_strip,
+                   &gauge_v_straight_yellow_strip, NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
+    );
 
-    Gauge_setTrailMode(&g_gaugeSample7,
+    GaugeBuilder_addSegment(&s_builder, 0, &segment0);
+    GaugeBuilder_addSegment(&s_builder, 0, &segment1);
+    GaugeBuilder_addSegment(&s_builder, 0, &segment2);
+
+    if (!buildGaugeFromBuilder("Sample 6 (Fixed)", &s_builder, &g_sample6Gauge, nextVram, GAUGE_VRAM_FIXED))
+        return;
+
+    Gauge_setTrailMode(&g_sample6Gauge, GAUGE_TRAIL_MODE_FOLLOW, 0, 0, 0);
+
+    VDP_drawText("Sample 6 Vertical", SAMPLE6_X - 8, SAMPLE6_Y + SAMPLE6_LENGTH + 1);
+}
+
+static void initSample7(u16 *nextVram)
+{
+    GaugeDescription description = {
+        .mode = GAUGE_VALUE_MODE_FILL,
+        .orientation = GAUGE_ORIENT_HORIZONTAL,
+        .fillDirection = GAUGE_FILL_FORWARD,
+        .originX = SAMPLE7_X,
+        .originY = SAMPLE7_Y,
+        .maxValue = (u16)(SAMPLE7_LENGTH * GAUGE_PIXELS_PER_TILE),
+        .capStartFixed = 1,
+        .capEndFixed = 1,
+        .palette = PAL0,
+        .priority = 1,
+        .verticalFlip = 0,
+        .horizontalFlip = 0
+    };
+
+    GaugeBuilder_init(&s_builder, &description);
+
+    GaugeSegmentDefinition master0 = GAUGE_SEGMENT_ATTR(
+        4,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_strip_break,
+                   &gauge_h_bevel_lightblue_strip_trail,
+                   &gauge_h_bevel_lightblue_strip_end,
+                   &gauge_h_bevel_lightblue_to_blue_strip_bridge),
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_gain_strip_break,
+                   &gauge_h_bevel_lightblue_gain_strip_trail,
+                   &gauge_h_bevel_lightblue_gain_strip_end,
+                   NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
+    );
+
+    GaugeSegmentDefinition master1 = GAUGE_SEGMENT_ATTR(
+        4,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_strip_break,
+                   &gauge_h_bevel_blue_strip_trail,
+                   &gauge_h_bevel_blue_strip_end,
+                   &gauge_h_bevel_blue_to_yellow_strip_bridge),
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_gain_strip_break,
+                   &gauge_h_bevel_blue_gain_strip_trail,
+                   &gauge_h_bevel_blue_gain_strip_end,
+                   NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
+    );
+
+    GaugeSegmentDefinition master2 = GAUGE_SEGMENT_ATTR(
+        4,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_strip_break,
+                   &gauge_h_bevel_yellow_strip_trail,
+                   &gauge_h_bevel_yellow_strip_end,
+                   NULL),
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_gain_strip_break,
+                   &gauge_h_bevel_yellow_gain_strip_trail,
+                   &gauge_h_bevel_yellow_gain_strip_end,
+                   NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
+    );
+
+    GaugeBuilder_addSegment(&s_builder, 0, &master0);
+    GaugeBuilder_addSegment(&s_builder, 0, &master1);
+    GaugeBuilder_addSegment(&s_builder, 0, &master2);
+
+    GaugeSlaveDescription slave = {
+        .originX = SAMPLE7_SLAVE_X,
+        .originY = SAMPLE7_SLAVE_Y,
+        .fillOffset = 8
+    };
+
+    u8 slaveIndex = 0;
+    if (!GaugeBuilder_addSlave(&s_builder, &slave, &slaveIndex))
+        return;
+
+    GaugeSegmentDefinition slaveSegment = GAUGE_SEGMENT_ATTR(
+        SAMPLE7_SLAVE_LENGTH,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_strip_break,
+                   &gauge_h_bevel_lightblue_strip_trail,
+                   &gauge_h_bevel_lightblue_strip_end,
+                   NULL),
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_gain_strip_break,
+                   &gauge_h_bevel_lightblue_gain_strip_trail,
+                   &gauge_h_bevel_lightblue_gain_strip_end,
+                   NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
+    );
+
+    GaugeBuilder_addSegment(&s_builder, slaveIndex, &slaveSegment);
+
+    if (!buildGaugeFromBuilder("Sample 7 MultiPart", &s_builder, &g_sample7Gauge, nextVram, GAUGE_VRAM_DYNAMIC))
+        return;
+
+    Gauge_setTrailMode(&g_sample7Gauge,
                        GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK,
                        40,
                        0,
                        0);
 
-    /* Step 5: Add Part1 (main 12-tile gauge) */
-    Gauge_addPart(&g_gaugeSample7,
-                  &s_layoutSample7Part1,
-                  SAMPLE7_X, SAMPLE7_Y);
-
-    /* Debug: log dynamic VRAM tiles to detect overlaps */
-    logDynamicVramTiles("Sample 7 multi part ",
-                        (g_gaugeSample7.partCount > 0) ? g_gaugeSample7.parts[0] : NULL);
-    vramSize = Gauge_getVramSize(&g_gaugeSample7, &s_layoutSample7Part1);
-    logVramUsage("Sample 7 top part gauge", vramBase, vramSize);
-    vramBase = (u16)(vramBase + vramSize);
-
-    /* Step 6: Add Part2 (3-tile secondary display)
-       - Shares the same gauge logic as Part1
-       - Value changes are synchronized */
-    Gauge_addPart(&g_gaugeSample7,
-                  &s_layoutSample7Part2,
-                  SAMPLE7_PART2_X, SAMPLE7_PART2_Y);
-
-    /* Debug: log dynamic VRAM tiles to detect overlaps */
-    logDynamicVramTiles("Sample 7 part2 dyn tiles",
-                        (g_gaugeSample7.partCount > 1) ? g_gaugeSample7.parts[1] : NULL);
-    vramSize = Gauge_getVramSize(&g_gaugeSample7, &s_layoutSample7Part2);
-    logVramUsage("Sample 7 bottom part gauge", vramBase, vramSize);
-    *nextVram = (u16)(vramBase + vramSize);
-
-    /* -------------------------------------------------------------------------
-       SAMPLE 7B: Independent mini PIP gauge (4 points)
-       ------------------------------------------------------------------------- */
-
-    /* This gauge reuses Sample 2 PIP definition, but compacted to 4 points. */
-    const u32 *sample7PipBodyTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_straight_yellow_strip.tiles
-    };
-    const u32 *sample7PipCompactTilesets[GAUGE_MAX_SEGMENTS] = {
-        [0] = gauge_h_pip_mini_bar_strip.tiles
-    };
-    const u8 sample7PipWidths[GAUGE_MAX_SEGMENTS] = {
-        [0] = 2  /* segment 0: 2 tiles per pip */
-    };
-    const u8 sample7PipSegments[SAMPLE7_PIP_LEN] = { 0, 0, 0, 0, 0, 0, 0, 0 };
-
-    GaugeLayout_init(&s_layoutSample7Pip,
-                     SAMPLE7_PIP_LEN,
-                     GAUGE_FILL_FORWARD,
-                     sample7PipBodyTilesets,
-                     sample7PipSegments,
-                     GAUGE_ORIENT_HORIZONTAL,
-                     PAL0, 1, 0, 0);
-    GaugeLayout_setPipStyles(&s_layoutSample7Pip, sample7PipCompactTilesets, sample7PipWidths);
-
-    vramBase = *nextVram;
-    Gauge_init(&g_gaugeSample7Pip, &(GaugeInit){
+    /* Independent mini PIP gauge (same row) */
+    GaugeDescription pipDescription = {
+        .mode = GAUGE_VALUE_MODE_PIP,
+        .orientation = GAUGE_ORIENT_HORIZONTAL,
+        .fillDirection = GAUGE_FILL_FORWARD,
+        .originX = SAMPLE7_PIP_X,
+        .originY = SAMPLE7_PIP_Y,
         .maxValue = 4,
-        .initialValue = 0,
-        .layout = &s_layoutSample7Pip,
-        .vramBase = vramBase,
-        .vramMode = GAUGE_VRAM_DYNAMIC,
-        .valueMode = GAUGE_VALUE_MODE_PIP
-    });
+        .capStartFixed = 0,
+        .capEndFixed = 0,
+        .palette = PAL0,
+        .priority = 1,
+        .verticalFlip = 0,
+        .horizontalFlip = 0
+    };
 
-    /* Keep this mini bar simple: default trail mode (disabled). */
+    GaugeBuilder_init(&s_builder, &pipDescription);
+    GaugeSegmentDefinition pipSegment = GAUGE_SEGMENT_ATTR(
+        SAMPLE7_PIP_LENGTH,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_straight_yellow_strip, NULL, NULL, NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
+        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
+    );
+    pipSegment.pipStrip = gauge_h_pip_mini_bar_strip.tiles;
+    pipSegment.pipWidth = 2;
+    GaugeBuilder_addSegment(&s_builder, 0, &pipSegment);
+    buildGaugeFromBuilder("Sample 7 Mini PIP", &s_builder, &g_sample7PipGauge, nextVram, GAUGE_VRAM_DYNAMIC);
 
-    Gauge_addPart(&g_gaugeSample7Pip,
-                  &s_layoutSample7Pip,
-                  SAMPLE7_PIP_X, SAMPLE7_PIP_Y);
-
-    vramSize = Gauge_getVramSize(&g_gaugeSample7Pip, &s_layoutSample7Pip);
-    logVramUsage("Sample 7 mini PIP gauge", vramBase, vramSize);
-    *nextVram = (u16)(vramBase + vramSize);
-
-    /* Draw labels under gauges */
-    VDP_drawText("Sample 7 Multi-Part", SAMPLE7_X, SAMPLE7_PART2_Y + 1);
-    VDP_drawText("   + mini PIP Gauge", SAMPLE7_X, SAMPLE7_PART2_Y + 2);
+    VDP_drawText("Sample 7 MultiPart", SAMPLE7_X, SAMPLE7_SLAVE_Y + 1);
+    VDP_drawText("+ Mini PIP", SAMPLE7_X, SAMPLE7_SLAVE_Y + 2);
 }
 
-/* =============================================================================
-   INPUT HANDLING
-   ============================================================================= */
-
-/**
- * Handle button press events.
- */
+/* -----------------------------------------------------------------------------
+   Input and update
+   ----------------------------------------------------------------------------- */
 static void handleInput(u16 pressed, u16 held)
 {
-    /* Button C: cycle through gauges */
     if (pressed & BUTTON_C)
     {
         g_selectedGauge = (u8)((g_selectedGauge + 1) % GAUGE_COUNT);
         updateSelectedDisplay();
     }
 
-    /* Button A: increase (on press) */
     if (pressed & BUTTON_A)
     {
         Gauge *selectedGauge = getSelectedGauge();
-        const u16 increaseAmount = (g_selectedGauge == 1) ? 1 : 4; /* Sample 2 PIP only */
-        Gauge_increase(selectedGauge, increaseAmount, 40, 20);
+        u16 amount = (g_selectedGauge == 1) ? 1 : 4;
+        Gauge_increase(selectedGauge, amount, 40, 20);
         g_holdA = 0;
     }
 
-    /* Button B: decrease with trail effect (on press) */
     if (pressed & BUTTON_B)
     {
         Gauge *selectedGauge = getSelectedGauge();
-        const u16 decreaseAmount = (g_selectedGauge == 1) ? 1 : 4; /* Sample 2 PIP only */
-        Gauge_decrease(selectedGauge, 1, 40, 80);
+        u16 amount = (g_selectedGauge == 1) ? 1 : 4;
+        Gauge_decrease(selectedGauge, amount, 40, 80);
         g_holdB = 0;
     }
 
-    /* Hold repeat for A and B */
     if (held & BUTTON_A)
     {
         g_holdA++;
         if (g_holdA >= 12 && (g_frameCount & 3) == 0)
-        {
             Gauge_increase(getSelectedGauge(), 1, 0, 0);
-        }
     }
     else
     {
@@ -1290,10 +658,7 @@ static void handleInput(u16 pressed, u16 held)
     {
         g_holdB++;
         if (g_holdB >= 12 && (g_frameCount & 3) == 0)
-        {
-            /* Continuous drain without re-triggering blink */
             Gauge_decrease(getSelectedGauge(), 1, 0, 0);
-        }
     }
     else
     {
@@ -1301,115 +666,77 @@ static void handleInput(u16 pressed, u16 held)
     }
 }
 
-
-/* =============================================================================
-   UPDATE FUNCTIONS
-   ============================================================================= */
-
-/**
- * Auto-wrap mini PIP gauge 0->4->0 for demo.
- */
-static void tickBlueAutoWrap(void)
+static void tickMiniPipAutoWrap(void)
 {
-    /* Increment every 32 frames (~2.7 seconds per full cycle at 60fps). */
     if ((g_frameCount & 31) == 0)
     {
         g_sample7PipValue++;
         if (g_sample7PipValue > 4)
             g_sample7PipValue = 0;
-
-        Gauge_setValue(&g_gaugeSample7Pip, g_sample7PipValue);
+        Gauge_setValue(&g_sample7PipGauge, g_sample7PipValue);
     }
 }
 
-/* Targeted debug tests removed. */
-
-/**
- * Update all gauges (tick logic + render).
- * Call this once per frame.
- */
 static void updateAllGauges(void)
 {
-    Gauge_update(&g_gaugeSample1);
-    Gauge_update(&g_gaugeSample2);
-    Gauge_update(&g_gaugeSample3);
-    Gauge_update(&g_gaugeSample4);
-    Gauge_update(&g_gaugeSample5);
-    Gauge_update(&g_gaugeSample6);
-    Gauge_update(&g_gaugeSample7);
-    Gauge_update(&g_gaugeSample7Pip);
+    Gauge_update(&g_sample1Gauge);
+    Gauge_update(&g_sample2Gauge);
+    Gauge_update(&g_sample3Gauge);
+    Gauge_update(&g_sample4Gauge);
+    Gauge_update(&g_sample5Gauge);
+    Gauge_update(&g_sample6Gauge);
+    Gauge_update(&g_sample7Gauge);
+    Gauge_update(&g_sample7PipGauge);
 }
 
-
-/* =============================================================================
-   MAIN ENTRY POINT
-   ============================================================================= */
-
+/* -----------------------------------------------------------------------------
+   Main
+   ----------------------------------------------------------------------------- */
 int main(bool hardReset)
 {
-    /* Enlarge DMA queue if needed (for streaming many tiles) */
+
+        if (!hardReset)
+                SYS_hardReset();
+                
     if (DMA_getMaxQueueSize() < 160)
         DMA_setMaxQueueSize(160);
 
-    /* Initialize joypad and display */
     JOY_init();
     setupWindowFullScreen();
-
-    /* Load palette (shared by all gauges) */
     PAL_setPalette(PAL0, gauge_palette.data, DMA);
 
-    /* Draw header */
     drawHeader();
     updateSelectedDisplay();
 
-    /* -------------------------------------------------------------------------
-       Initialize all samples
-       Each sample is self-contained and uses the next available VRAM slot
-       ------------------------------------------------------------------------- */
     u16 nextVram = VRAM_BASE;
 
-    KLog("=== GAUGE MODULE DEMO - VRAM ALLOCATION ===");
+    KLog((char *)"=== GAUGE BUILDER V2 DEMO ===");
 
-    initSample1(&nextVram);    /* Sample 1 + Sample 2 PIP */
-    initSample3(&nextVram);    /* Sample 3 (bevel) */
-    initSample4(&nextVram);    /* Sample 4 (cap start/end) */
-    initSample5(&nextVram);    /* Sample 5 (multi-bridge) */
-    initSample6(&nextVram);    /* Sample 6 (vertical, FIXED mode) */
-    initSample7(&nextVram);    /* Sample 7 (multi-part + mini PIP) */
-    setDebugModeSample7Only();
-    dumpSample3AssetPointers();
+    initSample1(&nextVram);
+    initSample2(&nextVram);
+    initSample3(&nextVram);
+    initSample4(&nextVram);
+    initSample5(&nextVram);
+    initSample6(&nextVram);
+    initSample7(&nextVram);
 
     KLog_U1("Total tiles used in VRAM: ", (u16)(nextVram - VRAM_BASE));
-    KLog("============================================");
-        
-    /* -------------------------------------------------------------------------
-       Main loop
-       ------------------------------------------------------------------------- */
+
     while (TRUE)
-    { 
+    {
         g_frameCount++;
 
-        /* Read input */
         const u16 padState = JOY_readJoypad(JOY_1);
-        const u16 pressed = (u16)((padState ^ g_prevPad) & padState);
-        g_prevPad = padState;
+        const u16 pressed = (u16)((padState ^ g_previousPad) & padState);
+        g_previousPad = padState;
 
-        /* Handle input */
         handleInput(pressed, padState);
-
-        /* Mini PIP gauge auto-wrap demo */
-        tickBlueAutoWrap();
-
-        /* Update all gauges (tick + render) */
+        tickMiniPipAutoWrap();
         updateAllGauges();
 
-        /* Wait for VBlank and process DMA queue */
         SYS_doVBlankProcess();
     }
 
     return 0;
 }
-
-
-
 
