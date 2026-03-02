@@ -1557,6 +1557,7 @@ static inline void compute_cell_decision(const GaugeLayout *layout,
                 const u8 useBlinkOffBridge = (ctx->blinkOffActive &&
                                               blinkOffBridgeStrip &&
                                               bridgeInTrailZone);
+
                 const GaugeBreakInfo *bridgeBreakInfo = useBlinkOffBridge
                     ? &ctx->breakInfoActual : &ctx->breakInfo;
                 const u16 bridgeTrailPixels = useBlinkOffBridge
@@ -4195,7 +4196,7 @@ static void preload_dynamic_standard_tiles(GaugeDynamic *dyn, const GaugeLayout 
                                                    layout->gainTilesetCapEndBySegment[endSegId],
                                                    GAUGE_TRAIL_STATE_DAMAGE);
         if (capEndStrip)
-            upload_fill_tile(capEndStrip, emptyIndex, dyn->vramTileCapEnd, DMA);
+            upload_fill_tile(capEndStrip, emptyIndex, dyn->vramTileCapEnd, DMA_QUEUE);
     }
 }
 
@@ -6396,14 +6397,6 @@ u8 GaugeBuilder_addSegment(GaugeBuilder *builder,
             sanitized.pipWidth = 1;
     }
 
-    /* UX rule: bridge is exposed only on normal/base context. */
-    if (sanitized.gain.bridge || sanitized.blinkOff.bridge)
-    {
-        KLog("GaugeBuilder_addSegment: gain/blinkOff bridge ignored");
-        sanitized.gain.bridge = NULL;
-        sanitized.blinkOff.bridge = NULL;
-    }
-
     builder->segmentDefinitions[partIndex][segmentIndex] = sanitized;
     builder->partSegmentCount[partIndex] = (u8)(segmentIndex + 1);
     return 1;
@@ -6550,18 +6543,18 @@ u8 GaugeBuilder_build(GaugeBuilder *builder,
             style->gain.body = definition->gain.body;
             style->gain.end = definition->gain.end;
             style->gain.trail = definition->gain.trail;
-            style->gain.bridge = NULL;
+            style->gain.bridge = definition->gain.bridge;
 
             style->blinkOff.body = definition->blinkOff.body;
             style->blinkOff.end = definition->blinkOff.end;
             style->blinkOff.trail = definition->blinkOff.trail;
-            style->blinkOff.bridge = NULL;
+            style->blinkOff.bridge = definition->blinkOff.bridge;
 
             /* No dedicated gain-blink API in V2 UX: reuse blinkOff as fallback. */
             style->gainBlinkOff.body = definition->blinkOff.body;
             style->gainBlinkOff.end = definition->blinkOff.end;
             style->gainBlinkOff.trail = definition->blinkOff.trail;
-            style->gainBlinkOff.bridge = NULL;
+            style->gainBlinkOff.bridge = definition->blinkOff.bridge;
 
             if (builder->description.capStartFixed)
             {

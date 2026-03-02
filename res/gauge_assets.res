@@ -46,10 +46,10 @@ TILESET gauge_seg1l_end "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui
 
 
 
-TILESET gauge_h_bevel_yellow_strip_trail "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg2_trail.png" NONE NONE 
-TILESET gauge_h_bevel_yellow_strip_end "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg2_end.png" NONE NONE 
-TILESET gauge_h_bevel_yellow_strip_break "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg2_body.png"     NONE NONE 
 
+TILESET gauge_h_bevel_yellow_strip_trail "gauge_h_bevel_yellow_strip_trail.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_strip_end "gauge_h_bevel_yellow_strip_end.png" NONE NONE 
+TILESET gauge_h_bevel_yellow_strip_break "gauge_h_bevel_yellow_strip_break.png"     NONE NONE 
 
 
 
@@ -98,12 +98,18 @@ TILESET gauge_h_bevel_yellow_with_border_blink_off_strip_trail "gauge_h_bevel_ye
 TILESET gauge_h_bevel_blue_with_border_strip_break "gauge_h_bevel_blue_with_border_strip_break.png" NONE NONE 
 TILESET gauge_h_bevel_blue_with_border_strip_end "gauge_h_bevel_blue_with_border_strip_end.png" NONE NONE 
 TILESET gauge_h_bevel_blue_with_border_strip_trail "gauge_h_bevel_blue_with_border_strip_trail.png" NONE NONE 
+TILESET gauge_h_bevel_blue_with_border_cap_start_strip_break "gauge_h_bevel_blue_with_border_cap_start_strip_break.png" NONE NONE 
+TILESET gauge_h_bevel_blue_with_border_cap_start_strip_trail "gauge_h_bevel_blue_with_border_cap_start_strip_trail.png" NONE NONE 
+TILESET gauge_h_bevel_blue_with_border_cap_start_strip_end "gauge_h_bevel_blue_with_border_cap_start_strip_end.png" NONE NONE 
 TILESET gauge_h_bevel_yellow_to_blue_with_border_strip_bridge "gauge_h_bevel_yellow_to_blue_with_border_strip_bridge.png" NONE NONE 
 TILESET gauge_h_bevel_blue_to_yellow_with_border_strip_bridge "gauge_h_bevel_blue_to_yellow_with_border_strip_bridge.png" NONE NONE 
 
 TILESET gauge_h_bevel_blue_with_border_blink_off_strip_break "gauge_h_bevel_blue_with_border_blink_off_strip_break.png" NONE NONE 
 TILESET gauge_h_bevel_blue_with_border_blink_off_strip_end "gauge_h_bevel_blue_with_border_blink_off_strip_end.png" NONE NONE 
 TILESET gauge_h_bevel_blue_with_border_blink_off_strip_trail "gauge_h_bevel_blue_with_border_blink_off_strip_trail.png" NONE NONE 
+TILESET gauge_h_bevel_blue_with_border_cap_start_blink_off_strip_break "gauge_h_bevel_blue_with_border_cap_start_blink_off_strip_break.png" NONE NONE 
+TILESET gauge_h_bevel_blue_with_border_cap_start_blink_off_strip_trail "gauge_h_bevel_blue_with_border_cap_start_blink_off_strip_trail.png" NONE NONE 
+TILESET gauge_h_bevel_blue_with_border_cap_start_blink_off_strip_end "gauge_h_bevel_blue_with_border_cap_start_blink_off_strip_end.png" NONE NONE 
 TILESET gauge_h_bevel_yellow_to_blue_with_border_blink_off_strip_bridge "gauge_h_bevel_yellow_to_blue_with_border_blink_off_strip_bridge.png" NONE NONE 
 TILESET gauge_h_bevel_blue_to_yellow_with_border_blink_off_strip_bridge "gauge_h_bevel_blue_to_yellow_with_border_blink_off_strip_bridge.png" NONE NONE 
 

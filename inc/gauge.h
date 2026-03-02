@@ -195,9 +195,8 @@
    special tileset for the last cell of a segment that smoothly transitions
    to the next segment's visual style.
 
-   Builder V2 UX rule:
-   - bridge is exposed only on normal assets.
-   - gain/blinkOff bridges are ignored.
+   Builder V2:
+   - bridge can be provided per visual state (normal / gain / blink-off).
 
    Without bridge (2 segments: green, red):
      Cell:     [grn|grn|grn|grn|red|red|red|red]
@@ -219,6 +218,11 @@
      [grn_full|grn_BREAK|grn_BRIDGE|red|red|red]
                  ^            ^
                  forced full   bridge tile (blends to next segment)
+
+   Runtime note:
+   - Bridge/BREAK forcing is suppressed only inside the active zone.
+   - The active zone starts at the current value edge and extends to trail/end.
+   - Outside this zone, bridge visibility follows the runtime bridge gate.
 
 
    ============================================================================
@@ -1406,9 +1410,7 @@ struct Gauge
  * - FILL mode requires normal.body
  * - PIP mode requires pipStrip and pipWidth in GaugeSegmentDefinition
  *
- * UX rule:
- * - bridge is intended for normal assets.
- * - gain.bridge and blinkOff.bridge are ignored by GaugeBuilder_addSegment().
+ * Bridge strips can be supplied per visual state (normal / gain / blink-off).
  */
 typedef struct
 {
