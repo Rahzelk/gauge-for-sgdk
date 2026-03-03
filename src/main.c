@@ -11,7 +11,7 @@
 #define SAMPLE1_CELL_COUNT       12
 #define SAMPLE1_MAX_VALUE        ((u16)(SAMPLE1_CELL_COUNT * GAUGE_PIXELS_PER_TILE))
 
-#define SAMPLE2_CELL_COUNT       14
+#define SAMPLE2_CELL_COUNT       7
 #define SAMPLE2_MAX_VALUE        7
 
 #define SAMPLE3_CELL_COUNT       12
@@ -29,7 +29,7 @@
 #define SAMPLE7_CELL_COUNT       12
 #define SAMPLE7_MAX_VALUE        ((u16)(SAMPLE7_CELL_COUNT * GAUGE_PIXELS_PER_TILE))
 #define SAMPLE7_SLAVE_LENGTH      3
-#define SAMPLE7_PIP_LENGTH        8
+#define SAMPLE7_PIP_LENGTH        4
 
 #define SAMPLE1_X  2
 #define SAMPLE1_Y  9
@@ -71,9 +71,9 @@
 /* -----------------------------------------------------------------------------
    Sample 4 diagnostic isolation switches
    ----------------------------------------------------------------------------- */
-#define GAUGE_DEMO_ISOLATE_SAMPLE4 1
+#define GAUGE_DEMO_ISOLATE_SAMPLE4 0
 #if GAUGE_DEMO_ISOLATE_SAMPLE4
-#define GAUGE_DEMO_SAMPLE4_LOGS 1
+#define GAUGE_DEMO_SAMPLE4_LOGS 0
 #define GAUGE_DEMO_SAMPLE4_RENDER_DEBUG 1
 #else
 #define GAUGE_DEMO_SAMPLE4_LOGS 0
@@ -252,14 +252,11 @@ static void initSample2(u16 *nextVram)
 
     GaugeBuilder_init(&s_builder, &description);
 
-    GaugeSegmentDefinition segment = GAUGE_SEGMENT_ATTR(
+    GaugeSegmentDefinition segment = GAUGE_PIP_SEGMENT_TILESET(
         SAMPLE2_CELL_COUNT,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_straight_yellow_strip, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
+        &gauge_h_pip_basic_strip,
+        2
     );
-    segment.pipStrip = gauge_h_pip_basic_strip.tiles;
-    segment.pipWidth = 2;
     GaugeBuilder_addSegment(&s_builder, 0, &segment);
 
     {
@@ -358,7 +355,7 @@ static void initSample4(u16 *nextVram)
     GaugeBuilder_init(&s_builder, &description);
 
     GaugeSegmentDefinition segment0 = GAUGE_SEGMENT_ATTR(
-        5,
+        4,
         GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_strip_break,
                    &gauge_h_bevel_lightblue_strip_trail,
                    &gauge_h_bevel_lightblue_strip_end,
@@ -371,7 +368,7 @@ static void initSample4(u16 *nextVram)
     );
 
     GaugeSegmentDefinition segment1 = GAUGE_SEGMENT_ATTR(
-        5,
+        4,
         GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_strip_break,
                    &gauge_h_bevel_blue_strip_trail,
                    &gauge_h_bevel_blue_strip_end,
@@ -384,7 +381,7 @@ static void initSample4(u16 *nextVram)
     );
 
     GaugeSegmentDefinition segment2 = GAUGE_SEGMENT_ATTR(
-        5,
+        4,
         GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_strip_break,
                    &gauge_h_bevel_yellow_strip_trail,
                    &gauge_h_bevel_yellow_strip_end,
@@ -632,8 +629,8 @@ static void initSample7(u16 *nextVram)
         .originX = SAMPLE7_X,
         .originY = SAMPLE7_Y,
         .maxValue = SAMPLE7_MAX_VALUE,
-        .capStartFixed = 1,
-        .capEndFixed = 1,
+        .capStartFixed = 0,
+        .capEndFixed = 0,
         .palette = PAL0,
         .priority = 1,
         .verticalFlip = 0,
@@ -746,18 +743,15 @@ static void initSample7(u16 *nextVram)
     };
 
     GaugeBuilder_init(&s_builder, &pipDescription);
-    GaugeSegmentDefinition pipSegment = GAUGE_SEGMENT_ATTR(
+    GaugeSegmentDefinition pipSegment = GAUGE_PIP_SEGMENT_TILESET(
         SAMPLE7_PIP_LENGTH,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_straight_yellow_strip, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
+        &gauge_h_pip_mini_bar_strip,
+        2
     );
-    pipSegment.pipStrip = gauge_h_pip_mini_bar_strip.tiles;
-    pipSegment.pipWidth = 2;
     GaugeBuilder_addSegment(&s_builder, 0, &pipSegment);
     {
         const u16 vramBase = *nextVram;
-        if (!GaugeBuilder_build(&s_builder, &g_sample7PipGauge, vramBase, GAUGE_VRAM_DYNAMIC))
+        if (!GaugeBuilder_build(&s_builder, &g_sample7PipGauge, vramBase, GAUGE_VRAM_FIXED))
         {
             KLog((char *)"GaugeBuilder_build failed");
             KLog((char *)"Sample 7 Mini PIP");
@@ -898,8 +892,7 @@ int main(bool hardReset)
     if (!hardReset)
         SYS_hardReset();
 
-    if (DMA_getMaxQueueSize() < 160)
-        DMA_setMaxQueueSize(160);
+    DMA_setMaxQueueSize(192);
 
     JOY_init();
     setupWindowFullScreen();
@@ -929,7 +922,7 @@ int main(bool hardReset)
 #endif
 
     KLog_U1("Total tiles used in VRAM: ", (u16)(nextVram - VRAM_BASE));
-    DMA_setMaxQueueSizeToDefault();
+    //DMA_setMaxQueueSizeToDefault();
 
     while (TRUE)
     {

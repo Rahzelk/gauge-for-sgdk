@@ -2004,7 +2004,8 @@ void GaugeLayout_setGainBlinkOffTilesets(GaugeLayout *layout,
                                          const u32 * const *gainBlinkOffCapStartTrailTilesets);
 void GaugeLayout_setPipStyles(GaugeLayout *layout,
                               const u32 * const *pipTilesets,
-                              const u8 *pipWidthBySegment);
+                              const u8 *pipWidthBySegment,
+                              const u8 *pipStateCountBySegment);
 
 /* Internal gauge-part builders used by GaugeBuilder_build(). */
 u8 Gauge_addPartEx(Gauge *gauge,
@@ -2279,6 +2280,7 @@ static void layout_set_optional_views_to_defaults(GaugeLayout *layout)
 
     layout->pipTilesetBySegment = (const u32 **)s_nullSegmentTilesets;
     layout->pipWidthBySegment = (u8 *)s_oneSegmentFlags;
+    layout->pipStateCountBySegment = (u8 *)s_zeroSegmentFlags;
 
     layout->pipIndexByFillIndex = (u8 *)s_invalidCellIndexes;
     layout->pipLocalTileByFillIndex = (u8 *)s_zeroCellFlags;
@@ -2533,6 +2535,7 @@ static void layout_free_buffers(GaugeLayout *layout)
 
     layout_free_optional_ptr((void **)&layout->pipTilesetBySegment, s_nullSegmentTilesets, NULL, NULL);
     layout_free_optional_ptr((void **)&layout->pipWidthBySegment, s_oneSegmentFlags, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->pipStateCountBySegment, s_zeroSegmentFlags, NULL, NULL);
 
     layout_free_optional_ptr((void **)&layout->pipIndexByFillIndex, s_invalidCellIndexes, NULL, NULL);
     layout_free_optional_ptr((void **)&layout->pipLocalTileByFillIndex, s_zeroCellFlags, NULL, NULL);
@@ -2819,7 +2822,8 @@ void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src)
                                         src->gainBlinkOffTilesetCapStartTrailBySegment);
     GaugeLayout_setPipStyles(dst,
                              src->pipTilesetBySegment,
-                             src->pipWidthBySegment);
+                             src->pipWidthBySegment,
+                             src->pipStateCountBySegment);
 
     /* Opposite fill direction from source */
     if (src->fillIndexByCell[0] == 0)
@@ -3118,7 +3122,8 @@ void GaugeLayout_setGainBlinkOffTilesets(GaugeLayout *layout,
 
 void GaugeLayout_setPipStyles(GaugeLayout *layout,
                               const u32 * const *pipTilesets,
-                              const u8 *pipWidthBySegment)
+                              const u8 *pipWidthBySegment,
+                              const u8 *pipStateCountBySegment)
 {
     if (!layout)
         return;
@@ -3150,6 +3155,13 @@ void GaugeLayout_setPipStyles(GaugeLayout *layout,
         s_oneSegmentFlags,
         1,
         "Gauge pip width alloc failed");
+    layout_sync_optional_segment_flags_by_usage(
+        hasPipStyles,
+        &layout->pipStateCountBySegment,
+        layout->segmentCount,
+        s_zeroSegmentFlags,
+        0,
+        "Gauge pip state count alloc failed");
 
     layout_copy_segment_tilesets(layout->pipTilesetBySegment, pipTilesets, layout->segmentCount);
     if (layout->pipWidthBySegment != s_oneSegmentFlags)
@@ -3160,6 +3172,14 @@ void GaugeLayout_setPipStyles(GaugeLayout *layout,
             if (widthInTiles == 0)
                 widthInTiles = 1;
             layout->pipWidthBySegment[segmentId] = widthInTiles;
+        }
+    }
+    if (layout->pipStateCountBySegment != s_zeroSegmentFlags)
+    {
+        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
+        {
+            u8 stateCount = pipStateCountBySegment ? pipStateCountBySegment[segmentId] : 0;
+            layout->pipStateCountBySegment[segmentId] = stateCount;
         }
     }
 
@@ -3934,6 +3954,7 @@ static void free_dynamic_buffers(GaugeDynamic *dyn)
     gauge_free_ptr((void **)&dyn->vramTileFullValue);
     gauge_free_ptr((void **)&dyn->vramTileFullTrail);
     gauge_free_ptr((void **)&dyn->vramTileBridge);
+    gauge_free_ptr((void **)&dyn->vramTilePipBase);
     gauge_free_ptr((void **)&dyn->cachedFillIndexBridge);
     gauge_free_ptr((void **)&dyn->cellCurrentTileIndex);
     gauge_free_ptr((void **)&dyn->cellValid);
@@ -3948,11 +3969,12 @@ static u8 alloc_dynamic_buffers(GaugeDynamic *dyn, u8 segmentCount, u8 cellCount
     dyn->vramTileFullValue = (u16 *)gauge_alloc_bytes((u16)(segmentCount * (u8)sizeof(u16)));
     dyn->vramTileFullTrail = (u16 *)gauge_alloc_bytes((u16)(segmentCount * (u8)sizeof(u16)));
     dyn->vramTileBridge = (u16 *)gauge_alloc_bytes((u16)(segmentCount * (u8)sizeof(u16)));
+    dyn->vramTilePipBase = (u16 *)gauge_alloc_bytes((u16)(segmentCount * (u8)sizeof(u16)));
     dyn->cachedFillIndexBridge = (u8 *)gauge_alloc_bytes(segmentCount);
     dyn->cellCurrentTileIndex = (u16 *)gauge_alloc_bytes((u16)(cellCount * (u8)sizeof(u16)));
     dyn->cellValid = (u8 *)gauge_alloc_bytes(cellCount);
     if (!dyn->vramTileEmpty || !dyn->vramTileFullValue || !dyn->vramTileFullTrail ||
-        !dyn->vramTileBridge || !dyn->cachedFillIndexBridge ||
+        !dyn->vramTileBridge || !dyn->vramTilePipBase || !dyn->cachedFillIndexBridge ||
         !dyn->cellCurrentTileIndex || !dyn->cellValid)
     {
         free_dynamic_buffers(dyn);
@@ -4014,6 +4036,7 @@ static u8 init_dynamic_vram(GaugeDynamic *dyn, const GaugeLayout *layout, u16 vr
         dyn->vramTileFullValue[i] = 0;
         dyn->vramTileFullTrail[i] = 0;
         dyn->vramTileBridge[i] = 0;
+        dyn->vramTilePipBase[i] = 0;
         dyn->cachedFillIndexBridge[i] = CACHE_INVALID_U8;
     }
 
@@ -4354,6 +4377,129 @@ static void init_dynamic_tilemap(GaugePart *part)
         /* Initialize cache to avoid redundant writes on first update */
         dyn->cellCurrentTileIndex[cellIndex] = vramTile;
     }
+}
+
+/**
+ * Initialize dynamic PIP VRAM layout with shared slots per segment/state.
+ *
+ * Slot mapping per segment:
+ *   base + state * pipWidth + localTile
+ * where state is derived from the compact PIP strip state order.
+ *
+ * Runtime then updates only tilemap indices (no per-cell tile streaming).
+ */
+static u8 init_dynamic_pip_vram(GaugePart *part)
+{
+    const GaugeLayout *layout = part->layout;
+    GaugeDynamic *dyn = &part->dyn;
+    u16 nextVram = part->vramBase;
+
+    if (!alloc_dynamic_buffers(dyn, layout->segmentCount, layout->length))
+        return 0;
+
+    for (u8 segmentId = 0; segmentId < dyn->segmentCount; segmentId++)
+    {
+        dyn->vramTileEmpty[segmentId] = 0;
+        dyn->vramTileFullValue[segmentId] = 0;
+        dyn->vramTileFullTrail[segmentId] = 0;
+        dyn->vramTileBridge[segmentId] = 0;
+        dyn->vramTilePipBase[segmentId] = 0;
+        dyn->cachedFillIndexBridge[segmentId] = CACHE_INVALID_U8;
+    }
+
+    dyn->vramTileCapStart = 0;
+    dyn->vramTileCapEnd = 0;
+    dyn->vramTilePartialValue = 0;
+    dyn->vramTilePartialTrail = 0;
+    dyn->vramTilePartialEnd = 0;
+    dyn->vramTilePartialTrailSecond = 0;
+    dyn->loadedSegmentPartialValue = CACHE_INVALID_U8;
+    dyn->cachedFillIndexPartialValue = CACHE_INVALID_U8;
+    dyn->loadedSegmentPartialTrail = CACHE_INVALID_U8;
+    dyn->cachedFillIndexPartialTrail = CACHE_INVALID_U8;
+    dyn->loadedSegmentPartialEnd = CACHE_INVALID_U8;
+    dyn->cachedFillIndexPartialEnd = CACHE_INVALID_U8;
+    dyn->loadedSegmentPartialTrailSecond = CACHE_INVALID_U8;
+    dyn->cachedFillIndexPartialTrailSecond = CACHE_INVALID_U8;
+    dyn->cachedFillIndexCapStart = CACHE_INVALID_U8;
+    dyn->cachedFillIndexCapEnd = CACHE_INVALID_U8;
+    dyn->loadedCapStartUsesBreak = CACHE_INVALID_U8;
+    dyn->loadedCapStartUsesTrail = CACHE_INVALID_U8;
+
+    for (u8 cellIndex = 0; cellIndex < dyn->cellCount; cellIndex++)
+    {
+        dyn->cellCurrentTileIndex[cellIndex] = CACHE_INVALID_U16;
+        dyn->cellValid[cellIndex] = 0;
+    }
+
+    /* Preload all states for each segment using the compact strip layout. */
+    for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
+    {
+        const u32 *pipStrip = layout->pipTilesetBySegment[segmentId];
+        if (!pipStrip)
+            continue;
+
+        u8 pipWidth = layout->pipWidthBySegment[segmentId];
+        if (pipWidth == 0)
+            pipWidth = 1;
+
+        u8 pipStateCount = layout->pipStateCountBySegment[segmentId];
+        if (pipStateCount < 2)
+            continue;
+
+        dyn->vramTilePipBase[segmentId] = nextVram;
+
+        for (u8 state = 0; state < pipStateCount; state++)
+        {
+            for (u8 localTile = 0; localTile < pipWidth; localTile++)
+            {
+                const u8 stripIndex = (u8)(state * pipWidth + localTile);
+                upload_fill_tile(pipStrip, stripIndex, nextVram, DMA_QUEUE);
+                nextVram++;
+            }
+        }
+    }
+
+    /* Initialize tilemap with EMPTY state for each local tile. */
+    for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
+    {
+        compute_tile_xy(layout->orientation, part->originX, part->originY, cellIndex,
+                        &layout->tilemapPosByCell[cellIndex].x,
+                        &layout->tilemapPosByCell[cellIndex].y);
+
+        const u8 segmentId = layout->segmentIdByCell[cellIndex];
+        if (!layout->pipTilesetBySegment[segmentId] ||
+            layout->pipStateCountBySegment[segmentId] < 2)
+            continue;
+
+        const u16 pipBaseTile = dyn->vramTilePipBase[segmentId];
+
+        const u8 fillIndex = layout->fillIndexByCell[cellIndex];
+        const u8 pipIndex = layout->pipIndexByFillIndex[fillIndex];
+        if (pipIndex == CACHE_INVALID_U8)
+            continue;
+
+        u8 pipWidth = layout->pipWidthByPipIndex[pipIndex];
+        if (pipWidth == 0)
+            pipWidth = 1;
+
+        u8 localTile = layout->pipLocalTileByFillIndex[fillIndex];
+        if (localTile >= pipWidth)
+            localTile = 0;
+
+        const u16 vramTile = (u16)(pipBaseTile + localTile);
+        const u16 attr = TILE_ATTR_FULL(layout->palette, layout->priority,
+                                        layout->verticalFlip, layout->horizontalFlip, vramTile);
+
+        VDP_setTileMapXY(WINDOW, attr,
+                         layout->tilemapPosByCell[cellIndex].x,
+                         layout->tilemapPosByCell[cellIndex].y);
+
+        dyn->cellCurrentTileIndex[cellIndex] = vramTile;
+        dyn->cellValid[cellIndex] = 1;
+    }
+
+    return 1;
 }
 
 /**
@@ -5345,8 +5491,8 @@ static void process_dynamic_mode(GaugePart *part,
  * Priority rules:
  * 1. Cell fully covered by value        -> PIP_STATE_VALUE
  * 2. Cell NOT covered by actual trail    -> PIP_STATE_EMPTY
- * 3. Blink-off active (damage)           -> PIP_STATE_BLINK_OFF
- * 4. Blink-off active (gain)             -> PIP_STATE_EMPTY (hidden)
+ * 3. Blink-off active + gain mode        -> PIP_STATE_EMPTY
+ * 4. Blink-off active + damage mode      -> PIP_STATE_BLINK_OFF
  * 5. Trail is gain mode                  -> PIP_STATE_GAIN
  * 6. Default (damage trail visible)      -> PIP_STATE_LOSS
  *
@@ -5379,9 +5525,9 @@ static inline u8 select_pip_state_for_cell(const GaugeLayout *layout,
 
     if (blinkOffActive)
     {
-        if (trailMode == GAUGE_TRAIL_STATE_DAMAGE)
-            return PIP_STATE_BLINK_OFF;
-        return PIP_STATE_EMPTY; /* Gain trail: fallback to hidden trail on blink OFF. */
+        if (trailMode == GAUGE_TRAIL_STATE_GAIN)
+            return PIP_STATE_EMPTY;
+        return PIP_STATE_BLINK_OFF;
     }
 
     if (trailMode == GAUGE_TRAIL_STATE_GAIN)
@@ -5390,12 +5536,71 @@ static inline u8 select_pip_state_for_cell(const GaugeLayout *layout,
     return PIP_STATE_LOSS;
 }
 
+static inline u8 resolve_available_pip_state(u8 requestedState,
+                                             u8 stateCount,
+                                             u8 trailMode)
+{
+    if (stateCount < 2)
+        return PIP_STATE_EMPTY;
+
+    /* Gain mode contract:
+     * - if GAIN state is missing, render gain zone as VALUE (no blinking)
+     * - never use BLINK_OFF for gain mode in PIP
+     */
+    if (trailMode == GAUGE_TRAIL_STATE_GAIN)
+    {
+        if (stateCount <= PIP_STATE_GAIN)
+        {
+            switch (requestedState)
+            {
+            case PIP_STATE_GAIN:
+            case PIP_STATE_LOSS:
+            case PIP_STATE_BLINK_OFF:
+                return PIP_STATE_VALUE;
+            default:
+                break;
+            }
+        }
+        else if (requestedState == PIP_STATE_BLINK_OFF)
+        {
+            return PIP_STATE_EMPTY;
+        }
+    }
+
+    switch (requestedState)
+    {
+    case PIP_STATE_EMPTY:
+        return PIP_STATE_EMPTY;
+    case PIP_STATE_VALUE:
+        return PIP_STATE_VALUE;
+    case PIP_STATE_LOSS:
+        return (stateCount > PIP_STATE_LOSS) ? PIP_STATE_LOSS : PIP_STATE_EMPTY;
+    case PIP_STATE_GAIN:
+        if (stateCount > PIP_STATE_GAIN)
+            return PIP_STATE_GAIN;
+        if (stateCount > PIP_STATE_LOSS)
+            return PIP_STATE_LOSS;
+        return PIP_STATE_VALUE;
+    case PIP_STATE_BLINK_OFF:
+        if (stateCount > PIP_STATE_BLINK_OFF)
+            return PIP_STATE_BLINK_OFF;
+        if (stateCount > PIP_STATE_LOSS)
+            return PIP_STATE_LOSS;
+        return PIP_STATE_EMPTY;
+    default:
+        return PIP_STATE_EMPTY;
+    }
+}
+
 /**
  * PIP-mode renderer: update each cell's tile from compact strip based on pip state.
  *
  * For each cell, computes its PIP state (VALUE/EMPTY/LOSS/GAIN/BLINK_OFF),
- * selects the corresponding tile from the compact strip, and uploads via DMA
- * if changed. Uses fixed VRAM (one tile per cell) regardless of VRAM mode.
+ * then selects the corresponding tile from the compact strip.
+ *
+ * - Fixed mode: per-cell streaming (upload on demand).
+ * - Dynamic mode: preloaded shared slots per segment/state/local tile;
+ *   runtime mostly updates tilemap indices only.
  */
 static void process_pip_mode(GaugePart *part,
                              u16 valuePixels,
@@ -5413,6 +5618,55 @@ static void process_pip_mode(GaugePart *part,
     Gauge *gauge = s_activeGaugeForRender;
     if (!gauge)
         return;
+
+    if (part->vramMode == GAUGE_VRAM_DYNAMIC)
+    {
+        GaugeDynamic *dyn = &part->dyn;
+        const u16 attrBase = TILE_ATTR_FULL(layout->palette, layout->priority,
+                                            layout->verticalFlip, layout->horizontalFlip, 0);
+
+        for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
+        {
+            if (!dyn->cellValid[cellIndex])
+                continue;
+
+            const u8 segmentId = layout->segmentIdByCell[cellIndex];
+            const u16 pipBaseTile = dyn->vramTilePipBase[segmentId];
+            const u8 pipStateCount = layout->pipStateCountBySegment[segmentId];
+            if (pipStateCount < 2)
+                continue;
+
+            const u8 fillIndex = layout->fillIndexByCell[cellIndex];
+            const u8 pipIndex = layout->pipIndexByFillIndex[fillIndex];
+            if (pipIndex == CACHE_INVALID_U8)
+                continue;
+
+            u8 pipWidth = layout->pipWidthByPipIndex[pipIndex];
+            if (pipWidth == 0)
+                pipWidth = 1;
+
+            u8 localTile = layout->pipLocalTileByFillIndex[fillIndex];
+            if (localTile >= pipWidth)
+                localTile = 0;
+
+            const u8 mappedMasterFillIndex = part->masterFillIndexByCell[cellIndex];
+            const u8 requestedState = gauge->masterPipStateByFillIndex[mappedMasterFillIndex];
+            const u8 resolvedState = resolve_available_pip_state(requestedState,
+                                                                 pipStateCount,
+                                                                 trailMode);
+            const u16 desiredTile = (u16)(pipBaseTile + ((u16)resolvedState * pipWidth) + localTile);
+
+            if (dyn->cellCurrentTileIndex[cellIndex] != desiredTile)
+            {
+                VDP_setTileMapXY(WINDOW, attrBase | desiredTile,
+                                 layout->tilemapPosByCell[cellIndex].x,
+                                 layout->tilemapPosByCell[cellIndex].y);
+                dyn->cellCurrentTileIndex[cellIndex] = desiredTile;
+            }
+        }
+
+        return;
+    }
 
     for (u8 i = 0; i < part->cellCount; i++)
     {
@@ -5437,7 +5691,11 @@ static void process_pip_mode(GaugePart *part,
             localTile = 0;
 
         const u8 mappedMasterFillIndex = part->masterFillIndexByCell[cellIndex];
-        const u8 pipState = gauge->masterPipStateByFillIndex[mappedMasterFillIndex];
+        const u8 requestedState = gauge->masterPipStateByFillIndex[mappedMasterFillIndex];
+        const u8 stateCount = layout->pipStateCountBySegment[segmentId];
+        const u8 pipState = resolve_available_pip_state(requestedState,
+                                                        stateCount,
+                                                        trailMode);
         const u8 stripIndex = (u8)(pipState * pipWidth + localTile);
 
         upload_cell_if_needed(cell, pipStrip, stripIndex);
@@ -5551,7 +5809,7 @@ static u8 GaugePart_initInternal(GaugePart *part,
 
     GaugeLayout_retain(layout);
 
-    if (gauge->valueMode == GAUGE_VALUE_MODE_PIP || vramMode == GAUGE_VRAM_FIXED)
+    if (vramMode == GAUGE_VRAM_FIXED)
     {
         part->cells = (GaugeStreamCell *)gauge_alloc_bytes(
             (u16)(layout->length * (u8)sizeof(GaugeStreamCell)));
@@ -5564,8 +5822,19 @@ static u8 GaugePart_initInternal(GaugePart *part,
 
     if (gauge->valueMode == GAUGE_VALUE_MODE_PIP)
     {
-        /* Compact PIP renderer uses per-cell streaming for both VRAM modes. */
-        write_tilemap_pip_init(part);
+        if (part->vramMode == GAUGE_VRAM_DYNAMIC)
+        {
+            if (!init_dynamic_pip_vram(part))
+            {
+                gauge_free_ptr((void **)&part->cells);
+                GaugeLayout_release(layout);
+                return 0;
+            }
+        }
+        else
+        {
+            write_tilemap_pip_init(part);
+        }
         return 1;
     }
 
@@ -5705,6 +5974,12 @@ static u8 validate_pip_layout(const GaugeLogic *logic, const GaugeLayout *layout
         if (layout->pipTilesetBySegment[segmentId] == NULL)
         {
             KLog_U1("Gauge PIP config error missing compact tileset segmentId: ", segmentId);
+            return 0;
+        }
+        if (layout->pipStateCountBySegment[segmentId] < 2)
+        {
+            KLog_U2("Gauge PIP config error invalid stateCount segmentId: ", segmentId,
+                    " stateCount: ", layout->pipStateCountBySegment[segmentId]);
             return 0;
         }
     }
@@ -6391,10 +6666,22 @@ u8 GaugeBuilder_addSegment(GaugeBuilder *builder,
     }
     else
     {
-        if (!sanitized.pipStrip)
+        if (!sanitized.pipTileset)
             return 0;
         if (sanitized.pipWidth == 0)
-            sanitized.pipWidth = 1;
+            return 0;
+
+        const u16 pipTileCount = sanitized.pipTileset->numTile;
+        if (pipTileCount == 0)
+            return 0;
+        if (pipTileCount > 255)
+            return 0;
+        if ((pipTileCount % sanitized.pipWidth) != 0)
+            return 0;
+
+        const u16 pipStateCount = (u16)(pipTileCount / sanitized.pipWidth);
+        if (pipStateCount < 2)
+            return 0;
     }
 
     builder->segmentDefinitions[partIndex][segmentIndex] = sanitized;
@@ -6445,13 +6732,23 @@ static u8 build_segment_id_by_cell(const GaugeBuilder *builder,
     {
         const GaugeSegmentDefinition *definition =
             &builder->segmentDefinitions[partIndex][segmentIndex];
-        const u8 cellCount = definition->cellCount;
-        if (cellCount == 0)
-            return 0;
-        if ((u16)cursor + (u16)cellCount > GAUGE_MAX_LENGTH)
+        const u8 logicalCellCount = definition->cellCount;
+        if (logicalCellCount == 0)
             return 0;
 
-        for (u8 i = 0; i < cellCount; i++)
+        u16 expandedCellCount = logicalCellCount;
+        if (builder->description.mode == GAUGE_VALUE_MODE_PIP)
+        {
+            const u8 pipWidth = definition->pipWidth;
+            if (pipWidth == 0)
+                return 0;
+            expandedCellCount = (u16)(logicalCellCount * pipWidth);
+        }
+
+        if ((u16)cursor + expandedCellCount > GAUGE_MAX_LENGTH)
+            return 0;
+
+        for (u16 i = 0; i < expandedCellCount; i++)
             segmentByFillIndex[cursor++] = segmentIndex;
     }
 
@@ -6528,6 +6825,7 @@ u8 GaugeBuilder_build(GaugeBuilder *builder,
         GaugeSegmentStyle segmentStyles[GAUGE_MAX_SEGMENTS] = {0};
         const u32 *pipTilesets[GAUGE_MAX_SEGMENTS] = {0};
         u8 pipWidths[GAUGE_MAX_SEGMENTS] = {0};
+        u8 pipStateCounts[GAUGE_MAX_SEGMENTS] = {0};
 
         for (u8 segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++)
         {
@@ -6590,8 +6888,14 @@ u8 GaugeBuilder_build(GaugeBuilder *builder,
 
             if (builder->description.mode == GAUGE_VALUE_MODE_PIP)
             {
-                pipTilesets[segmentIndex] = definition->pipStrip;
-                pipWidths[segmentIndex] = definition->pipWidth ? definition->pipWidth : 1;
+                if (definition->pipTileset)
+                {
+                    const u8 pipWidth = definition->pipWidth ? definition->pipWidth : 1;
+                    pipTilesets[segmentIndex] = definition->pipTileset->tiles;
+                    pipWidths[segmentIndex] = pipWidth;
+                    pipStateCounts[segmentIndex] =
+                        (u8)(definition->pipTileset->numTile / pipWidth);
+                }
             }
         }
 
@@ -6617,7 +6921,7 @@ u8 GaugeBuilder_build(GaugeBuilder *builder,
             GaugeLayout_setFillOffset(layout, builder->partFillOffset[partIndex]);
 
         if (builder->description.mode == GAUGE_VALUE_MODE_PIP)
-            GaugeLayout_setPipStyles(layout, pipTilesets, pipWidths);
+            GaugeLayout_setPipStyles(layout, pipTilesets, pipWidths, pipStateCounts);
 
         builtLayouts[partIndex] = layout;
     }
@@ -7162,7 +7466,8 @@ void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
  * Compute how many VRAM tiles are needed for a layout.
  *
  * VRAM budget depends on mode:
- * - PIP:     1 tile per cell with a compact strip
+ * - PIP fixed:   1 tile per visible physical cell
+ * - PIP dynamic: shared slots per segment (pipWidth * stateCount)
  * - Fixed:   1 tile per cell with a valid tileset
  * - Dynamic: 3 standard tiles per unique segment (empty/full/fullTrail) +
  *            partial tiles (value/trail/end/trailSecond) + bridge + cap tiles
@@ -7176,7 +7481,29 @@ static u16 compute_vram_size_for_layout(const GaugeLayout *layout,
 {
     if (valueMode == GAUGE_VALUE_MODE_PIP)
     {
-        /* Compact PIP mode: one tile per visible cell with a configured compact strip. */
+        if (vramMode == GAUGE_VRAM_DYNAMIC)
+        {
+            /* Dynamic PIP mode: shared slots per segment/state/localTile. */
+            u16 count = 0;
+            for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
+            {
+                if (!layout->pipTilesetBySegment[segmentId])
+                    continue;
+
+                u8 pipWidth = layout->pipWidthBySegment[segmentId];
+                if (pipWidth == 0)
+                    pipWidth = 1;
+
+                const u8 pipStateCount = layout->pipStateCountBySegment[segmentId];
+                if (pipStateCount < 2)
+                    continue;
+
+                count = (u16)(count + ((u16)pipWidth * pipStateCount));
+            }
+            return count;
+        }
+
+        /* Fixed PIP mode: one tile per visible physical cell. */
         u16 count = 0;
         for (u8 i = 0; i < layout->length; i++)
         {

@@ -472,12 +472,15 @@ typedef enum
  *       This is the standard mode for health bars and energy gauges.
  *       Example: [########|####....|........]  (16 px filled out of 24)
  *
- * PIP:  Discrete gauge. Each "pip" is 1 or more tiles that switch between
- *       5 states: EMPTY, VALUE, LOSS, GAIN, BLINK_OFF. No partial fill.
+ * PIP:  Discrete gauge. Each "pip" is 1 or more tiles that switch states
+ *       without partial fill. Guaranteed states are EMPTY and VALUE.
+ *       Optional states (LOSS, GAIN, BLINK_OFF) are available only if
+ *       provided by the compact tileset.
  *       Example: [VALUE] [VALUE] [VALUE] [LOSS ] [EMPTY]  (3/5 pips filled)
  *
  *       PIP setup requires:
- *       - Provide pipStrip + pipWidth in each GaugeSegmentDefinition
+ *       - Provide pipTileset + pipWidth in each GaugeSegmentDefinition
+ *       - stateCount is derived automatically from pipTileset->numTile / pipWidth
  *       - Pip count is computed from segment geometry
  *       - maxValue is auto-adjusted to pip count during GaugeBuilder_build()
  */
@@ -863,9 +866,12 @@ typedef struct
      *   state 2: LOSS      [2*width .. 3*width-1]
      *   state 3: GAIN      [3*width .. 4*width-1]
      *   state 4: BLINK_OFF [4*width .. 5*width-1]
+     * Actual number of states per segment is derived from:
+     *   pipStateCountBySegment[segId] = pipTileset->numTile / pipWidth
      */
-    const u32 **pipTilesetBySegment;              /* [segmentCount] compact strip: 5*width tiles */
+    const u32 **pipTilesetBySegment;              /* [segmentCount] compact strip: stateCount*width tiles */
     u8 *pipWidthBySegment;                        /* [segmentCount] width in tiles per segment style */
+    u8 *pipStateCountBySegment;                   /* [segmentCount] number of states (>=2: EMPTY, VALUE) */
 
     /* --- PIP metadata (auto-built from fill order + pipWidthBySegment) --- */
     u8 pipCount;                                   /* number of logical pips in this layout */
@@ -1200,6 +1206,7 @@ typedef struct
     u16 *vramTileFullValue;                       /* [segmentCount] Full value tile per segment (8,8) */
     u16 *vramTileFullTrail;                       /* [segmentCount] Full trail tile per segment (0,8) */
     u16 *vramTileBridge;                          /* [segmentCount] Bridge tile per segment (dynamic) */
+    u16 *vramTilePipBase;                         /* [segmentCount] PIP dynamic slot base per segment */
     u16 vramTileCapStart;                        /* Cap start tile (per part) */
     u16 vramTileCapEnd;                          /* Cap end tile (per part) */
 
@@ -1408,7 +1415,7 @@ struct Gauge
  *
  * All strips are optional except where required by the selected value mode:
  * - FILL mode requires normal.body
- * - PIP mode requires pipStrip and pipWidth in GaugeSegmentDefinition
+ * - PIP mode requires pipTileset and pipWidth in GaugeSegmentDefinition
  *
  * Bridge strips can be supplied per visual state (normal / gain / blink-off).
  */
@@ -1441,7 +1448,7 @@ typedef struct
     GaugeSegmentAssets normal;       /* Base strips (FILL mode) */
     GaugeSegmentAssets gain;         /* Gain strips (FILL mode) */
     GaugeSegmentAssets blinkOff;     /* Blink-off strips (FILL mode) */
-    const u32 *pipStrip;             /* Compact pip strip (PIP mode) */
+    const TileSet *pipTileset;       /* Compact pip tileset (PIP mode) */
     u8 pipWidth;                     /* Width in tiles for one pip (PIP mode) */
 } GaugeSegmentDefinition;
 
@@ -1450,6 +1457,7 @@ typedef struct
  *
  * GAUGE_SEGMENT_TILESETS(...) converts TileSet pointers to GaugeSegmentAssets.
  * GAUGE_SEGMENT_ATTR(...) builds a FILL-mode segment definition.
+ * GAUGE_PIP_SEGMENT_TILESET(...) builds a PIP-mode segment definition.
  *
  * Example:
  *   GaugeSegmentDefinition segment = GAUGE_SEGMENT_ATTR(
@@ -1472,8 +1480,18 @@ typedef struct
         .normal = (normalAssets), \
         .gain = (gainAssets), \
         .blinkOff = (blinkOffAssets), \
-        .pipStrip = NULL, \
+        .pipTileset = NULL, \
         .pipWidth = 0 \
+    })
+
+#define GAUGE_PIP_SEGMENT_TILESET(logicalCellCount, pipTilesetRef, pipWidthValue) \
+    ((GaugeSegmentDefinition){ \
+        .cellCount = (logicalCellCount), \
+        .normal = GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL), \
+        .gain = GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL), \
+        .blinkOff = GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL), \
+        .pipTileset = (pipTilesetRef), \
+        .pipWidth = (pipWidthValue) \
     })
 
 /**
