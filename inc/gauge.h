@@ -480,7 +480,8 @@ typedef enum
  *
  *       PIP setup requires:
  *       - Provide pipTileset + pipWidth in each GaugeSegmentDefinition
- *       - stateCount is derived automatically from pipTileset->numTile / pipWidth
+ *       - stateCount is derived automatically from pipTileset size and
+ *         stripCoverage (FULL / HALF / QUARTER)
  *       - Pip count is computed from segment geometry
  *       - maxValue is auto-adjusted to pip count during GaugeBuilder_build()
  */
@@ -489,6 +490,26 @@ typedef enum
     GAUGE_VALUE_MODE_FILL = 0,
     GAUGE_VALUE_MODE_PIP  = 1
 } GaugeValueMode;
+
+/**
+ * Coverage mode for compact strips.
+ *
+ * FULL:
+ *   Strip stores the full tile surface.
+ * HALF:
+ *   Strip stores half surface. Missing half is reconstructed with flip flags.
+ * QUARTER:
+ *   Strip stores quarter surface. Remaining quadrants are reconstructed with
+ *   horizontal/vertical flips.
+ *
+ * In this version, stripCoverage is active in PIP mode only.
+ */
+typedef enum
+{
+    GAUGE_STRIP_COVERAGE_FULL    = 0,
+    GAUGE_STRIP_COVERAGE_HALF    = 1,
+    GAUGE_STRIP_COVERAGE_QUARTER = 2
+} GaugeStripCoverage;
 
 /**
  * Gauge trail behavior mode.
@@ -860,24 +881,41 @@ typedef struct
     const u32 **gainBlinkOffTilesetCapStartTrailBySegment;/* [segmentCount] CAP START TRAIL: 45-tile strips */
 
     /* --- PIP compact style (optional, per segment) ---
-     * Compact strip layout (width = pipWidthBySegment[segId]):
-     *   state 0: EMPTY     [0 .. width-1]
-     *   state 1: VALUE     [width .. 2*width-1]
-     *   state 2: LOSS      [2*width .. 3*width-1]
-     *   state 3: GAIN      [3*width .. 4*width-1]
-     *   state 4: BLINK_OFF [4*width .. 5*width-1]
-     * Actual number of states per segment is derived from:
-     *   pipStateCountBySegment[segId] = pipTileset->numTile / pipWidth
+     * Compact strip packing order is: row -> state -> col (SGDK row-major atlas).
+     * For one segment:
+     *   index = row * (sourceWidth * stateCount) + state * sourceWidth + col
+     *
+     * stateCount/source surface are derived from tileset size + stripCoverage.
+     * Stored metadata per segment:
+     *   - pipSourceWidthBySegment / pipSourceHeightBySegment
+     *   - pipStripCoverageBySegment / pipHalfAxisBySegment
+     *
+     * Offset is applied on transverse axis only:
+     *   - horizontal gauge: Y += segmentOffsetTiles + row
+     *   - vertical gauge:   X += segmentOffsetTiles + row
      */
-    const u32 **pipTilesetBySegment;              /* [segmentCount] compact strip: stateCount*width tiles */
+    const u32 **pipTilesetBySegment;              /* [segmentCount] compact strip: stateCount*width*height tiles */
     u8 *pipWidthBySegment;                        /* [segmentCount] width in tiles per segment style */
+    u8 *pipHeightBySegment;                       /* [segmentCount] height in tiles per segment style (1..4) */
+    u8 *pipOffsetBySegment;                       /* [segmentCount] transverse offset in tiles (>=0) */
     u8 *pipStateCountBySegment;                   /* [segmentCount] number of states (>=2: EMPTY, VALUE) */
+    u8 *pipStripCoverageBySegment;                /* [segmentCount] GaugeStripCoverage */
+    u8 *pipHalfAxisBySegment;                     /* [segmentCount] HALF mode axis: 0=horizontal, 1=vertical */
+    u8 *pipSourceWidthBySegment;                  /* [segmentCount] source surface width in tiles per state */
+    u8 *pipSourceHeightBySegment;                 /* [segmentCount] source surface height in tiles per state */
 
-    /* --- PIP metadata (auto-built from fill order + pipWidthBySegment) --- */
+    /* --- PIP metadata (auto-built from fill order + per-segment PIP styles) --- */
     u8 pipCount;                                   /* number of logical pips in this layout */
     u8 *pipIndexByFillIndex;                       /* [length] fillIndex -> pip index */
     u8 *pipLocalTileByFillIndex;                   /* [length] fillIndex -> local tile inside pip */
     u8 *pipWidthByPipIndex;                        /* [length] pip index -> width in tiles */
+    u8 pipRenderCount;                             /* number of physical PIP tiles to render (height-expanded) */
+    u8 *pipRenderFillIndexByRenderIndex;           /* [pipRenderCount] render index -> fillIndex */
+    u8 *pipRenderRowByRenderIndex;                 /* [pipRenderCount] render index -> row inside segment (0..height-1) */
+    u8 *pipRenderSourceColByRenderIndex;           /* [pipRenderCount] render index -> source col in strip */
+    u8 *pipRenderSourceRowByRenderIndex;           /* [pipRenderCount] render index -> source row in strip */
+    u8 *pipRenderExtraHFlipByRenderIndex;          /* [pipRenderCount] render index -> extra HFLIP from coverage */
+    u8 *pipRenderExtraVFlipByRenderIndex;          /* [pipRenderCount] render index -> extra VFLIP from coverage */
 
     /* --- Segment boundary LUTs (by fillIndex) ---
      *
@@ -1163,6 +1201,9 @@ typedef struct
     u16 vramTileIndex;              /* VRAM tile index for this cell */
     u8 cachedFillIndex;               /* Last fill index uploaded (0xFF=none) */
     u8 cellIndex;                   /* Index in layout (for fill calculation) */
+    u8 pipFillIndex;                /* PIP render: source fillIndex (CACHE_INVALID_U8 when unused) */
+    u8 pipRow;                      /* PIP render: local row in segment (0..height-1) */
+    u8 pipRenderIndex;              /* PIP render: physical render index in layout LUTs */
 } GaugeStreamCell;
 
 
@@ -1441,10 +1482,21 @@ typedef struct
  * - cap-start uses start segment assets (end/body/trail mapping).
  * - cap-end uses end segment assets (end fallback body).
  * No dedicated cap tilesets are required in the public API.
+ *
+ * Segment geometry extensions:
+ * - segmentHeightTiles controls rendered segment height (in tiles).
+ * - segmentOffsetTiles applies a positive transverse offset (in tiles):
+ *   horizontal gauges offset on Y, vertical gauges offset on X.
+ * - stripCoverage controls compact strip coverage in PIP mode:
+ *   FULL (default), HALF, or QUARTER.
+ * In this version, these fields are active for PIP rendering.
  */
 typedef struct
 {
     u8 cellCount;                    /* Number of cells covered by this segment */
+    u8 segmentHeightTiles;           /* Segment height in tiles (PIP active now, FILL reserved for later) */
+    u8 segmentOffsetTiles;           /* Positive transverse offset in tiles (PIP active now, FILL reserved for later) */
+    u8 stripCoverage;                /* GaugeStripCoverage (PIP only in this version) */
     GaugeSegmentAssets normal;       /* Base strips (FILL mode) */
     GaugeSegmentAssets gain;         /* Gain strips (FILL mode) */
     GaugeSegmentAssets blinkOff;     /* Blink-off strips (FILL mode) */
@@ -1456,8 +1508,12 @@ typedef struct
  * Builder convenience macros (SGDK-friendly).
  *
  * GAUGE_SEGMENT_TILESETS(...) converts TileSet pointers to GaugeSegmentAssets.
- * GAUGE_SEGMENT_ATTR(...) builds a FILL-mode segment definition.
- * GAUGE_PIP_SEGMENT_TILESET(...) builds a PIP-mode segment definition.
+ * GAUGE_SEGMENT_ATTR(...) builds FILL-mode segments.
+ * GAUGE_PIP_SEGMENT_TILESET(...) / GAUGE_PIP_SEGMENT_TILESET_EX(...) build PIP-mode segments.
+ * Non-EX macros default to segmentHeightTiles=1, segmentOffsetTiles=0,
+ * and stripCoverage=GAUGE_STRIP_COVERAGE_FULL.
+ * _EX signature:
+ *   (logicalCellCount, pipTilesetRef, pipWidth, heightTiles, offsetTiles, stripCoverage)
  *
  * Example:
  *   GaugeSegmentDefinition segment = GAUGE_SEGMENT_ATTR(
@@ -1477,6 +1533,9 @@ typedef struct
 #define GAUGE_SEGMENT_ATTR(cellCountValue, normalAssets, gainAssets, blinkOffAssets) \
     ((GaugeSegmentDefinition){ \
         .cellCount = (cellCountValue), \
+        .segmentHeightTiles = 1, \
+        .segmentOffsetTiles = 0, \
+        .stripCoverage = GAUGE_STRIP_COVERAGE_FULL, \
         .normal = (normalAssets), \
         .gain = (gainAssets), \
         .blinkOff = (blinkOffAssets), \
@@ -1485,8 +1544,14 @@ typedef struct
     })
 
 #define GAUGE_PIP_SEGMENT_TILESET(logicalCellCount, pipTilesetRef, pipWidthValue) \
+    GAUGE_PIP_SEGMENT_TILESET_EX((logicalCellCount), (pipTilesetRef), (pipWidthValue), 1, 0, GAUGE_STRIP_COVERAGE_FULL)
+
+#define GAUGE_PIP_SEGMENT_TILESET_EX(logicalCellCount, pipTilesetRef, pipWidthValue, heightTilesValue, offsetTilesValue, stripCoverageValue) \
     ((GaugeSegmentDefinition){ \
         .cellCount = (logicalCellCount), \
+        .segmentHeightTiles = (heightTilesValue), \
+        .segmentOffsetTiles = (offsetTilesValue), \
+        .stripCoverage = (stripCoverageValue), \
         .normal = GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL), \
         .gain = GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL), \
         .blinkOff = GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL), \
@@ -1561,6 +1626,10 @@ u8 GaugeBuilder_init(GaugeBuilder *builder, const GaugeDescription *description)
  * Append one segment definition to a target part.
  * partIndex = 0 for master, >=1 for slaves (in add order).
  * Segment order is call order (first add = segment 0).
+ * In PIP mode:
+ * - segmentHeightTiles must be in [1..4]
+ * - stripCoverage geometry must match pipTileset size
+ * - resulting stateCount must be >= 2.
  */
 u8 GaugeBuilder_addSegment(GaugeBuilder *builder,
                            u8 partIndex,

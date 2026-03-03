@@ -101,6 +101,9 @@ static void gauge_free_ptr(void **ptr)
 #define PIP_STATE_LOSS       2
 #define PIP_STATE_GAIN       3
 #define PIP_STATE_BLINK_OFF  4
+#define PIP_HALF_AXIS_HORIZONTAL 0
+#define PIP_HALF_AXIS_VERTICAL   1
+#define GAUGE_PIP_MAX_RENDER_TILES (GAUGE_MAX_LENGTH * 4)
 
 /* Pre-computed strip indices for trivial cell states (avoid LUT indexing in hot path) */
 #define STRIP_INDEX_EMPTY       0   /* s_tileIndexByValueTrail[0][0] : value=0, trail=0 */
@@ -2005,7 +2008,13 @@ void GaugeLayout_setGainBlinkOffTilesets(GaugeLayout *layout,
 void GaugeLayout_setPipStyles(GaugeLayout *layout,
                               const u32 * const *pipTilesets,
                               const u8 *pipWidthBySegment,
-                              const u8 *pipStateCountBySegment);
+                              const u8 *pipHeightBySegment,
+                              const u8 *pipOffsetBySegment,
+                              const u8 *pipStateCountBySegment,
+                              const u8 *pipStripCoverageBySegment,
+                              const u8 *pipHalfAxisBySegment,
+                              const u8 *pipSourceWidthBySegment,
+                              const u8 *pipSourceHeightBySegment);
 
 /* Internal gauge-part builders used by GaugeBuilder_build(). */
 u8 Gauge_addPartEx(Gauge *gauge,
@@ -2128,26 +2137,149 @@ static void build_bridge_luts(GaugeLayout *layout)
 }
 
 /**
- * Build PIP lookup tables (by fillIndex).
+ * Build PIP lookup tables.
  *
  * PIP boundaries are defined by contiguous runs of segment IDs in fill order.
  * For a given segment style, one logical pip spans pipWidthBySegment[segmentId] cells.
  * A run can therefore contain multiple pips with the same style.
+ *
+ * Also builds a physical render LUT for multi-height PIP:
+ * renderIndex -> (fillIndex,row), where row is [0..segmentHeight-1].
  */
+static inline void compute_pip_source_mapping(u8 stripCoverage,
+                                              u8 halfAxis,
+                                              u8 pipWidth,
+                                              u8 pipHeight,
+                                              u8 sourceWidth,
+                                              u8 sourceHeight,
+                                              u8 localCol,
+                                              u8 localRow,
+                                              u8 *outSourceCol,
+                                              u8 *outSourceRow,
+                                              u8 *outExtraHFlip,
+                                              u8 *outExtraVFlip)
+{
+    u8 sourceCol = localCol;
+    u8 sourceRow = localRow;
+    u8 extraHFlip = 0;
+    u8 extraVFlip = 0;
+
+    if (pipWidth == 0)
+        pipWidth = 1;
+    if (pipHeight == 0)
+        pipHeight = 1;
+    if (sourceWidth == 0)
+        sourceWidth = 1;
+    if (sourceHeight == 0)
+        sourceHeight = 1;
+    if (localCol >= pipWidth)
+        localCol = 0;
+    if (localRow >= pipHeight)
+        localRow = 0;
+
+    if (stripCoverage == GAUGE_STRIP_COVERAGE_HALF)
+    {
+        if (halfAxis == PIP_HALF_AXIS_VERTICAL)
+        {
+            /* Right side mirrored from left side via HFLIP. */
+            if (localCol < sourceWidth)
+            {
+                sourceCol = localCol;
+            }
+            else
+            {
+                sourceCol = (u8)(pipWidth - 1 - localCol);
+                extraHFlip = 1;
+            }
+            sourceRow = localRow;
+        }
+        else
+        {
+            /* Bottom side mirrored from top side via VFLIP. */
+            sourceCol = localCol;
+            if (localRow < sourceHeight)
+            {
+                sourceRow = localRow;
+            }
+            else
+            {
+                sourceRow = (u8)(pipHeight - 1 - localRow);
+                extraVFlip = 1;
+            }
+        }
+    }
+    else if (stripCoverage == GAUGE_STRIP_COVERAGE_QUARTER)
+    {
+        /* Reconstruct right half with HFLIP and bottom half with VFLIP. */
+        if (localCol < sourceWidth)
+        {
+            sourceCol = localCol;
+        }
+        else
+        {
+            sourceCol = (u8)(pipWidth - 1 - localCol);
+            extraHFlip = 1;
+        }
+
+        if (localRow < sourceHeight)
+        {
+            sourceRow = localRow;
+        }
+        else
+        {
+            sourceRow = (u8)(pipHeight - 1 - localRow);
+            extraVFlip = 1;
+        }
+    }
+    else
+    {
+        /* FULL coverage: direct lookup. */
+        sourceCol = localCol;
+        sourceRow = localRow;
+    }
+
+    if (sourceCol >= sourceWidth)
+        sourceCol = 0;
+    if (sourceRow >= sourceHeight)
+        sourceRow = 0;
+
+    *outSourceCol = sourceCol;
+    *outSourceRow = sourceRow;
+    *outExtraHFlip = extraHFlip;
+    *outExtraVFlip = extraVFlip;
+}
+
 static void build_pip_luts(GaugeLayout *layout)
 {
     const u8 hasPipStyles =
         segment_tileset_array_has_any(layout->pipTilesetBySegment, layout->segmentCount);
+    u16 computedRenderCount = (u16)layout->length * 4u;
+    if (computedRenderCount > GAUGE_PIP_MAX_RENDER_TILES)
+        computedRenderCount = GAUGE_PIP_MAX_RENDER_TILES;
+    const u8 maxRenderCount = (u8)computedRenderCount;
 
     if (!hasPipStyles)
     {
         layout->pipCount = 0;
+        layout->pipRenderCount = 0;
         layout_free_optional_ptr((void **)&layout->pipIndexByFillIndex, s_invalidCellIndexes, NULL, NULL);
         layout_free_optional_ptr((void **)&layout->pipLocalTileByFillIndex, s_zeroCellFlags, NULL, NULL);
         layout_free_optional_ptr((void **)&layout->pipWidthByPipIndex, s_oneCellFlags, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipRenderFillIndexByRenderIndex, s_invalidCellIndexes, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipRenderRowByRenderIndex, s_zeroCellFlags, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipRenderSourceColByRenderIndex, s_zeroCellFlags, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipRenderSourceRowByRenderIndex, s_zeroCellFlags, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipRenderExtraHFlipByRenderIndex, s_zeroCellFlags, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipRenderExtraVFlipByRenderIndex, s_zeroCellFlags, NULL, NULL);
         layout->pipIndexByFillIndex = (u8 *)s_invalidCellIndexes;
         layout->pipLocalTileByFillIndex = (u8 *)s_zeroCellFlags;
         layout->pipWidthByPipIndex = (u8 *)s_oneCellFlags;
+        layout->pipRenderFillIndexByRenderIndex = (u8 *)s_invalidCellIndexes;
+        layout->pipRenderRowByRenderIndex = (u8 *)s_zeroCellFlags;
+        layout->pipRenderSourceColByRenderIndex = (u8 *)s_zeroCellFlags;
+        layout->pipRenderSourceRowByRenderIndex = (u8 *)s_zeroCellFlags;
+        layout->pipRenderExtraHFlipByRenderIndex = (u8 *)s_zeroCellFlags;
+        layout->pipRenderExtraVFlipByRenderIndex = (u8 *)s_zeroCellFlags;
         return;
     }
 
@@ -2162,26 +2294,73 @@ static void build_pip_luts(GaugeLayout *layout)
         !layout_ensure_cell_flag_storage(&layout->pipWidthByPipIndex,
                                          layout->length,
                                          s_oneCellFlags,
-                                         1))
+                                         1) ||
+        !layout_ensure_cell_flag_storage(&layout->pipRenderFillIndexByRenderIndex,
+                                         maxRenderCount,
+                                         s_invalidCellIndexes,
+                                         CACHE_INVALID_U8) ||
+        !layout_ensure_cell_flag_storage(&layout->pipRenderRowByRenderIndex,
+                                         maxRenderCount,
+                                         s_zeroCellFlags,
+                                         0) ||
+        !layout_ensure_cell_flag_storage(&layout->pipRenderSourceColByRenderIndex,
+                                         maxRenderCount,
+                                         s_zeroCellFlags,
+                                         0) ||
+        !layout_ensure_cell_flag_storage(&layout->pipRenderSourceRowByRenderIndex,
+                                         maxRenderCount,
+                                         s_zeroCellFlags,
+                                         0) ||
+        !layout_ensure_cell_flag_storage(&layout->pipRenderExtraHFlipByRenderIndex,
+                                         maxRenderCount,
+                                         s_zeroCellFlags,
+                                         0) ||
+        !layout_ensure_cell_flag_storage(&layout->pipRenderExtraVFlipByRenderIndex,
+                                         maxRenderCount,
+                                         s_zeroCellFlags,
+                                         0))
     {
         KLog("Gauge pip LUT alloc failed");
         layout->pipCount = 0;
+        layout->pipRenderCount = 0;
         layout_free_optional_ptr((void **)&layout->pipIndexByFillIndex, s_invalidCellIndexes, NULL, NULL);
         layout_free_optional_ptr((void **)&layout->pipLocalTileByFillIndex, s_zeroCellFlags, NULL, NULL);
         layout_free_optional_ptr((void **)&layout->pipWidthByPipIndex, s_oneCellFlags, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipRenderFillIndexByRenderIndex, s_invalidCellIndexes, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipRenderRowByRenderIndex, s_zeroCellFlags, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipRenderSourceColByRenderIndex, s_zeroCellFlags, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipRenderSourceRowByRenderIndex, s_zeroCellFlags, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipRenderExtraHFlipByRenderIndex, s_zeroCellFlags, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipRenderExtraVFlipByRenderIndex, s_zeroCellFlags, NULL, NULL);
         layout->pipIndexByFillIndex = (u8 *)s_invalidCellIndexes;
         layout->pipLocalTileByFillIndex = (u8 *)s_zeroCellFlags;
         layout->pipWidthByPipIndex = (u8 *)s_oneCellFlags;
+        layout->pipRenderFillIndexByRenderIndex = (u8 *)s_invalidCellIndexes;
+        layout->pipRenderRowByRenderIndex = (u8 *)s_zeroCellFlags;
+        layout->pipRenderSourceColByRenderIndex = (u8 *)s_zeroCellFlags;
+        layout->pipRenderSourceRowByRenderIndex = (u8 *)s_zeroCellFlags;
+        layout->pipRenderExtraHFlipByRenderIndex = (u8 *)s_zeroCellFlags;
+        layout->pipRenderExtraVFlipByRenderIndex = (u8 *)s_zeroCellFlags;
         return;
     }
 
     layout->pipCount = 0;
+    layout->pipRenderCount = 0;
 
     for (u8 i = 0; i < layout->length; i++)
     {
         layout->pipIndexByFillIndex[i] = CACHE_INVALID_U8;
         layout->pipLocalTileByFillIndex[i] = 0;
         layout->pipWidthByPipIndex[i] = 1;
+    }
+    for (u8 i = 0; i < maxRenderCount; i++)
+    {
+        layout->pipRenderFillIndexByRenderIndex[i] = CACHE_INVALID_U8;
+        layout->pipRenderRowByRenderIndex[i] = 0;
+        layout->pipRenderSourceColByRenderIndex[i] = 0;
+        layout->pipRenderSourceRowByRenderIndex[i] = 0;
+        layout->pipRenderExtraHFlipByRenderIndex[i] = 0;
+        layout->pipRenderExtraVFlipByRenderIndex[i] = 0;
     }
 
     u8 fillIndex = 0;
@@ -2221,6 +2400,67 @@ static void build_pip_luts(GaugeLayout *layout)
             fillIndex = (u8)(fillIndex + pipWidth);
             remaining = (u8)(remaining - pipWidth);
             layout->pipCount++;
+        }
+    }
+
+    /* Build physical render LUT: each fillIndex is duplicated by segment height. */
+    for (u8 i = 0; i < layout->length && layout->pipRenderCount < maxRenderCount; i++)
+    {
+        const u8 fillCellIndex = layout->cellIndexByFillIndex[i];
+        const u8 segmentId = layout->segmentIdByCell[fillCellIndex];
+        const u8 pipIndex = layout->pipIndexByFillIndex[i];
+        u8 pipWidth = 1;
+        if (pipIndex != CACHE_INVALID_U8)
+            pipWidth = layout->pipWidthByPipIndex[pipIndex];
+        if (pipWidth == 0)
+            pipWidth = 1;
+
+        u8 pipHeight = layout->pipHeightBySegment[segmentId];
+        if (pipHeight == 0)
+            pipHeight = 1;
+        if (pipHeight > 4)
+            pipHeight = 4;
+
+        u8 sourceWidth = layout->pipSourceWidthBySegment[segmentId];
+        if (sourceWidth == 0)
+            sourceWidth = pipWidth;
+        u8 sourceHeight = layout->pipSourceHeightBySegment[segmentId];
+        if (sourceHeight == 0)
+            sourceHeight = pipHeight;
+
+        const u8 stripCoverage = layout->pipStripCoverageBySegment[segmentId];
+        const u8 halfAxis = layout->pipHalfAxisBySegment[segmentId];
+        u8 localTile = layout->pipLocalTileByFillIndex[i];
+        if (localTile >= pipWidth)
+            localTile = 0;
+
+        for (u8 row = 0; row < pipHeight && layout->pipRenderCount < maxRenderCount; row++)
+        {
+            u8 sourceCol = localTile;
+            u8 sourceRow = row;
+            u8 extraHFlip = 0;
+            u8 extraVFlip = 0;
+            compute_pip_source_mapping(stripCoverage,
+                                       halfAxis,
+                                       pipWidth,
+                                       pipHeight,
+                                       sourceWidth,
+                                       sourceHeight,
+                                       localTile,
+                                       row,
+                                       &sourceCol,
+                                       &sourceRow,
+                                       &extraHFlip,
+                                       &extraVFlip);
+
+            const u8 renderIndex = layout->pipRenderCount;
+            layout->pipRenderFillIndexByRenderIndex[renderIndex] = i;
+            layout->pipRenderRowByRenderIndex[renderIndex] = row;
+            layout->pipRenderSourceColByRenderIndex[renderIndex] = sourceCol;
+            layout->pipRenderSourceRowByRenderIndex[renderIndex] = sourceRow;
+            layout->pipRenderExtraHFlipByRenderIndex[renderIndex] = extraHFlip;
+            layout->pipRenderExtraVFlipByRenderIndex[renderIndex] = extraVFlip;
+            layout->pipRenderCount++;
         }
     }
 }
@@ -2280,11 +2520,24 @@ static void layout_set_optional_views_to_defaults(GaugeLayout *layout)
 
     layout->pipTilesetBySegment = (const u32 **)s_nullSegmentTilesets;
     layout->pipWidthBySegment = (u8 *)s_oneSegmentFlags;
+    layout->pipHeightBySegment = (u8 *)s_oneSegmentFlags;
+    layout->pipOffsetBySegment = (u8 *)s_zeroSegmentFlags;
     layout->pipStateCountBySegment = (u8 *)s_zeroSegmentFlags;
+    layout->pipStripCoverageBySegment = (u8 *)s_zeroSegmentFlags;
+    layout->pipHalfAxisBySegment = (u8 *)s_zeroSegmentFlags;
+    layout->pipSourceWidthBySegment = (u8 *)s_oneSegmentFlags;
+    layout->pipSourceHeightBySegment = (u8 *)s_oneSegmentFlags;
 
     layout->pipIndexByFillIndex = (u8 *)s_invalidCellIndexes;
     layout->pipLocalTileByFillIndex = (u8 *)s_zeroCellFlags;
     layout->pipWidthByPipIndex = (u8 *)s_oneCellFlags;
+    layout->pipRenderCount = 0;
+    layout->pipRenderFillIndexByRenderIndex = (u8 *)s_invalidCellIndexes;
+    layout->pipRenderRowByRenderIndex = (u8 *)s_zeroCellFlags;
+    layout->pipRenderSourceColByRenderIndex = (u8 *)s_zeroCellFlags;
+    layout->pipRenderSourceRowByRenderIndex = (u8 *)s_zeroCellFlags;
+    layout->pipRenderExtraHFlipByRenderIndex = (u8 *)s_zeroCellFlags;
+    layout->pipRenderExtraVFlipByRenderIndex = (u8 *)s_zeroCellFlags;
 
     layout->bridgeEndByFillIndex = (u8 *)s_zeroCellFlags;
     layout->bridgeBreakByFillIndex = (u8 *)s_zeroCellFlags;
@@ -2535,11 +2788,23 @@ static void layout_free_buffers(GaugeLayout *layout)
 
     layout_free_optional_ptr((void **)&layout->pipTilesetBySegment, s_nullSegmentTilesets, NULL, NULL);
     layout_free_optional_ptr((void **)&layout->pipWidthBySegment, s_oneSegmentFlags, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->pipHeightBySegment, s_oneSegmentFlags, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->pipOffsetBySegment, s_zeroSegmentFlags, NULL, NULL);
     layout_free_optional_ptr((void **)&layout->pipStateCountBySegment, s_zeroSegmentFlags, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->pipStripCoverageBySegment, s_zeroSegmentFlags, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->pipHalfAxisBySegment, s_zeroSegmentFlags, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->pipSourceWidthBySegment, s_oneSegmentFlags, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->pipSourceHeightBySegment, s_oneSegmentFlags, NULL, NULL);
 
     layout_free_optional_ptr((void **)&layout->pipIndexByFillIndex, s_invalidCellIndexes, NULL, NULL);
     layout_free_optional_ptr((void **)&layout->pipLocalTileByFillIndex, s_zeroCellFlags, NULL, NULL);
     layout_free_optional_ptr((void **)&layout->pipWidthByPipIndex, s_oneCellFlags, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->pipRenderFillIndexByRenderIndex, s_invalidCellIndexes, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->pipRenderRowByRenderIndex, s_zeroCellFlags, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->pipRenderSourceColByRenderIndex, s_zeroCellFlags, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->pipRenderSourceRowByRenderIndex, s_zeroCellFlags, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->pipRenderExtraHFlipByRenderIndex, s_zeroCellFlags, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->pipRenderExtraVFlipByRenderIndex, s_zeroCellFlags, NULL, NULL);
 
     layout_free_optional_ptr((void **)&layout->bridgeEndByFillIndex, s_zeroCellFlags, NULL, NULL);
     layout_free_optional_ptr((void **)&layout->bridgeBreakByFillIndex, s_zeroCellFlags, NULL, NULL);
@@ -2548,6 +2813,7 @@ static void layout_free_buffers(GaugeLayout *layout)
     layout->length = 0;
     layout->segmentCount = 0;
     layout->pipCount = 0;
+    layout->pipRenderCount = 0;
     layout_set_optional_views_to_defaults(layout);
     layout_zero_optional_flags(layout);
 }
@@ -2577,6 +2843,7 @@ static u8 layout_alloc_buffers(GaugeLayout *layout, u8 length, u8 segmentCount)
     layout->length = length;
     layout->segmentCount = segmentCount;
     layout->pipCount = 0;
+    layout->pipRenderCount = 0;
     layout_set_optional_views_to_defaults(layout);
 
     return 1;
@@ -2823,7 +3090,13 @@ void GaugeLayout_makeMirror(GaugeLayout *dst, const GaugeLayout *src)
     GaugeLayout_setPipStyles(dst,
                              src->pipTilesetBySegment,
                              src->pipWidthBySegment,
-                             src->pipStateCountBySegment);
+                             src->pipHeightBySegment,
+                             src->pipOffsetBySegment,
+                             src->pipStateCountBySegment,
+                             src->pipStripCoverageBySegment,
+                             src->pipHalfAxisBySegment,
+                             src->pipSourceWidthBySegment,
+                             src->pipSourceHeightBySegment);
 
     /* Opposite fill direction from source */
     if (src->fillIndexByCell[0] == 0)
@@ -3123,13 +3396,25 @@ void GaugeLayout_setGainBlinkOffTilesets(GaugeLayout *layout,
 void GaugeLayout_setPipStyles(GaugeLayout *layout,
                               const u32 * const *pipTilesets,
                               const u8 *pipWidthBySegment,
-                              const u8 *pipStateCountBySegment)
+                              const u8 *pipHeightBySegment,
+                              const u8 *pipOffsetBySegment,
+                              const u8 *pipStateCountBySegment,
+                              const u8 *pipStripCoverageBySegment,
+                              const u8 *pipHalfAxisBySegment,
+                              const u8 *pipSourceWidthBySegment,
+                              const u8 *pipSourceHeightBySegment)
 {
     if (!layout)
         return;
 
     const u8 hasPipStyles = segment_tileset_array_has_any(pipTilesets, layout->segmentCount);
     u8 hasCustomWidths = 0;
+    u8 hasCustomHeights = 0;
+    u8 hasCustomOffsets = 0;
+    u8 hasCustomCoverage = 0;
+    u8 hasCustomHalfAxis = 0;
+    u8 hasCustomSourceWidths = 0;
+    u8 hasCustomSourceHeights = 0;
 
     if (hasPipStyles && pipWidthBySegment)
     {
@@ -3138,6 +3423,72 @@ void GaugeLayout_setPipStyles(GaugeLayout *layout,
             if (pipWidthBySegment[segmentId] > 1)
             {
                 hasCustomWidths = 1;
+                break;
+            }
+        }
+    }
+    if (hasPipStyles && pipHeightBySegment)
+    {
+        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
+        {
+            if (pipHeightBySegment[segmentId] > 1)
+            {
+                hasCustomHeights = 1;
+                break;
+            }
+        }
+    }
+    if (hasPipStyles && pipOffsetBySegment)
+    {
+        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
+        {
+            if (pipOffsetBySegment[segmentId] != 0)
+            {
+                hasCustomOffsets = 1;
+                break;
+            }
+        }
+    }
+    if (hasPipStyles && pipStripCoverageBySegment)
+    {
+        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
+        {
+            if (pipStripCoverageBySegment[segmentId] != GAUGE_STRIP_COVERAGE_FULL)
+            {
+                hasCustomCoverage = 1;
+                break;
+            }
+        }
+    }
+    if (hasPipStyles && pipHalfAxisBySegment)
+    {
+        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
+        {
+            if (pipHalfAxisBySegment[segmentId] != PIP_HALF_AXIS_HORIZONTAL)
+            {
+                hasCustomHalfAxis = 1;
+                break;
+            }
+        }
+    }
+    if (hasPipStyles && pipSourceWidthBySegment)
+    {
+        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
+        {
+            if (pipSourceWidthBySegment[segmentId] > 1)
+            {
+                hasCustomSourceWidths = 1;
+                break;
+            }
+        }
+    }
+    if (hasPipStyles && pipSourceHeightBySegment)
+    {
+        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
+        {
+            if (pipSourceHeightBySegment[segmentId] > 1)
+            {
+                hasCustomSourceHeights = 1;
                 break;
             }
         }
@@ -3156,12 +3507,54 @@ void GaugeLayout_setPipStyles(GaugeLayout *layout,
         1,
         "Gauge pip width alloc failed");
     layout_sync_optional_segment_flags_by_usage(
+        hasPipStyles && hasCustomHeights,
+        &layout->pipHeightBySegment,
+        layout->segmentCount,
+        s_oneSegmentFlags,
+        1,
+        "Gauge pip height alloc failed");
+    layout_sync_optional_segment_flags_by_usage(
+        hasPipStyles && hasCustomOffsets,
+        &layout->pipOffsetBySegment,
+        layout->segmentCount,
+        s_zeroSegmentFlags,
+        0,
+        "Gauge pip offset alloc failed");
+    layout_sync_optional_segment_flags_by_usage(
         hasPipStyles,
         &layout->pipStateCountBySegment,
         layout->segmentCount,
         s_zeroSegmentFlags,
         0,
         "Gauge pip state count alloc failed");
+    layout_sync_optional_segment_flags_by_usage(
+        hasPipStyles && hasCustomCoverage,
+        &layout->pipStripCoverageBySegment,
+        layout->segmentCount,
+        s_zeroSegmentFlags,
+        GAUGE_STRIP_COVERAGE_FULL,
+        "Gauge pip coverage alloc failed");
+    layout_sync_optional_segment_flags_by_usage(
+        hasPipStyles && hasCustomHalfAxis,
+        &layout->pipHalfAxisBySegment,
+        layout->segmentCount,
+        s_zeroSegmentFlags,
+        PIP_HALF_AXIS_HORIZONTAL,
+        "Gauge pip half-axis alloc failed");
+    layout_sync_optional_segment_flags_by_usage(
+        hasPipStyles && hasCustomSourceWidths,
+        &layout->pipSourceWidthBySegment,
+        layout->segmentCount,
+        s_oneSegmentFlags,
+        1,
+        "Gauge pip source width alloc failed");
+    layout_sync_optional_segment_flags_by_usage(
+        hasPipStyles && hasCustomSourceHeights,
+        &layout->pipSourceHeightBySegment,
+        layout->segmentCount,
+        s_oneSegmentFlags,
+        1,
+        "Gauge pip source height alloc failed");
 
     layout_copy_segment_tilesets(layout->pipTilesetBySegment, pipTilesets, layout->segmentCount);
     if (layout->pipWidthBySegment != s_oneSegmentFlags)
@@ -3174,12 +3567,74 @@ void GaugeLayout_setPipStyles(GaugeLayout *layout,
             layout->pipWidthBySegment[segmentId] = widthInTiles;
         }
     }
+    if (layout->pipHeightBySegment != s_oneSegmentFlags)
+    {
+        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
+        {
+            u8 heightInTiles = pipHeightBySegment ? pipHeightBySegment[segmentId] : 1;
+            if (heightInTiles == 0)
+                heightInTiles = 1;
+            if (heightInTiles > 4)
+                heightInTiles = 4;
+            layout->pipHeightBySegment[segmentId] = heightInTiles;
+        }
+    }
+    if (layout->pipOffsetBySegment != s_zeroSegmentFlags)
+    {
+        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
+        {
+            const u8 offsetTiles = pipOffsetBySegment ? pipOffsetBySegment[segmentId] : 0;
+            layout->pipOffsetBySegment[segmentId] = offsetTiles;
+        }
+    }
     if (layout->pipStateCountBySegment != s_zeroSegmentFlags)
     {
         for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
         {
             u8 stateCount = pipStateCountBySegment ? pipStateCountBySegment[segmentId] : 0;
             layout->pipStateCountBySegment[segmentId] = stateCount;
+        }
+    }
+    if (layout->pipStripCoverageBySegment != s_zeroSegmentFlags)
+    {
+        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
+        {
+            u8 coverage = pipStripCoverageBySegment ? pipStripCoverageBySegment[segmentId] : GAUGE_STRIP_COVERAGE_FULL;
+            if (coverage > GAUGE_STRIP_COVERAGE_QUARTER)
+                coverage = GAUGE_STRIP_COVERAGE_FULL;
+            layout->pipStripCoverageBySegment[segmentId] = coverage;
+        }
+    }
+    if (layout->pipHalfAxisBySegment != s_zeroSegmentFlags)
+    {
+        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
+        {
+            u8 halfAxis = pipHalfAxisBySegment ? pipHalfAxisBySegment[segmentId] : PIP_HALF_AXIS_HORIZONTAL;
+            if (halfAxis > PIP_HALF_AXIS_VERTICAL)
+                halfAxis = PIP_HALF_AXIS_HORIZONTAL;
+            layout->pipHalfAxisBySegment[segmentId] = halfAxis;
+        }
+    }
+    if (layout->pipSourceWidthBySegment != s_oneSegmentFlags)
+    {
+        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
+        {
+            u8 sourceWidth = pipSourceWidthBySegment ? pipSourceWidthBySegment[segmentId] : 1;
+            if (sourceWidth == 0)
+                sourceWidth = 1;
+            layout->pipSourceWidthBySegment[segmentId] = sourceWidth;
+        }
+    }
+    if (layout->pipSourceHeightBySegment != s_oneSegmentFlags)
+    {
+        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
+        {
+            u8 sourceHeight = pipSourceHeightBySegment ? pipSourceHeightBySegment[segmentId] : 1;
+            if (sourceHeight == 0)
+                sourceHeight = 1;
+            if (sourceHeight > 4)
+                sourceHeight = 4;
+            layout->pipSourceHeightBySegment[segmentId] = sourceHeight;
         }
     }
 
@@ -4380,10 +4835,54 @@ static void init_dynamic_tilemap(GaugePart *part)
 }
 
 /**
+ * Compute tile position for one physical PIP render tile.
+ *
+ * Base position comes from fillIndex timeline.
+ * Then a positive transverse shift is applied:
+ * - horizontal gauge: Y += segmentOffsetTiles + row
+ * - vertical gauge:   X += segmentOffsetTiles + row
+ */
+static inline void compute_pip_render_xy(const GaugeLayout *layout,
+                                         u16 originX,
+                                         u16 originY,
+                                         u8 fillIndex,
+                                         u8 row,
+                                         u16 *outX,
+                                         u16 *outY)
+{
+    const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
+    const u8 segmentId = layout->segmentIdByCell[cellIndex];
+    const u16 transverseShift = (u16)layout->pipOffsetBySegment[segmentId] + row;
+
+    compute_tile_xy(layout->orientation, originX, originY, cellIndex, outX, outY);
+    if (layout->orientation == GAUGE_ORIENT_HORIZONTAL)
+        *outY = (u16)(*outY + transverseShift);
+    else
+        *outX = (u16)(*outX + transverseShift);
+}
+
+/**
+ * Compute compact PIP strip index for SGDK row-major tilesets.
+ *
+ * Packing order is row -> state -> col:
+ *   index = row * (sourceWidth * pipStateCount) + pipState * sourceWidth + sourceCol
+ */
+static inline u8 compute_pip_strip_index(u8 sourceWidth,
+                                         u8 pipStateCount,
+                                         u8 pipState,
+                                         u8 row,
+                                         u8 sourceCol)
+{
+    const u16 rowStride = (u16)sourceWidth * pipStateCount;
+    const u16 index = (u16)row * rowStride + (u16)pipState * sourceWidth + sourceCol;
+    return (u8)index;
+}
+
+/**
  * Initialize dynamic PIP VRAM layout with shared slots per segment/state.
  *
  * Slot mapping per segment:
- *   base + state * pipWidth + localTile
+ *   base + state * (sourceWidth * sourceHeight) + sourceRow * sourceWidth + sourceCol
  * where state is derived from the compact PIP strip state order.
  *
  * Runtime then updates only tilemap indices (no per-cell tile streaming).
@@ -4393,8 +4892,9 @@ static u8 init_dynamic_pip_vram(GaugePart *part)
     const GaugeLayout *layout = part->layout;
     GaugeDynamic *dyn = &part->dyn;
     u16 nextVram = part->vramBase;
+    const u8 renderCount = layout->pipRenderCount;
 
-    if (!alloc_dynamic_buffers(dyn, layout->segmentCount, layout->length))
+    if (!alloc_dynamic_buffers(dyn, layout->segmentCount, renderCount))
         return 0;
 
     for (u8 segmentId = 0; segmentId < dyn->segmentCount; segmentId++)
@@ -4426,10 +4926,10 @@ static u8 init_dynamic_pip_vram(GaugePart *part)
     dyn->loadedCapStartUsesBreak = CACHE_INVALID_U8;
     dyn->loadedCapStartUsesTrail = CACHE_INVALID_U8;
 
-    for (u8 cellIndex = 0; cellIndex < dyn->cellCount; cellIndex++)
+    for (u8 renderIndex = 0; renderIndex < dyn->cellCount; renderIndex++)
     {
-        dyn->cellCurrentTileIndex[cellIndex] = CACHE_INVALID_U16;
-        dyn->cellValid[cellIndex] = 0;
+        dyn->cellCurrentTileIndex[renderIndex] = CACHE_INVALID_U16;
+        dyn->cellValid[renderIndex] = 0;
     }
 
     /* Preload all states for each segment using the compact strip layout. */
@@ -4439,9 +4939,14 @@ static u8 init_dynamic_pip_vram(GaugePart *part)
         if (!pipStrip)
             continue;
 
-        u8 pipWidth = layout->pipWidthBySegment[segmentId];
-        if (pipWidth == 0)
-            pipWidth = 1;
+        u8 sourceWidth = layout->pipSourceWidthBySegment[segmentId];
+        if (sourceWidth == 0)
+            sourceWidth = 1;
+        u8 sourceHeight = layout->pipSourceHeightBySegment[segmentId];
+        if (sourceHeight == 0)
+            sourceHeight = 1;
+        if (sourceHeight > 4)
+            sourceHeight = 4;
 
         u8 pipStateCount = layout->pipStateCountBySegment[segmentId];
         if (pipStateCount < 2)
@@ -4451,61 +4956,67 @@ static u8 init_dynamic_pip_vram(GaugePart *part)
 
         for (u8 state = 0; state < pipStateCount; state++)
         {
-            for (u8 localTile = 0; localTile < pipWidth; localTile++)
+            for (u8 row = 0; row < sourceHeight; row++)
             {
-                const u8 stripIndex = (u8)(state * pipWidth + localTile);
-                upload_fill_tile(pipStrip, stripIndex, nextVram, DMA_QUEUE);
-                nextVram++;
+                for (u8 sourceCol = 0; sourceCol < sourceWidth; sourceCol++)
+                {
+                    const u8 stripIndex = compute_pip_strip_index(sourceWidth,
+                                                                   pipStateCount,
+                                                                   state,
+                                                                   row,
+                                                                   sourceCol);
+                    upload_fill_tile(pipStrip, stripIndex, nextVram, DMA_QUEUE);
+                    nextVram++;
+                }
             }
         }
     }
 
-    /* Initialize tilemap with EMPTY state for each local tile. */
-    for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
+    /* Initialize tilemap with EMPTY state for each render tile. */
+    for (u8 renderIndex = 0; renderIndex < renderCount; renderIndex++)
     {
-        compute_tile_xy(layout->orientation, part->originX, part->originY, cellIndex,
-                        &layout->tilemapPosByCell[cellIndex].x,
-                        &layout->tilemapPosByCell[cellIndex].y);
+        const u8 fillIndex = layout->pipRenderFillIndexByRenderIndex[renderIndex];
+        if (fillIndex == CACHE_INVALID_U8)
+            continue;
 
+        const u8 renderRow = layout->pipRenderRowByRenderIndex[renderIndex];
+        const u8 sourceCol = layout->pipRenderSourceColByRenderIndex[renderIndex];
+        const u8 sourceRow = layout->pipRenderSourceRowByRenderIndex[renderIndex];
+        const u8 extraHFlip = layout->pipRenderExtraHFlipByRenderIndex[renderIndex];
+        const u8 extraVFlip = layout->pipRenderExtraVFlipByRenderIndex[renderIndex];
+        const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
         const u8 segmentId = layout->segmentIdByCell[cellIndex];
         if (!layout->pipTilesetBySegment[segmentId] ||
             layout->pipStateCountBySegment[segmentId] < 2)
             continue;
 
         const u16 pipBaseTile = dyn->vramTilePipBase[segmentId];
+        u8 sourceWidth = layout->pipSourceWidthBySegment[segmentId];
+        if (sourceWidth == 0)
+            sourceWidth = 1;
 
-        const u8 fillIndex = layout->fillIndexByCell[cellIndex];
-        const u8 pipIndex = layout->pipIndexByFillIndex[fillIndex];
-        if (pipIndex == CACHE_INVALID_U8)
-            continue;
-
-        u8 pipWidth = layout->pipWidthByPipIndex[pipIndex];
-        if (pipWidth == 0)
-            pipWidth = 1;
-
-        u8 localTile = layout->pipLocalTileByFillIndex[fillIndex];
-        if (localTile >= pipWidth)
-            localTile = 0;
-
-        const u16 vramTile = (u16)(pipBaseTile + localTile);
+        const u16 vramTile = (u16)(pipBaseTile + sourceRow * sourceWidth + sourceCol);
         const u16 attr = TILE_ATTR_FULL(layout->palette, layout->priority,
-                                        layout->verticalFlip, layout->horizontalFlip, vramTile);
+                                        (u8)(layout->verticalFlip ^ extraVFlip),
+                                        (u8)(layout->horizontalFlip ^ extraHFlip),
+                                        vramTile);
 
-        VDP_setTileMapXY(WINDOW, attr,
-                         layout->tilemapPosByCell[cellIndex].x,
-                         layout->tilemapPosByCell[cellIndex].y);
+        u16 x = 0;
+        u16 y = 0;
+        compute_pip_render_xy(layout, part->originX, part->originY, fillIndex, renderRow, &x, &y);
+        VDP_setTileMapXY(WINDOW, attr, x, y);
 
-        dyn->cellCurrentTileIndex[cellIndex] = vramTile;
-        dyn->cellValid[cellIndex] = 1;
+        dyn->cellCurrentTileIndex[renderIndex] = vramTile;
+        dyn->cellValid[renderIndex] = 1;
     }
 
     return 1;
 }
 
 /**
- * Initialize tilemap for PIP mode (one VRAM tile per cell, fixed VRAM).
+ * Initialize tilemap for PIP mode (one VRAM tile per rendered PIP tile).
  *
- * Allocates one VRAM tile per cell, uploads the EMPTY state from each segment's
+ * Allocates one VRAM tile per render tile, uploads the EMPTY state from each segment's
  * compact strip, and writes the initial tilemap. Also sets up GaugeStreamCell
  * entries for per-cell DMA updates at runtime.
  *
@@ -4516,41 +5027,58 @@ static void write_tilemap_pip_init(GaugePart *part)
     const GaugeLayout *layout = part->layout;
     part->cellCount = 0;
 
-    for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
+    for (u8 renderIndex = 0; renderIndex < layout->pipRenderCount; renderIndex++)
     {
+        const u8 fillIndex = layout->pipRenderFillIndexByRenderIndex[renderIndex];
+        if (fillIndex == CACHE_INVALID_U8)
+            continue;
+        const u8 renderRow = layout->pipRenderRowByRenderIndex[renderIndex];
+        const u8 sourceCol = layout->pipRenderSourceColByRenderIndex[renderIndex];
+        const u8 sourceRow = layout->pipRenderSourceRowByRenderIndex[renderIndex];
+        const u8 extraHFlip = layout->pipRenderExtraHFlipByRenderIndex[renderIndex];
+        const u8 extraVFlip = layout->pipRenderExtraVFlipByRenderIndex[renderIndex];
+        const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
         const u8 segmentId = layout->segmentIdByCell[cellIndex];
         const u32 *pipStrip = layout->pipTilesetBySegment[segmentId];
         if (!pipStrip)
             continue;
+        const u8 pipStateCount = layout->pipStateCountBySegment[segmentId];
+        if (pipStateCount < 2)
+            continue;
 
-        if (part->cellCount >= layout->length)
+        if (part->cellCount >= layout->pipRenderCount)
             break;
 
         const u16 vramTile = (u16)(part->vramBase + part->cellCount);
         const u16 attr = TILE_ATTR_FULL(layout->palette, layout->priority,
-                                        layout->verticalFlip, layout->horizontalFlip, vramTile);
+                                        (u8)(layout->verticalFlip ^ extraVFlip),
+                                        (u8)(layout->horizontalFlip ^ extraHFlip),
+                                        vramTile);
 
-        u16 x, y;
-        compute_tile_xy(layout->orientation, part->originX, part->originY, cellIndex, &x, &y);
+        u16 x = 0;
+        u16 y = 0;
+        compute_pip_render_xy(layout, part->originX, part->originY, fillIndex, renderRow, &x, &y);
         VDP_setTileMapXY(WINDOW, attr, x, y);
 
-        const u8 fillIndex = layout->fillIndexByCell[cellIndex];
-        const u8 pipIndex = layout->pipIndexByFillIndex[fillIndex];
-        u8 pipWidth = (pipIndex == CACHE_INVALID_U8) ? 1 : layout->pipWidthByPipIndex[pipIndex];
-        if (pipWidth == 0)
-            pipWidth = 1;
-
-        u8 localTile = layout->pipLocalTileByFillIndex[fillIndex];
-        if (localTile >= pipWidth)
-            localTile = 0;
+        u8 sourceWidth = layout->pipSourceWidthBySegment[segmentId];
+        if (sourceWidth == 0)
+            sourceWidth = 1;
+        const u8 stripIndex = compute_pip_strip_index(sourceWidth,
+                                                       pipStateCount,
+                                                       PIP_STATE_EMPTY,
+                                                       sourceRow,
+                                                       sourceCol);
 
         /* Preload EMPTY tile for this local position. */
-        upload_fill_tile(pipStrip, localTile, vramTile, DMA_QUEUE);
+        upload_fill_tile(pipStrip, stripIndex, vramTile, DMA_QUEUE);
 
         part->cells[part->cellCount].vramTileIndex = vramTile;
         part->cells[part->cellCount].cachedStrip = pipStrip;
-        part->cells[part->cellCount].cachedFillIndex = localTile;
+        part->cells[part->cellCount].cachedFillIndex = stripIndex;
         part->cells[part->cellCount].cellIndex = cellIndex;
+        part->cells[part->cellCount].pipFillIndex = fillIndex;
+        part->cells[part->cellCount].pipRow = renderRow;
+        part->cells[part->cellCount].pipRenderIndex = renderIndex;
         part->cellCount++;
     }
 }
@@ -4594,6 +5122,9 @@ static void write_tilemap_fixed_init(GaugePart *part)
         part->cells[part->cellCount].cachedStrip = NULL;
         part->cells[part->cellCount].cachedFillIndex = CACHE_INVALID_U8;
         part->cells[part->cellCount].cellIndex = cellIndex;
+        part->cells[part->cellCount].pipFillIndex = CACHE_INVALID_U8;
+        part->cells[part->cellCount].pipRow = 0;
+        part->cells[part->cellCount].pipRenderIndex = CACHE_INVALID_U8;
         part->cellCount++;
 
     } 
@@ -5622,46 +6153,57 @@ static void process_pip_mode(GaugePart *part,
     if (part->vramMode == GAUGE_VRAM_DYNAMIC)
     {
         GaugeDynamic *dyn = &part->dyn;
-        const u16 attrBase = TILE_ATTR_FULL(layout->palette, layout->priority,
-                                            layout->verticalFlip, layout->horizontalFlip, 0);
 
-        for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
+        for (u8 renderIndex = 0; renderIndex < layout->pipRenderCount; renderIndex++)
         {
-            if (!dyn->cellValid[cellIndex])
+            if (!dyn->cellValid[renderIndex])
                 continue;
 
+            const u8 fillIndex = layout->pipRenderFillIndexByRenderIndex[renderIndex];
+            if (fillIndex == CACHE_INVALID_U8)
+                continue;
+            const u8 renderRow = layout->pipRenderRowByRenderIndex[renderIndex];
+            const u8 sourceCol = layout->pipRenderSourceColByRenderIndex[renderIndex];
+            const u8 sourceRow = layout->pipRenderSourceRowByRenderIndex[renderIndex];
+            const u8 extraHFlip = layout->pipRenderExtraHFlipByRenderIndex[renderIndex];
+            const u8 extraVFlip = layout->pipRenderExtraVFlipByRenderIndex[renderIndex];
+            const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
             const u8 segmentId = layout->segmentIdByCell[cellIndex];
             const u16 pipBaseTile = dyn->vramTilePipBase[segmentId];
             const u8 pipStateCount = layout->pipStateCountBySegment[segmentId];
             if (pipStateCount < 2)
                 continue;
 
-            const u8 fillIndex = layout->fillIndexByCell[cellIndex];
-            const u8 pipIndex = layout->pipIndexByFillIndex[fillIndex];
-            if (pipIndex == CACHE_INVALID_U8)
-                continue;
-
-            u8 pipWidth = layout->pipWidthByPipIndex[pipIndex];
-            if (pipWidth == 0)
-                pipWidth = 1;
-
-            u8 localTile = layout->pipLocalTileByFillIndex[fillIndex];
-            if (localTile >= pipWidth)
-                localTile = 0;
+            u8 sourceWidth = layout->pipSourceWidthBySegment[segmentId];
+            if (sourceWidth == 0)
+                sourceWidth = 1;
+            u8 sourceHeight = layout->pipSourceHeightBySegment[segmentId];
+            if (sourceHeight == 0)
+                sourceHeight = 1;
 
             const u8 mappedMasterFillIndex = part->masterFillIndexByCell[cellIndex];
             const u8 requestedState = gauge->masterPipStateByFillIndex[mappedMasterFillIndex];
             const u8 resolvedState = resolve_available_pip_state(requestedState,
                                                                  pipStateCount,
                                                                  trailMode);
-            const u16 desiredTile = (u16)(pipBaseTile + ((u16)resolvedState * pipWidth) + localTile);
+            const u16 desiredTile = (u16)(pipBaseTile +
+                                          ((u16)resolvedState * (sourceWidth * sourceHeight)) +
+                                          (sourceRow * sourceWidth) +
+                                          sourceCol);
 
-            if (dyn->cellCurrentTileIndex[cellIndex] != desiredTile)
+            if (dyn->cellCurrentTileIndex[renderIndex] != desiredTile)
             {
-                VDP_setTileMapXY(WINDOW, attrBase | desiredTile,
-                                 layout->tilemapPosByCell[cellIndex].x,
-                                 layout->tilemapPosByCell[cellIndex].y);
-                dyn->cellCurrentTileIndex[cellIndex] = desiredTile;
+                u16 x = 0;
+                u16 y = 0;
+                compute_pip_render_xy(layout, part->originX, part->originY, fillIndex, renderRow, &x, &y);
+                const u16 attr = TILE_ATTR_FULL(layout->palette, layout->priority,
+                                                (u8)(layout->verticalFlip ^ extraVFlip),
+                                                (u8)(layout->horizontalFlip ^ extraHFlip),
+                                                desiredTile);
+                VDP_setTileMapXY(WINDOW, attr,
+                                 x,
+                                 y);
+                dyn->cellCurrentTileIndex[renderIndex] = desiredTile;
             }
         }
 
@@ -5677,18 +6219,18 @@ static void process_pip_mode(GaugePart *part,
         if (!pipStrip)
             continue;
 
-        const u8 fillIndex = layout->fillIndexByCell[cellIndex];
-        const u8 pipIndex = layout->pipIndexByFillIndex[fillIndex];
-        if (pipIndex == CACHE_INVALID_U8)
+        const u8 fillIndex = cell->pipFillIndex;
+        if (fillIndex == CACHE_INVALID_U8)
+            continue;
+        const u8 renderIndex = cell->pipRenderIndex;
+        if (renderIndex == CACHE_INVALID_U8)
             continue;
 
-        u8 pipWidth = layout->pipWidthByPipIndex[pipIndex];
-        if (pipWidth == 0)
-            pipWidth = 1;
-
-        u8 localTile = layout->pipLocalTileByFillIndex[fillIndex];
-        if (localTile >= pipWidth)
-            localTile = 0;
+        const u8 sourceCol = layout->pipRenderSourceColByRenderIndex[renderIndex];
+        const u8 sourceRow = layout->pipRenderSourceRowByRenderIndex[renderIndex];
+        u8 sourceWidth = layout->pipSourceWidthBySegment[segmentId];
+        if (sourceWidth == 0)
+            sourceWidth = 1;
 
         const u8 mappedMasterFillIndex = part->masterFillIndexByCell[cellIndex];
         const u8 requestedState = gauge->masterPipStateByFillIndex[mappedMasterFillIndex];
@@ -5696,7 +6238,11 @@ static void process_pip_mode(GaugePart *part,
         const u8 pipState = resolve_available_pip_state(requestedState,
                                                         stateCount,
                                                         trailMode);
-        const u8 stripIndex = (u8)(pipState * pipWidth + localTile);
+        const u8 stripIndex = compute_pip_strip_index(sourceWidth,
+                                                       stateCount,
+                                                       pipState,
+                                                       sourceRow,
+                                                       sourceCol);
 
         upload_cell_if_needed(cell, pipStrip, stripIndex);
     }
@@ -5811,8 +6357,12 @@ static u8 GaugePart_initInternal(GaugePart *part,
 
     if (vramMode == GAUGE_VRAM_FIXED)
     {
+        u8 streamCellCapacity = layout->length;
+        if (gauge->valueMode == GAUGE_VALUE_MODE_PIP && layout->pipRenderCount > streamCellCapacity)
+            streamCellCapacity = layout->pipRenderCount;
+
         part->cells = (GaugeStreamCell *)gauge_alloc_bytes(
-            (u16)(layout->length * (u8)sizeof(GaugeStreamCell)));
+            (u16)(streamCellCapacity * (u8)sizeof(GaugeStreamCell)));
         if (!part->cells)
         {
             GaugeLayout_release(layout);
@@ -5980,6 +6530,15 @@ static u8 validate_pip_layout(const GaugeLogic *logic, const GaugeLayout *layout
         {
             KLog_U2("Gauge PIP config error invalid stateCount segmentId: ", segmentId,
                     " stateCount: ", layout->pipStateCountBySegment[segmentId]);
+            return 0;
+        }
+        u8 pipHeight = layout->pipHeightBySegment[segmentId];
+        if (pipHeight == 0)
+            pipHeight = 1;
+        if (pipHeight > 4)
+        {
+            KLog_U2("Gauge PIP config error invalid height segmentId: ", segmentId,
+                    " height: ", pipHeight);
             return 0;
         }
     }
@@ -6609,6 +7168,95 @@ static void builder_zero(GaugeBuilder *builder)
     memset(builder, 0, sizeof(*builder));
 }
 
+static u8 resolve_pip_strip_geometry_from_definition(const GaugeSegmentDefinition *definition,
+                                                     u8 *outStateCount,
+                                                     u8 *outSourceWidth,
+                                                     u8 *outSourceHeight,
+                                                     u8 *outHalfAxis)
+{
+    if (!definition || !definition->pipTileset)
+        return 0;
+
+    const u8 pipWidth = definition->pipWidth ? definition->pipWidth : 1;
+    u8 pipHeight = definition->segmentHeightTiles ? definition->segmentHeightTiles : 1;
+    if (pipHeight == 0 || pipHeight > 4)
+        return 0;
+
+    const u16 pipTileCount = definition->pipTileset->numTile;
+    if (pipTileCount == 0 || pipTileCount > 255)
+        return 0;
+
+    const u8 stripCoverage = definition->stripCoverage;
+    if (stripCoverage > GAUGE_STRIP_COVERAGE_QUARTER)
+        return 0;
+
+    u8 sourceWidth = pipWidth;
+    u8 sourceHeight = pipHeight;
+    u8 halfAxis = PIP_HALF_AXIS_HORIZONTAL;
+    u16 tilesPerState = 0;
+
+    if (stripCoverage == GAUGE_STRIP_COVERAGE_HALF)
+    {
+        if ((pipWidth & 1) || (pipHeight & 1))
+            return 0;
+
+        const u16 horizontalTilesPerState = (u16)pipWidth * (u16)(pipHeight >> 1);
+        const u16 verticalTilesPerState = (u16)(pipWidth >> 1) * pipHeight;
+        const u8 horizontalValid = (horizontalTilesPerState != 0) && ((pipTileCount % horizontalTilesPerState) == 0);
+        const u8 verticalValid = (verticalTilesPerState != 0) && ((pipTileCount % verticalTilesPerState) == 0);
+
+        if (!horizontalValid && !verticalValid)
+            return 0;
+
+        if (horizontalValid)
+        {
+            sourceWidth = pipWidth;
+            sourceHeight = (u8)(pipHeight >> 1);
+            halfAxis = PIP_HALF_AXIS_HORIZONTAL;
+            tilesPerState = horizontalTilesPerState;
+        }
+        else
+        {
+            sourceWidth = (u8)(pipWidth >> 1);
+            sourceHeight = pipHeight;
+            halfAxis = PIP_HALF_AXIS_VERTICAL;
+            tilesPerState = verticalTilesPerState;
+        }
+    }
+    else if (stripCoverage == GAUGE_STRIP_COVERAGE_QUARTER)
+    {
+        if ((pipWidth & 1) || (pipHeight & 1))
+            return 0;
+
+        sourceWidth = (u8)(pipWidth >> 1);
+        sourceHeight = (u8)(pipHeight >> 1);
+        tilesPerState = (u16)sourceWidth * sourceHeight;
+    }
+    else
+    {
+        tilesPerState = (u16)pipWidth * pipHeight;
+    }
+
+    if (tilesPerState == 0)
+        return 0;
+    if ((pipTileCount % tilesPerState) != 0)
+        return 0;
+
+    const u16 stateCount = (u16)(pipTileCount / tilesPerState);
+    if (stateCount < 2 || stateCount > 255)
+        return 0;
+
+    if (outStateCount)
+        *outStateCount = (u8)stateCount;
+    if (outSourceWidth)
+        *outSourceWidth = sourceWidth;
+    if (outSourceHeight)
+        *outSourceHeight = sourceHeight;
+    if (outHalfAxis)
+        *outHalfAxis = halfAxis;
+    return 1;
+}
+
 u8 GaugeBuilder_init(GaugeBuilder *builder, const GaugeDescription *description)
 {
     if (!builder || !description)
@@ -6658,29 +7306,26 @@ u8 GaugeBuilder_addSegment(GaugeBuilder *builder,
     GaugeSegmentDefinition sanitized = *definition;
     if (sanitized.cellCount == 0)
         return 0;
+    if (sanitized.segmentHeightTiles == 0)
+        sanitized.segmentHeightTiles = 1;
+    if (sanitized.segmentHeightTiles > 4)
+        return 0;
 
     if (builder->description.mode == GAUGE_VALUE_MODE_FILL)
     {
+        sanitized.stripCoverage = GAUGE_STRIP_COVERAGE_FULL;
         if (!sanitized.normal.body)
             return 0;
     }
     else
     {
+        if (sanitized.stripCoverage > GAUGE_STRIP_COVERAGE_QUARTER)
+            return 0;
         if (!sanitized.pipTileset)
             return 0;
         if (sanitized.pipWidth == 0)
             return 0;
-
-        const u16 pipTileCount = sanitized.pipTileset->numTile;
-        if (pipTileCount == 0)
-            return 0;
-        if (pipTileCount > 255)
-            return 0;
-        if ((pipTileCount % sanitized.pipWidth) != 0)
-            return 0;
-
-        const u16 pipStateCount = (u16)(pipTileCount / sanitized.pipWidth);
-        if (pipStateCount < 2)
+        if (!resolve_pip_strip_geometry_from_definition(&sanitized, NULL, NULL, NULL, NULL))
             return 0;
     }
 
@@ -6825,7 +7470,13 @@ u8 GaugeBuilder_build(GaugeBuilder *builder,
         GaugeSegmentStyle segmentStyles[GAUGE_MAX_SEGMENTS] = {0};
         const u32 *pipTilesets[GAUGE_MAX_SEGMENTS] = {0};
         u8 pipWidths[GAUGE_MAX_SEGMENTS] = {0};
+        u8 pipHeights[GAUGE_MAX_SEGMENTS] = {0};
+        u8 pipOffsets[GAUGE_MAX_SEGMENTS] = {0};
         u8 pipStateCounts[GAUGE_MAX_SEGMENTS] = {0};
+        u8 pipStripCoverages[GAUGE_MAX_SEGMENTS] = {0};
+        u8 pipHalfAxes[GAUGE_MAX_SEGMENTS] = {0};
+        u8 pipSourceWidths[GAUGE_MAX_SEGMENTS] = {0};
+        u8 pipSourceHeights[GAUGE_MAX_SEGMENTS] = {0};
 
         for (u8 segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++)
         {
@@ -6891,10 +7542,28 @@ u8 GaugeBuilder_build(GaugeBuilder *builder,
                 if (definition->pipTileset)
                 {
                     const u8 pipWidth = definition->pipWidth ? definition->pipWidth : 1;
+                    const u8 pipHeight = definition->segmentHeightTiles ? definition->segmentHeightTiles : 1;
+                    u8 pipStateCount = 0;
+                    u8 sourceWidth = 1;
+                    u8 sourceHeight = 1;
+                    u8 halfAxis = PIP_HALF_AXIS_HORIZONTAL;
+                    if (!resolve_pip_strip_geometry_from_definition(definition,
+                                                                    &pipStateCount,
+                                                                    &sourceWidth,
+                                                                    &sourceHeight,
+                                                                    &halfAxis))
+                    {
+                        goto fail;
+                    }
                     pipTilesets[segmentIndex] = definition->pipTileset->tiles;
                     pipWidths[segmentIndex] = pipWidth;
-                    pipStateCounts[segmentIndex] =
-                        (u8)(definition->pipTileset->numTile / pipWidth);
+                    pipHeights[segmentIndex] = pipHeight;
+                    pipOffsets[segmentIndex] = definition->segmentOffsetTiles;
+                    pipStateCounts[segmentIndex] = pipStateCount;
+                    pipStripCoverages[segmentIndex] = definition->stripCoverage;
+                    pipHalfAxes[segmentIndex] = halfAxis;
+                    pipSourceWidths[segmentIndex] = sourceWidth;
+                    pipSourceHeights[segmentIndex] = sourceHeight;
                 }
             }
         }
@@ -6921,7 +7590,16 @@ u8 GaugeBuilder_build(GaugeBuilder *builder,
             GaugeLayout_setFillOffset(layout, builder->partFillOffset[partIndex]);
 
         if (builder->description.mode == GAUGE_VALUE_MODE_PIP)
-            GaugeLayout_setPipStyles(layout, pipTilesets, pipWidths, pipStateCounts);
+            GaugeLayout_setPipStyles(layout,
+                                     pipTilesets,
+                                     pipWidths,
+                                     pipHeights,
+                                     pipOffsets,
+                                     pipStateCounts,
+                                     pipStripCoverages,
+                                     pipHalfAxes,
+                                     pipSourceWidths,
+                                     pipSourceHeights);
 
         builtLayouts[partIndex] = layout;
     }
@@ -7466,8 +8144,8 @@ void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
  * Compute how many VRAM tiles are needed for a layout.
  *
  * VRAM budget depends on mode:
- * - PIP fixed:   1 tile per visible physical cell
- * - PIP dynamic: shared slots per segment (pipWidth * stateCount)
+ * - PIP fixed:   1 tile per rendered PIP tile (height-expanded)
+ * - PIP dynamic: shared slots per segment (sourceWidth * sourceHeight * stateCount)
  * - Fixed:   1 tile per cell with a valid tileset
  * - Dynamic: 3 standard tiles per unique segment (empty/full/fullTrail) +
  *            partial tiles (value/trail/end/trailSecond) + bridge + cap tiles
@@ -7490,28 +8168,26 @@ static u16 compute_vram_size_for_layout(const GaugeLayout *layout,
                 if (!layout->pipTilesetBySegment[segmentId])
                     continue;
 
-                u8 pipWidth = layout->pipWidthBySegment[segmentId];
-                if (pipWidth == 0)
-                    pipWidth = 1;
+                u8 sourceWidth = layout->pipSourceWidthBySegment[segmentId];
+                if (sourceWidth == 0)
+                    sourceWidth = 1;
+                u8 sourceHeight = layout->pipSourceHeightBySegment[segmentId];
+                if (sourceHeight == 0)
+                    sourceHeight = 1;
+                if (sourceHeight > 4)
+                    sourceHeight = 4;
 
                 const u8 pipStateCount = layout->pipStateCountBySegment[segmentId];
                 if (pipStateCount < 2)
                     continue;
 
-                count = (u16)(count + ((u16)pipWidth * pipStateCount));
+                count = (u16)(count + ((u16)sourceWidth * sourceHeight * pipStateCount));
             }
             return count;
         }
 
-        /* Fixed PIP mode: one tile per visible physical cell. */
-        u16 count = 0;
-        for (u8 i = 0; i < layout->length; i++)
-        {
-            const u8 segmentId = layout->segmentIdByCell[i];
-            if (layout->pipTilesetBySegment[segmentId] != NULL)
-                count++;
-        }
-        return count;
+        /* Fixed PIP mode: one tile per rendered physical tile (height-expanded). */
+        return layout->pipRenderCount;
     }
 
     if (vramMode == GAUGE_VRAM_FIXED)

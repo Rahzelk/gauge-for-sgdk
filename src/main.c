@@ -31,6 +31,9 @@
 #define SAMPLE7_SLAVE_LENGTH      3
 #define SAMPLE7_PIP_LENGTH        4
 
+#define SAMPLE8_CELL_COUNT        4
+#define SAMPLE8_MAX_VALUE         4
+
 #define SAMPLE1_X  2
 #define SAMPLE1_Y  9
 #define SAMPLE2_X  (SAMPLE1_X + SAMPLE1_CELL_COUNT + 4)
@@ -57,10 +60,14 @@
 #define SAMPLE7_PIP_X   (SAMPLE7_SLAVE_X + SAMPLE7_SLAVE_LENGTH)
 #define SAMPLE7_PIP_Y   SAMPLE7_SLAVE_Y
 
+#define SAMPLE8_X  (SAMPLE7_X + SAMPLE7_CELL_COUNT + 4)
+#define SAMPLE8_Y  SAMPLE7_Y
+
 #define SELECTED_SAMPLE2_PIP_INDEX   1
 #define SELECTED_SAMPLE5_DUAL_INDEX  4
+#define SELECTED_SAMPLE8_PIP_INDEX   7
 
-#define GAUGE_COUNT 7
+#define GAUGE_COUNT 8
 
 /* -----------------------------------------------------------------------------
    Sample diagnostic switches
@@ -92,6 +99,7 @@ static Gauge g_sample5MirrorGauge;
 static Gauge g_sample6Gauge;
 static Gauge g_sample7Gauge;
 static Gauge g_sample7PipGauge;
+static Gauge g_sample8Gauge;
 
 /* Builder workspace reused across all sample initializations.
  * Keeping a single instance avoids large static RAM usage. */
@@ -127,6 +135,7 @@ static Gauge *getSelectedGauge(void)
         case 4: return &g_sample5BaseGauge;
         case 5: return &g_sample6Gauge;
         case 6: return &g_sample7Gauge;
+        case 7: return &g_sample8Gauge;
         default: return &g_sample1Gauge;
     }
 }
@@ -142,6 +151,7 @@ static const char *getSelectedGaugeName(void)
         case 4: return "Sample 5 - 2 players gauges";
         case 5: return "Sample 6 Vertical";
         case 6: return "Sample 7 MultiPart";
+        case 7: return "Sample 8 PIP x2";
         default: return "Sample 1";
     }
 }
@@ -768,6 +778,55 @@ static void initSample7(u16 *nextVram)
     VDP_drawText("+ Mini PIP", SAMPLE7_X, SAMPLE7_SLAVE_Y + 2);
 }
 
+static void initSample8(u16 *nextVram)
+{
+    GaugeDescription description = {
+        .mode = GAUGE_VALUE_MODE_PIP,
+        .orientation = GAUGE_ORIENT_HORIZONTAL,
+        .fillDirection = GAUGE_FILL_FORWARD,
+        .originX = SAMPLE8_X,
+        .originY = SAMPLE8_Y,
+        .maxValue = SAMPLE8_MAX_VALUE,
+        .capStartFixed = 0,
+        .capEndFixed = 0,
+        .palette = PAL0,
+        .priority = 1,
+        .verticalFlip = 0,
+        .horizontalFlip = 0
+    };
+
+    GaugeBuilder_init(&s_builder, &description);
+
+    GaugeSegmentDefinition segment = GAUGE_PIP_SEGMENT_TILESET_EX(
+        SAMPLE8_CELL_COUNT,
+        &gauge_h_pip_double_quarter_strip,
+        2,
+        2,
+        0,
+        GAUGE_STRIP_COVERAGE_QUARTER
+    );
+    GaugeBuilder_addSegment(&s_builder, 0, &segment);
+
+    {
+        const u16 vramBase = *nextVram;
+        if (!GaugeBuilder_build(&s_builder, &g_sample8Gauge, vramBase, GAUGE_VRAM_DYNAMIC))
+        {
+            KLog((char *)"GaugeBuilder_build failed");
+            KLog((char *)"Sample 8 (PIP x2)");
+            return;
+        }
+        const u16 usedTiles = g_sample8Gauge.vramNextOffset;
+        logVramUsage("Sample 8 (PIP x2)", vramBase, usedTiles);
+        *nextVram = (u16)(vramBase + usedTiles);
+    }
+
+    Gauge_setValueAnim(&g_sample8Gauge, 1, 2);
+    Gauge_setTrailMode(&g_sample8Gauge, GAUGE_TRAIL_MODE_FOLLOW, 0, 0, 0);
+    Gauge_setGainMode(&g_sample8Gauge, GAUGE_GAIN_MODE_FOLLOW, 0, 0);
+
+    VDP_drawText("Sample 8 PIP 2x2", SAMPLE8_X, SAMPLE8_Y + 2);
+}
+
 /* -----------------------------------------------------------------------------
    Input and update
    ----------------------------------------------------------------------------- */
@@ -784,7 +843,8 @@ static void handleInput(u16 pressed, u16 held)
     if (pressed & BUTTON_A)
     {
         Gauge *selectedGauge = getSelectedGauge();
-        u16 amount = (g_selectedGauge == SELECTED_SAMPLE2_PIP_INDEX) ? 1 : 4;
+        u16 amount = ((g_selectedGauge == SELECTED_SAMPLE2_PIP_INDEX) ||
+                      (g_selectedGauge == SELECTED_SAMPLE8_PIP_INDEX)) ? 1 : 4;
 #if GAUGE_DEMO_SAMPLE4_LOGS
         const u16 beforeValue = Gauge_getValue(selectedGauge);
 #endif
@@ -804,7 +864,8 @@ static void handleInput(u16 pressed, u16 held)
     if (pressed & BUTTON_B)
     {
         Gauge *selectedGauge = getSelectedGauge();
-        u16 amount = (g_selectedGauge == SELECTED_SAMPLE2_PIP_INDEX) ? 1 : 4;
+        u16 amount = ((g_selectedGauge == SELECTED_SAMPLE2_PIP_INDEX) ||
+                      (g_selectedGauge == SELECTED_SAMPLE8_PIP_INDEX)) ? 1 : 4;
 #if GAUGE_DEMO_SAMPLE4_LOGS
         const u16 beforeValue = Gauge_getValue(selectedGauge);
 #endif
@@ -881,6 +942,7 @@ static void updateAllGauges(void)
     Gauge_update(&g_sample6Gauge);
     Gauge_update(&g_sample7Gauge);
     Gauge_update(&g_sample7PipGauge);
+    Gauge_update(&g_sample8Gauge);
 #endif
 }
 
@@ -919,9 +981,12 @@ int main(bool hardReset)
     initSample5(&nextVram);
     initSample6(&nextVram);
     initSample7(&nextVram);
+    initSample8(&nextVram);
 #endif
 
     KLog_U1("Total tiles used in VRAM: ", (u16)(nextVram - VRAM_BASE));
+    /* Flush queued init DMA before first runtime update/render frame. */
+    SYS_doVBlankProcess();
     //DMA_setMaxQueueSizeToDefault();
 
     while (TRUE)

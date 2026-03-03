@@ -5,6 +5,9 @@
 
 extern const TileSet gauge_h_straight_yellow_strip;
 extern const TileSet gauge_h_pip_basic_strip;
+extern const TileSet gauge_h_pip_double_strip;
+extern const TileSet gauge_h_pip_double_half_strip;
+extern const TileSet gauge_h_pip_double_quarter_strip;
 extern const TileSet gauge_h_pip_mini_bar_strip;
 extern const TileSet gauge_v_straight_yellow_strip;
 extern const TileSet gauge_h_straight_small_blue_strip;
