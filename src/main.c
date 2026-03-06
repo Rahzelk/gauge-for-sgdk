@@ -310,11 +310,11 @@ static void initSample3(u16 *nextVram)
 
     GaugeSegmentDefinition segment = GAUGE_SEGMENT_ATTR(
         SAMPLE3_CELL_COUNT,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_strip_body,
                    &gauge_h_bevel_yellow_strip_trail,
                    &gauge_h_bevel_yellow_strip_end,
                    NULL),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_gain_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_gain_strip_body,
                    &gauge_h_bevel_yellow_gain_strip_trail,
                    &gauge_h_bevel_yellow_gain_strip_end,
                    NULL),
@@ -366,11 +366,11 @@ static void initSample4(u16 *nextVram)
 
     GaugeSegmentDefinition segment0 = GAUGE_SEGMENT_ATTR(
         4,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_strip_body,
                    &gauge_h_bevel_lightblue_strip_trail,
                    &gauge_h_bevel_lightblue_strip_end,
                    &gauge_h_bevel_lightblue_to_blue_strip_bridge),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_gain_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_gain_strip_body,
                    &gauge_h_bevel_lightblue_gain_strip_trail,
                    &gauge_h_bevel_lightblue_gain_strip_end,
                    &gauge_h_bevel_lightblue_gain_to_blue_strip_bridge),
@@ -379,11 +379,11 @@ static void initSample4(u16 *nextVram)
 
     GaugeSegmentDefinition segment1 = GAUGE_SEGMENT_ATTR(
         4,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_strip_body,
                    &gauge_h_bevel_blue_strip_trail,
                    &gauge_h_bevel_blue_strip_end,
                    &gauge_h_bevel_blue_to_yellow_strip_bridge),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_gain_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_gain_strip_body,
                    &gauge_h_bevel_blue_gain_strip_trail,
                    &gauge_h_bevel_blue_gain_strip_end,
                    &gauge_h_bevel_blue_to_yellow_gain_strip_bridge),
@@ -392,11 +392,11 @@ static void initSample4(u16 *nextVram)
 
     GaugeSegmentDefinition segment2 = GAUGE_SEGMENT_ATTR(
         4,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_strip_body,
                    &gauge_h_bevel_yellow_strip_trail,
                    &gauge_h_bevel_yellow_strip_end,
                    NULL),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_gain_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_gain_strip_body,
                    &gauge_h_bevel_yellow_gain_strip_trail,
                    &gauge_h_bevel_yellow_gain_strip_end,
                    NULL),
@@ -474,12 +474,12 @@ static void initSample5(u16 *nextVram)
 
     GaugeSegmentDefinition segment0 = GAUGE_SEGMENT_ATTR(
         1,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_with_border_cap_start_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_with_border_cap_start_strip_body,
                    &gauge_h_bevel_blue_with_border_cap_start_strip_trail,
                    &gauge_h_bevel_blue_with_border_cap_start_strip_end,
                    NULL),
         GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_with_border_cap_start_blink_off_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_with_border_cap_start_blink_off_strip_body,
                    &gauge_h_bevel_blue_with_border_cap_start_blink_off_strip_trail,
                    &gauge_h_bevel_blue_with_border_cap_start_blink_off_strip_end,
                    NULL)
@@ -487,12 +487,12 @@ static void initSample5(u16 *nextVram)
 
     GaugeSegmentDefinition segment1 = GAUGE_SEGMENT_ATTR(
         6,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_with_border_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_with_border_strip_body,
                    &gauge_h_bevel_blue_with_border_strip_trail,
                    &gauge_h_bevel_blue_with_border_strip_end,
                    &gauge_h_bevel_blue_to_yellow_with_border_strip_bridge),
         GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_with_border_blink_off_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_with_border_blink_off_strip_body,
                    &gauge_h_bevel_blue_with_border_blink_off_strip_trail,
                    &gauge_h_bevel_blue_with_border_blink_off_strip_end,
                    &gauge_h_bevel_blue_to_yellow_with_border_blink_off_strip_bridge)
@@ -500,12 +500,12 @@ static void initSample5(u16 *nextVram)
 
     GaugeSegmentDefinition segment2 = GAUGE_SEGMENT_ATTR(
         6,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_with_border_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_with_border_strip_body,
                    &gauge_h_bevel_yellow_with_border_strip_trail,
                    &gauge_h_bevel_yellow_with_border_strip_end,
                    NULL),
         GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_with_border_blink_off_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_with_border_blink_off_strip_body,
                    &gauge_h_bevel_yellow_with_border_blink_off_strip_trail,
                    &gauge_h_bevel_yellow_with_border_blink_off_strip_end,
                    NULL)
@@ -513,12 +513,12 @@ static void initSample5(u16 *nextVram)
 
     GaugeSegmentDefinition segment3 = GAUGE_SEGMENT_ATTR(
         1,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_with_border_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_with_border_strip_body,
                    &gauge_h_bevel_yellow_with_border_strip_trail,
                    &gauge_h_bevel_yellow_with_border_cap_end_strip_end,
                    NULL),
         GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_with_border_blink_off_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_with_border_blink_off_strip_body,
                    &gauge_h_bevel_yellow_with_border_blink_off_strip_trail,
                    &gauge_h_bevel_yellow_with_border_cap_end_blink_off_strip_end,
                    NULL)
@@ -651,11 +651,11 @@ static void initSample7(u16 *nextVram)
 
     GaugeSegmentDefinition master0 = GAUGE_SEGMENT_ATTR(
         4,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_strip_body,
                    &gauge_h_bevel_lightblue_strip_trail,
                    &gauge_h_bevel_lightblue_strip_end,
                    &gauge_h_bevel_lightblue_to_blue_strip_bridge),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_gain_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_gain_strip_body,
                    &gauge_h_bevel_lightblue_gain_strip_trail,
                    &gauge_h_bevel_lightblue_gain_strip_end,
                    &gauge_h_bevel_lightblue_gain_to_blue_strip_bridge),
@@ -664,11 +664,11 @@ static void initSample7(u16 *nextVram)
 
     GaugeSegmentDefinition master1 = GAUGE_SEGMENT_ATTR(
         4,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_strip_body,
                    &gauge_h_bevel_blue_strip_trail,
                    &gauge_h_bevel_blue_strip_end,
                    &gauge_h_bevel_blue_to_yellow_strip_bridge),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_gain_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_gain_strip_body,
                    &gauge_h_bevel_blue_gain_strip_trail,
                    &gauge_h_bevel_blue_gain_strip_end,
                    &gauge_h_bevel_blue_to_yellow_gain_strip_bridge),
@@ -677,11 +677,11 @@ static void initSample7(u16 *nextVram)
 
     GaugeSegmentDefinition master2 = GAUGE_SEGMENT_ATTR(
         4,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_strip_body,
                    &gauge_h_bevel_yellow_strip_trail,
                    &gauge_h_bevel_yellow_strip_end,
                    NULL),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_gain_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_gain_strip_body,
                    &gauge_h_bevel_yellow_gain_strip_trail,
                    &gauge_h_bevel_yellow_gain_strip_end,
                    NULL),
@@ -704,11 +704,11 @@ static void initSample7(u16 *nextVram)
 
     GaugeSegmentDefinition slaveSegment = GAUGE_SEGMENT_ATTR(
         SAMPLE7_SLAVE_LENGTH,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_strip_body,
                    &gauge_h_bevel_lightblue_strip_trail,
                    &gauge_h_bevel_lightblue_strip_end,
                    NULL),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_gain_strip_break,
+        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_gain_strip_body,
                    &gauge_h_bevel_lightblue_gain_strip_trail,
                    &gauge_h_bevel_lightblue_gain_strip_end,
                    NULL),
