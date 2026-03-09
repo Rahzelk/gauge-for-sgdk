@@ -5,12 +5,14 @@
 
 extern const TileSet gauge_h_straight_yellow_strip;
 extern const TileSet gauge_h_pip_basic_strip;
+extern const TileSet gauge_h_pip_strip;
 extern const TileSet gauge_h_pip_double_strip;
 extern const TileSet gauge_h_pip_double_half_strip;
 extern const TileSet gauge_h_pip_double_quarter_strip;
 extern const TileSet gauge_h_pip_mini_bar_strip;
 extern const TileSet gauge_v_straight_yellow_strip;
 extern const TileSet gauge_h_straight_small_blue_strip;
+extern const SpriteDefinition menu_cursor_sprite;
 extern const TileSet gauge_seg0h_capstart_trail;
 extern const TileSet gauge_seg0h_capstart_body;
 extern const TileSet gauge_seg0h_capstart_end;
@@ -80,5 +82,7 @@ extern const TileSet gauge_v_straight_blue_strip;
 extern const TileSet gauge_h_straight_lightblue_strip;
 extern const TileSet gauge_v_straight_lightblue_strip;
 extern const Palette gauge_palette;
+extern const Palette gauge_blue_palette;
+extern const Palette gauge_lightblue_palette;
 
 #endif // _RES_GAUGE_ASSETS_H_

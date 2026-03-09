@@ -3,162 +3,1277 @@
 #include "gauge_assets.h"
 
 /* =============================================================================
-   Gauge Builder V2 demo (all samples use GaugeBuilder API only)
+   Gauge demo
    ============================================================================= */
 
-#define VRAM_BASE            TILE_USER_INDEX
+#define GAUGE_VRAM_BASE            TILE_USER_INDEX
+#define DEMO_GAUGE_VRAM_MODE       GAUGE_VRAM_DYNAMIC
 
-#define SAMPLE1_CELL_COUNT       12
-#define SAMPLE1_MAX_VALUE        ((u16)(SAMPLE1_CELL_COUNT * GAUGE_PIXELS_PER_TILE))
+#define DEMO_SCREEN_COUNT          4
+#define DEMO_MAX_CASES_PER_SCREEN  6
+#define DEMO_MAX_GAUGES_PER_CASE   2
+#define DEMO_MAX_ACTIVE_GAUGES     8
 
-#define SAMPLE2_CELL_COUNT       7
-#define SAMPLE2_MAX_VALUE        7
+#define DEMO_FILL_STEP             4
+#define DEMO_PIP_STEP              1
+#define DEMO_REPEAT_DELAY          12
+#define DEMO_REPEAT_MASK           3
 
-#define SAMPLE3_CELL_COUNT       12
-#define SAMPLE3_MAX_VALUE        ((u16)(SAMPLE3_CELL_COUNT * GAUGE_PIXELS_PER_TILE))
+#define DEMO_INCREASE_HOLD         24
+#define DEMO_INCREASE_BLINK        16
+#define DEMO_DECREASE_HOLD         20
+#define DEMO_DECREASE_BLINK        48
 
-#define SAMPLE4_CELL_COUNT       15
-#define SAMPLE4_MAX_VALUE        100
+#define ARRAY_LEN(array)           ((u16)(sizeof(array) / sizeof((array)[0])))
 
-#define SAMPLE5_CELL_COUNT       14
-#define SAMPLE5_MAX_VALUE        ((u16)(SAMPLE5_CELL_COUNT * GAUGE_PIXELS_PER_TILE))
+typedef struct
+{
+    const GaugeDefinition *definition;
+} DemoGaugeSource;
 
-#define SAMPLE6_CELL_COUNT       12
-#define SAMPLE6_MAX_VALUE        ((u16)(SAMPLE6_CELL_COUNT * GAUGE_PIXELS_PER_TILE))
+typedef struct
+{
+    const char *label;
+    u8 cursorTileX;
+    u8 cursorTileY;
+    u16 stepAmount;
+    u8 gaugeCount;
+    DemoGaugeSource gauges[DEMO_MAX_GAUGES_PER_CASE];
+} DemoCaseSource;
 
-#define SAMPLE7_CELL_COUNT       12
-#define SAMPLE7_MAX_VALUE        ((u16)(SAMPLE7_CELL_COUNT * GAUGE_PIXELS_PER_TILE))
-#define SAMPLE7_SLAVE_LENGTH      3
-#define SAMPLE7_PIP_LENGTH        4
+typedef struct
+{
+    const char *title;
+    const DemoCaseSource *cases;
+    u8 caseCount;
+} DemoScreenSource;
 
-#define SAMPLE8_CELL_COUNT        4
-#define SAMPLE8_MAX_VALUE         4
+typedef struct
+{
+    const char *label;
+    u8 cursorTileX;
+    u8 cursorTileY;
+    u16 stepAmount;
+    u8 gaugeCount;
+    Gauge *gauges[DEMO_MAX_GAUGES_PER_CASE];
+} DemoCaseRuntime;
 
-#define SAMPLE1_X  2
-#define SAMPLE1_Y  9
-#define SAMPLE2_X  (SAMPLE1_X + SAMPLE1_CELL_COUNT + 4)
-#define SAMPLE2_Y  SAMPLE1_Y
+static Gauge g_runtimeGaugePool[DEMO_MAX_ACTIVE_GAUGES];
+static DemoCaseRuntime g_activeCases[DEMO_MAX_CASES_PER_SCREEN];
+static u8 g_activeCaseCount = 0;
+static u8 g_activeGaugeCount = 0;
 
-#define SAMPLE3_X  2
-#define SAMPLE3_Y 14
-
-#define SAMPLE4_X  (SAMPLE3_X + SAMPLE3_CELL_COUNT + 3)
-#define SAMPLE4_Y  SAMPLE3_Y
-
-#define SAMPLE5_LEFT_X   2
-#define SAMPLE5_LEFT_Y  18
-#define SAMPLE5_RIGHT_X  (SAMPLE3_X + SAMPLE3_CELL_COUNT + 3)
-#define SAMPLE5_RIGHT_Y  SAMPLE5_LEFT_Y
-
-#define SAMPLE6_X 36
-#define SAMPLE6_Y 10
-
-#define SAMPLE7_X       2
-#define SAMPLE7_Y      23
-#define SAMPLE7_SLAVE_X 2
-#define SAMPLE7_SLAVE_Y (SAMPLE7_Y + 1)
-#define SAMPLE7_PIP_X   (SAMPLE7_SLAVE_X + SAMPLE7_SLAVE_LENGTH)
-#define SAMPLE7_PIP_Y   SAMPLE7_SLAVE_Y
-
-#define SAMPLE8_X  (SAMPLE7_X + SAMPLE7_CELL_COUNT + 4)
-#define SAMPLE8_Y  SAMPLE7_Y
-
-#define SELECTED_SAMPLE2_PIP_INDEX   1
-#define SELECTED_SAMPLE5_DUAL_INDEX  4
-#define SELECTED_SAMPLE8_PIP_INDEX   7
-
-#define GAUGE_COUNT 8
-
-/* -----------------------------------------------------------------------------
-   Sample diagnostic switches
-   ----------------------------------------------------------------------------- */
-#define GAUGE_DEMO_SAMPLE1_RENDER_DEBUG 0
-#define GAUGE_DEMO_SAMPLE3_RENDER_DEBUG 0
-
-/* -----------------------------------------------------------------------------
-   Sample 4 diagnostic isolation switches
-   ----------------------------------------------------------------------------- */
-#define GAUGE_DEMO_ISOLATE_SAMPLE4 0
-#if GAUGE_DEMO_ISOLATE_SAMPLE4
-#define GAUGE_DEMO_SAMPLE4_LOGS 0
-#define GAUGE_DEMO_SAMPLE4_RENDER_DEBUG 1
-#else
-#define GAUGE_DEMO_SAMPLE4_LOGS 0
-#define GAUGE_DEMO_SAMPLE4_RENDER_DEBUG 0
-#endif
-
-/* -----------------------------------------------------------------------------
-   Runtime objects
-   ----------------------------------------------------------------------------- */
-static Gauge g_sample1Gauge;
-static Gauge g_sample2Gauge;
-static Gauge g_sample3Gauge;
-static Gauge g_sample4Gauge;
-static Gauge g_sample5BaseGauge;
-static Gauge g_sample5MirrorGauge;
-static Gauge g_sample6Gauge;
-static Gauge g_sample7Gauge;
-static Gauge g_sample7PipGauge;
-static Gauge g_sample8Gauge;
-
-/* Builder workspace reused across all sample initializations.
- * Keeping a single instance avoids large static RAM usage. */
-static GaugeBuilder s_builder;
-
-/* Input state */
 static u16 g_previousPad = 0;
-static u8 g_selectedGauge = 0;
+static u8 g_selectedScreen = 0;
+static u8 g_selectedCase = 0;
 static u8 g_holdA = 0;
 static u8 g_holdB = 0;
-
-/* Mini PIP auto wrap */
-static u16 g_sample7PipValue = 0;
+static u8 g_traceEnabled = 0;
 static u16 g_frameCount = 0;
+static Sprite *g_cursorSprite = NULL;
+
+static const char s_blankLine[] = "                                        ";
+static const char s_separator[] = "----------------------------------------";
 
 /* -----------------------------------------------------------------------------
    Small helpers
    ----------------------------------------------------------------------------- */
-static void logVramUsage(const char *name, u16 vramBase, u16 tileCount)
+static const char *getVramModeName(void)
 {
-    KLog((char *)name);
-    KLog_U2(" VRAM base=", vramBase, " tiles=", tileCount);
+    return (DEMO_GAUGE_VRAM_MODE == GAUGE_VRAM_FIXED) ? "FIXED" : "DYNAMIC";
 }
 
-static Gauge *getSelectedGauge(void)
+static u8 buildGaugeFromDefinition(Gauge *gauge,
+                                   const GaugeDefinition *definition,
+                                   u16 *nextVram)
 {
-    switch (g_selectedGauge)
-    {
-        case 0: return &g_sample1Gauge;
-        case 1: return &g_sample2Gauge;
-        case 2: return &g_sample3Gauge;
-        case 3: return &g_sample4Gauge;
-        case 4: return &g_sample5BaseGauge;
-        case 5: return &g_sample6Gauge;
-        case 6: return &g_sample7Gauge;
-        case 7: return &g_sample8Gauge;
-        default: return &g_sample1Gauge;
-    }
+    const u16 vramBase = *nextVram;
+
+    if (!Gauge_build(gauge, definition, vramBase))
+        return 0;
+
+    *nextVram = (u16)(vramBase + gauge->vramNextOffset);
+    return 1;
 }
 
-static const char *getSelectedGaugeName(void)
+static void clearHudLine(u16 y)
 {
-    switch (g_selectedGauge)
-    {
-        case 0: return "Sample 1";
-        case 1: return "Sample 2 PIP";
-        case 2: return "Sample 3: Bevel";
-        case 3: return "Sample 4 Bridges";
-        case 4: return "Sample 5 - 2 players gauges";
-        case 5: return "Sample 6 Vertical";
-        case 6: return "Sample 7 MultiPart";
-        case 7: return "Sample 8 PIP x2";
-        default: return "Sample 1";
-    }
+    VDP_drawText(s_blankLine, 0, y);
+}
+
+static void drawHudStatic(void)
+{
+    clearHudLine(0);
+    clearHudLine(1);
+    clearHudLine(2);
+    clearHudLine(3);
+    clearHudLine(4);
+    clearHudLine(5);
+    clearHudLine(6);
+
+    VDP_drawText("A: increase   B: decrease", 1, 0);
+    VDP_drawText("U/L prev  D/R next  C: change screen", 1, 1);
+    VDP_drawText("START: trace", 1, 2);
+    VDP_drawText("Screen:", 1, 3);
+    VDP_drawText("Selected:", 1, 4);
+    VDP_drawText("VRAM mode:", 1, 5);
+    VDP_drawText(s_separator, 0, 6);
 }
 
 /* -----------------------------------------------------------------------------
-   Display helpers
+   Reusable skins
    ----------------------------------------------------------------------------- */
+static const GaugeSkin g_skinYellowStraight = {
+    .fill = {
+        .normal = {
+            .body = &gauge_h_straight_yellow_strip
+        }
+    }
+};
+
+static const GaugeSkin g_skinBlueStraight = {
+    .fill = {
+        .normal = {
+            .body = &gauge_h_straight_blue_strip
+        }
+    }
+};
+
+static const GaugeSkin g_skinLightBlueStraight = {
+    .fill = {
+        .normal = {
+            .body = &gauge_h_straight_lightblue_strip
+        }
+    }
+};
+
+static const GaugeSkin g_skinBevelLightBlue = {
+    .fill = {
+        .normal = {
+            .body = &gauge_h_bevel_lightblue_strip_body,
+            .trail = &gauge_h_bevel_lightblue_strip_trail,
+            .end = &gauge_h_bevel_lightblue_strip_end,
+            .bridge = &gauge_h_bevel_lightblue_to_blue_strip_bridge
+        },
+        .gain = {
+            .body = &gauge_h_bevel_lightblue_gain_strip_body,
+            .trail = &gauge_h_bevel_lightblue_gain_strip_trail,
+            .end = &gauge_h_bevel_lightblue_gain_strip_end,
+            .bridge = &gauge_h_bevel_lightblue_gain_to_blue_strip_bridge
+        }
+    }
+};
+
+static const GaugeSkin g_skinBevelBlue = {
+    .fill = {
+        .normal = {
+            .body = &gauge_h_bevel_blue_strip_body,
+            .trail = &gauge_h_bevel_blue_strip_trail,
+            .end = &gauge_h_bevel_blue_strip_end,
+            .bridge = &gauge_h_bevel_blue_to_yellow_strip_bridge
+        },
+        .gain = {
+            .body = &gauge_h_bevel_blue_gain_strip_body,
+            .trail = &gauge_h_bevel_blue_gain_strip_trail,
+            .end = &gauge_h_bevel_blue_gain_strip_end,
+            .bridge = &gauge_h_bevel_blue_to_yellow_gain_strip_bridge
+        }
+    }
+};
+
+static const GaugeSkin g_skinBevelYellow = {
+    .fill = {
+        .normal = {
+            .body = &gauge_h_bevel_yellow_strip_body,
+            .trail = &gauge_h_bevel_yellow_strip_trail,
+            .end = &gauge_h_bevel_yellow_strip_end
+        },
+        .gain = {
+            .body = &gauge_h_bevel_yellow_gain_strip_body,
+            .trail = &gauge_h_bevel_yellow_gain_strip_trail,
+            .end = &gauge_h_bevel_yellow_gain_strip_end
+        }
+    }
+};
+
+static const GaugeSkin g_skinBorderBlueCapStart = {
+    .fill = {
+        .normal = {
+            .body = &gauge_h_bevel_blue_with_border_cap_start_strip_body,
+            .trail = &gauge_h_bevel_blue_with_border_cap_start_strip_trail,
+            .end = &gauge_h_bevel_blue_with_border_cap_start_strip_end
+        },
+        .blinkOff = {
+            .body = &gauge_h_bevel_blue_with_border_cap_start_blink_off_strip_body,
+            .trail = &gauge_h_bevel_blue_with_border_cap_start_blink_off_strip_trail,
+            .end = &gauge_h_bevel_blue_with_border_cap_start_blink_off_strip_end
+        }
+    }
+};
+
+static const GaugeSkin g_skinBorderBlue = {
+    .fill = {
+        .normal = {
+            .body = &gauge_h_bevel_blue_with_border_strip_body,
+            .trail = &gauge_h_bevel_blue_with_border_strip_trail,
+            .end = &gauge_h_bevel_blue_with_border_strip_end,
+            .bridge = &gauge_h_bevel_blue_to_yellow_with_border_strip_bridge
+        },
+        .blinkOff = {
+            .body = &gauge_h_bevel_blue_with_border_blink_off_strip_body,
+            .trail = &gauge_h_bevel_blue_with_border_blink_off_strip_trail,
+            .end = &gauge_h_bevel_blue_with_border_blink_off_strip_end,
+            .bridge = &gauge_h_bevel_blue_to_yellow_with_border_blink_off_strip_bridge
+        }
+    }
+};
+
+static const GaugeSkin g_skinBorderYellow = {
+    .fill = {
+        .normal = {
+            .body = &gauge_h_bevel_yellow_with_border_strip_body,
+            .trail = &gauge_h_bevel_yellow_with_border_strip_trail,
+            .end = &gauge_h_bevel_yellow_with_border_strip_end
+        },
+        .blinkOff = {
+            .body = &gauge_h_bevel_yellow_with_border_blink_off_strip_body,
+            .trail = &gauge_h_bevel_yellow_with_border_blink_off_strip_trail,
+            .end = &gauge_h_bevel_yellow_with_border_blink_off_strip_end
+        }
+    }
+};
+
+static const GaugeSkin g_skinBorderYellowCapEnd = {
+    .fill = {
+        .normal = {
+            .body = &gauge_h_bevel_yellow_with_border_strip_body,
+            .trail = &gauge_h_bevel_yellow_with_border_strip_trail,
+            .end = &gauge_h_bevel_yellow_with_border_cap_end_strip_end
+        },
+        .blinkOff = {
+            .body = &gauge_h_bevel_yellow_with_border_blink_off_strip_body,
+            .trail = &gauge_h_bevel_yellow_with_border_blink_off_strip_trail,
+            .end = &gauge_h_bevel_yellow_with_border_cap_end_blink_off_strip_end
+        }
+    }
+};
+
+static const GaugeSkin g_skinVerticalBlue = {
+    .fill = {
+        .normal = {
+            .body = &gauge_v_straight_blue_strip
+        }
+    }
+};
+
+static const GaugeSkin g_skinVerticalLightBlue = {
+    .fill = {
+        .normal = {
+            .body = &gauge_v_straight_lightblue_strip
+        }
+    }
+};
+
+static const GaugeSkin g_skinVerticalYellow = {
+    .fill = {
+        .normal = {
+            .body = &gauge_v_straight_yellow_strip
+        }
+    }
+};
+
+static const GaugeSkin g_skinPipBasic = {
+    .pip = {
+        .tileset = &gauge_h_pip_basic_strip,
+        .pipWidth = 2,
+        .pipHeight = 1,
+        .coverage = GAUGE_PIP_COVERAGE_FULL
+    }
+};
+
+static const GaugeSkin g_skinPipMiniBar = {
+    .pip = {
+        .tileset = &gauge_h_pip_mini_bar_strip,
+        .pipWidth = 2,
+        .pipHeight = 1,
+        .coverage = GAUGE_PIP_COVERAGE_FULL
+    }
+};
+
+static const GaugeSkin g_skinPipDoubleQuarter = {
+    .pip = {
+        .tileset = &gauge_h_pip_double_quarter_strip,
+        .pipWidth = 2,
+        .pipHeight = 2,
+        .coverage = GAUGE_PIP_COVERAGE_QUARTER
+    }
+};
+
+static const GaugeSkin g_skinPipSingle = {
+    .pip = {
+        .tileset = &gauge_h_pip_strip,
+        .pipWidth = 1,
+        .pipHeight = 1,
+        .coverage = GAUGE_PIP_COVERAGE_FULL
+    }
+};
+
+/* -----------------------------------------------------------------------------
+   Screen 1: basic fill horizontal
+   ----------------------------------------------------------------------------- */
+static const GaugeDefinition g_screen1BasicSingleDefinition = {
+    .mode = GAUGE_MODE_FILL,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 4,
+    .originY = 8,
+    .maxValue = 96,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 12, .skin = &g_skinYellowStraight }
+            }
+        }
+    },
+    .behavior = {
+        .damageMode = GAUGE_TRAIL_MODE_STATIC_TRAIL
+    }
+};
+
+static const GaugeDefinition g_screen1BasicTwoLanesDefinition = {
+    .mode = GAUGE_MODE_FILL,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 24,
+    .originY = 8,
+    .maxValue = 80,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 10, .skin = &g_skinBlueStraight }
+            }
+        },
+        {
+            .offsetY = 1,
+            .firstValueCell = 2,
+            .segments = {
+                { .cells = 6, .skin = &g_skinLightBlueStraight }
+            }
+        }
+    },
+    .behavior = {
+        .damageMode = GAUGE_TRAIL_MODE_FOLLOW
+    }
+};
+
+static const GaugeDefinition g_screen1BasicMirrorDefinition = {
+    .mode = GAUGE_MODE_FILL,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_REVERSE,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 4,
+    .originY = 14,
+    .maxValue = 80,
+    .palette = PAL0,
+    .priority = 1,
+    .horizontalFlip = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 10, .skin = &g_skinYellowStraight }
+            }
+        }
+    },
+    .behavior = {
+        .valueAnimEnabled = 1,
+        .valueAnimShift = 2,
+        .damageMode = GAUGE_TRAIL_MODE_DISABLED
+    }
+};
+
+static const GaugeDefinition g_screen1PaletteLanesDefinition = {
+    .mode = GAUGE_MODE_FILL,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 24,
+    .originY = 14,
+    .maxValue = 80,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 10, .skin = &g_skinYellowStraight }
+            }
+        },
+        {
+            .offsetY = 1,
+            .firstValueCell = 1,
+            .overridePalette = 1,
+            .palette = PAL1,
+            .segments = {
+                { .cells = 8, .skin = &g_skinBlueStraight }
+            }
+        },
+        {
+            .offsetY = 2,
+            .firstValueCell = 2,
+            .overridePalette = 1,
+            .palette = PAL2,
+            .segments = {
+                { .cells = 6, .skin = &g_skinLightBlueStraight }
+            }
+        }
+    },
+    .behavior = {
+        .damageMode = GAUGE_TRAIL_MODE_CRITICAL_TRAIL_BLINK,
+        .criticalValue = 24,
+        .damageBlinkShift = 3
+    }
+};
+
+static const GaugeDefinition g_screen1GainDefinition = {
+    .mode = GAUGE_MODE_FILL,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 4,
+    .originY = 21,
+    .maxValue = 96,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 4, .skin = &g_skinBevelLightBlue },
+                { .cells = 4, .skin = &g_skinBevelBlue },
+                { .cells = 4, .skin = &g_skinBevelYellow }
+            }
+        }
+    },
+    .behavior = {
+        .valueAnimEnabled = 1,
+        .valueAnimShift = 2,
+        .damageMode = GAUGE_TRAIL_MODE_FOLLOW,
+        .damageAnimShift = 3,
+        .gainMode = GAUGE_GAIN_MODE_FOLLOW,
+        .gainAnimShift = 3,
+        .gainBlinkShift = 2
+    }
+};
+
+static const GaugeDefinition g_screen1BlinkOffDefinition = {
+    .mode = GAUGE_MODE_FILL,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 24,
+    .originY = 21,
+    .maxValue = 64,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 4, .skin = &g_skinBorderBlue },
+                { .cells = 4, .skin = &g_skinBorderYellow }
+            }
+        }
+    },
+    .behavior = {
+        .damageMode = GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK,
+        .criticalValue = 24,
+        .damageBlinkShift = 2
+    }
+};
+
+static const DemoCaseSource g_screen1Cases[] = {
+    {
+        .label = "Basic 1 lane",
+        .cursorTileX = 2,
+        .cursorTileY = 8,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen1BasicSingleDefinition }
+        }
+    },
+    {
+        .label = "Basic 2 lanes",
+        .cursorTileX = 22,
+        .cursorTileY = 8,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen1BasicTwoLanesDefinition }
+        }
+    },
+    {
+        .label = "Mirror fill",
+        .cursorTileX = 2,
+        .cursorTileY = 14,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen1BasicMirrorDefinition }
+        }
+    },
+    {
+        .label = "3 lanes + palettes",
+        .cursorTileX = 22,
+        .cursorTileY = 15,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen1PaletteLanesDefinition }
+        }
+    },
+    {
+        .label = "Gain follow",
+        .cursorTileX = 2,
+        .cursorTileY = 21,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen1GainDefinition }
+        }
+    },
+    {
+        .label = "Blink off",
+        .cursorTileX = 22,
+        .cursorTileY = 21,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen1BlinkOffDefinition }
+        }
+    }
+};
+
+/* -----------------------------------------------------------------------------
+   Screen 2: stylized fill horizontal
+   ----------------------------------------------------------------------------- */
+static const GaugeDefinition g_screen2BevelDefinition = {
+    .mode = GAUGE_MODE_FILL,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 3,
+    .originY = 8,
+    .maxValue = 96,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 12, .skin = &g_skinBevelYellow }
+            }
+        }
+    },
+    .behavior = {
+        .damageMode = GAUGE_TRAIL_MODE_FOLLOW
+    }
+};
+
+static const GaugeDefinition g_screen2BridgeDefinition = {
+    .mode = GAUGE_MODE_FILL,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 22,
+    .originY = 8,
+    .maxValue = 100,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 4, .skin = &g_skinBevelLightBlue },
+                { .cells = 4, .skin = &g_skinBevelBlue },
+                { .cells = 4, .skin = &g_skinBevelYellow }
+            }
+        }
+    },
+    .behavior = {
+        .valueAnimEnabled = 1,
+        .valueAnimShift = 2,
+        .damageMode = GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK,
+        .criticalValue = 32,
+        .damageAnimShift = 3,
+        .damageBlinkShift = 2,
+        .gainMode = GAUGE_GAIN_MODE_FOLLOW,
+        .gainAnimShift = 4,
+        .gainBlinkShift = 3
+    }
+};
+
+static const GaugeDefinition g_screen2CapsLeftDefinition = {
+    .mode = GAUGE_MODE_FILL,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 3,
+    .originY = 14,
+    .maxValue = 112,
+    .fixedStartCap = 1,
+    .fixedEndCap = 1,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 1, .skin = &g_skinBorderBlueCapStart },
+                { .cells = 6, .skin = &g_skinBorderBlue },
+                { .cells = 6, .skin = &g_skinBorderYellow },
+                { .cells = 1, .skin = &g_skinBorderYellowCapEnd }
+            }
+        }
+    },
+    .behavior = {
+        .damageMode = GAUGE_TRAIL_MODE_STATIC_TRAIL
+    }
+};
+
+static const GaugeDefinition g_screen2CapsRightDefinition = {
+    .mode = GAUGE_MODE_FILL,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_REVERSE,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 23,
+    .originY = 14,
+    .maxValue = 112,
+    .fixedStartCap = 1,
+    .fixedEndCap = 1,
+    .palette = PAL0,
+    .priority = 1,
+    .horizontalFlip = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 1, .skin = &g_skinBorderBlueCapStart },
+                { .cells = 6, .skin = &g_skinBorderBlue },
+                { .cells = 6, .skin = &g_skinBorderYellow },
+                { .cells = 1, .skin = &g_skinBorderYellowCapEnd }
+            }
+        }
+    },
+    .behavior = {
+        .damageMode = GAUGE_TRAIL_MODE_STATIC_TRAIL
+    }
+};
+
+static const GaugeDefinition g_screen2Sample7Definition = {
+    .mode = GAUGE_MODE_FILL,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 3,
+    .originY = 20,
+    .maxValue = 96,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 4, .skin = &g_skinBevelLightBlue },
+                { .cells = 4, .skin = &g_skinBevelBlue },
+                { .cells = 4, .skin = &g_skinBevelYellow }
+            }
+        },
+        {
+            .offsetY = 1,
+            .firstValueCell = 1,
+            .segments = {
+                { .cells = 3, .skin = &g_skinBevelLightBlue }
+            }
+        }
+    },
+    .behavior = {
+        .damageMode = GAUGE_TRAIL_MODE_CRITICAL_TRAIL_BLINK,
+        .criticalValue = 40,
+        .damageBlinkShift = 3
+    }
+};
+
+static const GaugeDefinition g_screen2LowerBridgeDefinition = {
+    .mode = GAUGE_MODE_FILL,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 22,
+    .originY = 20,
+    .maxValue = 96,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 4, .skin = &g_skinBevelLightBlue },
+                { .cells = 4, .skin = &g_skinBevelBlue },
+                { .cells = 4, .skin = &g_skinBevelYellow }
+            }
+        },
+        {
+            .offsetY = 1,
+            .firstValueCell = 1,
+            .segments = {
+                { .cells = 3, .skin = &g_skinBevelLightBlue },
+                { .cells = 2, .skin = &g_skinBevelBlue }
+            }
+        }
+    },
+    .behavior = {
+        .damageMode = GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK,
+        .criticalValue = 36,
+        .damageBlinkShift = 2
+    }
+};
+
+static const GaugeDefinition g_screen2ThreeLanesDefinition = {
+    .mode = GAUGE_MODE_FILL,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 3,
+    .originY = 25,
+    .maxValue = 96,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 12, .skin = &g_skinBevelYellow }
+            }
+        },
+        {
+            .offsetY = 1,
+            .firstValueCell = 1,
+            .segments = {
+                { .cells = 8, .skin = &g_skinBevelBlue }
+            }
+        },
+        {
+            .offsetY = 2,
+            .firstValueCell = 2,
+            .segments = {
+                { .cells = 4, .skin = &g_skinBevelLightBlue }
+            }
+        }
+    },
+    .behavior = {
+        .valueAnimEnabled = 1,
+        .valueAnimShift = 2,
+        .damageMode = GAUGE_TRAIL_MODE_DISABLED
+    }
+};
+
+static const DemoCaseSource g_screen2Cases[] = {
+    {
+        .label = "Bevel",
+        .cursorTileX = 1,
+        .cursorTileY = 8,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen2BevelDefinition }
+        }
+    },
+    {
+        .label = "Bridges",
+        .cursorTileX = 20,
+        .cursorTileY = 8,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen2BridgeDefinition }
+        }
+    },
+    {
+        .label = "Caps + mirror",
+        .cursorTileX = 1,
+        .cursorTileY = 14,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 2,
+        .gauges = {
+            { .definition = &g_screen2CapsLeftDefinition },
+            { .definition = &g_screen2CapsRightDefinition }
+        }
+    },
+    {
+        .label = "2 lanes",
+        .cursorTileX = 1,
+        .cursorTileY = 20,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen2Sample7Definition }
+        }
+    },
+    {
+        .label = "Lower lane bridge",
+        .cursorTileX = 20,
+        .cursorTileY = 20,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen2LowerBridgeDefinition }
+        }
+    },
+    {
+        .label = "3 stylized lanes",
+        .cursorTileX = 1,
+        .cursorTileY = 26,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen2ThreeLanesDefinition }
+        }
+    }
+};
+
+/* -----------------------------------------------------------------------------
+   Screen 3: basic fill vertical
+   ----------------------------------------------------------------------------- */
+static const GaugeDefinition g_screen3VerticalSingleDefinition = {
+    .mode = GAUGE_MODE_FILL,
+    .orientation = GAUGE_ORIENT_VERTICAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 6,
+    .originY = 24,
+    .maxValue = 96,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 3, .skin = &g_skinVerticalBlue },
+                { .cells = 5, .skin = &g_skinVerticalLightBlue },
+                { .cells = 4, .skin = &g_skinVerticalYellow }
+            }
+        }
+    },
+    .behavior = {
+        .damageMode = GAUGE_TRAIL_MODE_FOLLOW
+    }
+};
+
+static const GaugeDefinition g_screen3VerticalTwoLanesDefinition = {
+    .mode = GAUGE_MODE_FILL,
+    .orientation = GAUGE_ORIENT_VERTICAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 14,
+    .originY = 24,
+    .maxValue = 80,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 10, .skin = &g_skinVerticalBlue }
+            }
+        },
+        {
+            .offsetX = 1,
+            .firstValueCell = 1,
+            .segments = {
+                { .cells = 8, .skin = &g_skinVerticalLightBlue }
+            }
+        }
+    },
+    .behavior = {
+        .damageMode = GAUGE_TRAIL_MODE_STATIC_TRAIL
+    }
+};
+
+static const GaugeDefinition g_screen3VerticalThreeLanesDefinition = {
+    .mode = GAUGE_MODE_FILL,
+    .orientation = GAUGE_ORIENT_VERTICAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 22,
+    .originY = 24,
+    .maxValue = 80,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 10, .skin = &g_skinVerticalYellow }
+            }
+        },
+        {
+            .offsetX = 1,
+            .firstValueCell = 1,
+            .overridePalette = 1,
+            .palette = PAL1,
+            .segments = {
+                { .cells = 8, .skin = &g_skinVerticalBlue }
+            }
+        },
+        {
+            .offsetX = 2,
+            .firstValueCell = 2,
+            .overridePalette = 1,
+            .palette = PAL2,
+            .segments = {
+                { .cells = 6, .skin = &g_skinVerticalLightBlue }
+            }
+        }
+    },
+    .behavior = {
+        .damageMode = GAUGE_TRAIL_MODE_CRITICAL_TRAIL_BLINK,
+        .criticalValue = 24,
+        .damageBlinkShift = 3
+    }
+};
+
+static const GaugeDefinition g_screen3VerticalMirrorDefinition = {
+    .mode = GAUGE_MODE_FILL,
+    .orientation = GAUGE_ORIENT_VERTICAL,
+    .fillDirection = GAUGE_FILL_REVERSE,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 32,
+    .originY = 24,
+    .maxValue = 96,
+    .palette = PAL0,
+    .priority = 1,
+    .verticalFlip = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 12, .skin = &g_skinVerticalYellow }
+            }
+        }
+    },
+    .behavior = {
+        .valueAnimEnabled = 1,
+        .valueAnimShift = 2,
+        .damageMode = GAUGE_TRAIL_MODE_DISABLED
+    }
+};
+
+static const DemoCaseSource g_screen3Cases[] = {
+    {
+        .label = "Vertical 1 lane",
+        .cursorTileX = 4,
+        .cursorTileY = 18,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen3VerticalSingleDefinition }
+        }
+    },
+    {
+        .label = "Vertical 2 lanes",
+        .cursorTileX = 12,
+        .cursorTileY = 18,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen3VerticalTwoLanesDefinition }
+        }
+    },
+    {
+        .label = "Vertical 3 lanes",
+        .cursorTileX = 20,
+        .cursorTileY = 18,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen3VerticalThreeLanesDefinition }
+        }
+    },
+    {
+        .label = "Vertical mirror",
+        .cursorTileX = 30,
+        .cursorTileY = 18,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen3VerticalMirrorDefinition }
+        }
+    }
+};
+
+/* -----------------------------------------------------------------------------
+   Screen 4: PIP
+   ----------------------------------------------------------------------------- */
+static const GaugeDefinition g_screen4PipBasicDefinition = {
+    .mode = GAUGE_MODE_PIP,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 4,
+    .originY = 8,
+    .maxValue = 7,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 7, .skin = &g_skinPipBasic }
+            }
+        }
+    },
+    .behavior = {
+        .valueAnimEnabled = 1,
+        .valueAnimShift = 2,
+        .damageMode = GAUGE_TRAIL_MODE_FOLLOW,
+        .gainMode = GAUGE_GAIN_MODE_FOLLOW
+    }
+};
+
+static const GaugeDefinition g_screen4PipQuarterDefinition = {
+    .mode = GAUGE_MODE_PIP,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 22,
+    .originY = 8,
+    .maxValue = 4,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 4, .skin = &g_skinPipDoubleQuarter }
+            }
+        }
+    },
+    .behavior = {
+        .valueAnimEnabled = 1,
+        .valueAnimShift = 2,
+        .damageMode = GAUGE_TRAIL_MODE_FOLLOW,
+        .gainMode = GAUGE_GAIN_MODE_FOLLOW
+    }
+};
+
+static const GaugeDefinition g_screen4MiniPipTwoLanesDefinition = {
+    .mode = GAUGE_MODE_PIP,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 4,
+    .originY = 14,
+    .maxValue = 4,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 4, .skin = &g_skinPipMiniBar }
+            }
+        },
+        {
+            .offsetY = 1,
+            .firstValueCell = 1,
+            .segments = {
+                { .cells = 3, .skin = &g_skinPipMiniBar }
+            }
+        }
+    },
+    .behavior = {
+        .damageMode = GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK,
+        .criticalValue = 2,
+        .damageBlinkShift = 2
+    }
+};
+
+static const GaugeDefinition g_screen4PipSingleTileDefinition = {
+    .mode = GAUGE_MODE_PIP,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 22,
+    .originY = 14,
+    .maxValue = 6,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 6, .skin = &g_skinPipSingle }
+            }
+        }
+    },
+    .behavior = {
+        .damageMode = GAUGE_TRAIL_MODE_STATIC_TRAIL
+    }
+};
+
+static const GaugeDefinition g_screen4VerticalPipDefinition = {
+    .mode = GAUGE_MODE_PIP,
+    .orientation = GAUGE_ORIENT_VERTICAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .vramMode = DEMO_GAUGE_VRAM_MODE,
+    .originX = 31,
+    .originY = 24,
+    .maxValue = 5,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 5, .skin = &g_skinPipSingle }
+            }
+        },
+        {
+            .offsetX = 1,
+            .firstValueCell = 1,
+            .segments = {
+                { .cells = 4, .skin = &g_skinPipSingle }
+            }
+        },
+        {
+            .offsetX = 2,
+            .firstValueCell = 2,
+            .segments = {
+                { .cells = 3, .skin = &g_skinPipSingle }
+            }
+        }
+    },
+    .behavior = {
+        .damageMode = GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK,
+        .criticalValue = 2,
+        .damageBlinkShift = 2
+    }
+};
+
+static const DemoCaseSource g_screen4Cases[] = {
+    {
+        .label = "PIP basic",
+        .cursorTileX = 2,
+        .cursorTileY = 8,
+        .stepAmount = DEMO_PIP_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen4PipBasicDefinition }
+        }
+    },
+    {
+        .label = "PIP quarter 2x2",
+        .cursorTileX = 20,
+        .cursorTileY = 9,
+        .stepAmount = DEMO_PIP_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen4PipQuarterDefinition }
+        }
+    },
+    {
+        .label = "Mini PIP 2 lanes",
+        .cursorTileX = 2,
+        .cursorTileY = 14,
+        .stepAmount = DEMO_PIP_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen4MiniPipTwoLanesDefinition }
+        }
+    },
+    {
+        .label = "PIP 1 cell = 1 tile",
+        .cursorTileX = 20,
+        .cursorTileY = 14,
+        .stepAmount = DEMO_PIP_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen4PipSingleTileDefinition }
+        }
+    },
+    {
+        .label = "Vertical PIP 3 lanes",
+        .cursorTileX = 28,
+        .cursorTileY = 18,
+        .stepAmount = DEMO_PIP_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen4VerticalPipDefinition }
+        }
+    }
+};
+
+/* -----------------------------------------------------------------------------
+   Screen registry
+   ----------------------------------------------------------------------------- */
+static const DemoScreenSource g_screens[DEMO_SCREEN_COUNT] = {
+    {
+        .title = "Screen 1/4 - Basic fill H",
+        .cases = g_screen1Cases,
+        .caseCount = (u8)ARRAY_LEN(g_screen1Cases)
+    },
+    {
+        .title = "Screen 2/4 - Stylized fill H",
+        .cases = g_screen2Cases,
+        .caseCount = (u8)ARRAY_LEN(g_screen2Cases)
+    },
+    {
+        .title = "Screen 3/4 - Basic fill V",
+        .cases = g_screen3Cases,
+        .caseCount = (u8)ARRAY_LEN(g_screen3Cases)
+    },
+    {
+        .title = "Screen 4/4 - PIP",
+        .cases = g_screen4Cases,
+        .caseCount = (u8)ARRAY_LEN(g_screen4Cases)
+    }
+};
+
+/* -----------------------------------------------------------------------------
+   Runtime helpers
+   ----------------------------------------------------------------------------- */
+static void updateHudDynamic(void)
+{
+    const DemoScreenSource *screen = &g_screens[g_selectedScreen];
+    const char *selectedLabel = "No case available";
+    const char *traceLabel = g_traceEnabled ? "ON" : "OFF";
+
+    if (g_activeCaseCount > 0 && g_selectedCase < g_activeCaseCount)
+        selectedLabel = g_activeCases[g_selectedCase].label;
+
+    clearHudLine(2);
+    clearHudLine(3);
+    clearHudLine(4);
+    clearHudLine(5);
+    VDP_drawText("START: trace", 1, 2);
+    VDP_drawText("Screen:", 1, 3);
+    VDP_drawText("Selected:", 1, 4);
+    VDP_drawText("VRAM mode:", 1, 5);
+    VDP_drawText(traceLabel, 15, 2);
+    VDP_drawText(screen->title, 9, 3);
+    VDP_drawText(selectedLabel, 11, 4);
+    VDP_drawText(getVramModeName(), 12, 5);
+}
+
+static void updateCursorSprite(void)
+{
+    if (!g_cursorSprite)
+        return;
+
+    if (g_activeCaseCount == 0 || g_selectedCase >= g_activeCaseCount)
+    {
+        SPR_setVisibility(g_cursorSprite, HIDDEN);
+        return;
+    }
+
+    {
+        const DemoCaseRuntime *selectedCase = &g_activeCases[g_selectedCase];
+        const s16 cursorX = (s16)(selectedCase->cursorTileX * 8);
+        const s16 cursorY = (s16)(selectedCase->cursorTileY * 8);
+
+        SPR_setPosition(g_cursorSprite, cursorX, cursorY);
+        SPR_setVisibility(g_cursorSprite, VISIBLE);
+    }
+}
+
 static void setupWindowFullScreen(void)
 {
     VDP_setPlaneSize(64, 32, TRUE);
@@ -169,728 +1284,224 @@ static void setupWindowFullScreen(void)
     VDP_setTextPlane(WINDOW);
 }
 
-static void drawHeader(void)
+static void releaseActiveScreen(void)
 {
-    VDP_drawText("A: increase   B: decrease", 2, 1);
-    VDP_drawText("C: select gauge", 2, 3);
-    VDP_drawText("------------------------------", 0, 5);
-    VDP_drawText("Selected:", 0, 6);
-    VDP_drawText("------------------------------", 0, 7);
-}
+    u8 gaugeIndex;
 
-static void updateSelectedDisplay(void)
-{
-    VDP_drawText("                                  ", 10, 6);
-    VDP_drawText(getSelectedGaugeName(), 10, 6);
-}
-
-/* -----------------------------------------------------------------------------
-   Samples
-   ----------------------------------------------------------------------------- */
-static void initSample1(u16 *nextVram)
-{
-    GaugeDescription description = {
-        .mode = GAUGE_VALUE_MODE_FILL,
-        .orientation = GAUGE_ORIENT_HORIZONTAL,
-        .fillDirection = GAUGE_FILL_FORWARD,
-        .originX = SAMPLE1_X,
-        .originY = SAMPLE1_Y,
-        .maxValue = SAMPLE1_MAX_VALUE,
-        .capStartFixed = 0,
-        .capEndFixed = 0,
-        .palette = PAL0,
-        .priority = 1,
-        .verticalFlip = 0,
-        .horizontalFlip = 0
-    };
-
-    GaugeBuilder_init(&s_builder, &description);
-
-    GaugeSegmentDefinition segment = GAUGE_SEGMENT_ATTR(
-        SAMPLE1_CELL_COUNT,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_straight_yellow_strip, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
-    );
-    GaugeBuilder_addSegment(&s_builder, 0, &segment);
-
+    for (gaugeIndex = 0; gaugeIndex < g_activeGaugeCount; gaugeIndex++)
     {
-        const u16 vramBase = *nextVram;
-        if (!GaugeBuilder_build(&s_builder, &g_sample1Gauge, vramBase, GAUGE_VRAM_DYNAMIC))
-        {
-            KLog((char *)"GaugeBuilder_build failed");
-            KLog((char *)"Sample 1");
-            return;
-        }
-        const u16 usedTiles = g_sample1Gauge.vramNextOffset;
-        logVramUsage("Sample 1", vramBase, usedTiles);
-        *nextVram = (u16)(vramBase + usedTiles);
+        Gauge_release(&g_runtimeGaugePool[gaugeIndex]);
+        memset(&g_runtimeGaugePool[gaugeIndex], 0, sizeof(Gauge));
     }
 
-#if GAUGE_DEMO_SAMPLE1_RENDER_DEBUG
-    Gauge_setDebugMode(&g_sample1Gauge, 1);
-#endif
-
-    /* Original Sample 1 behavior (historical mode). */
-    Gauge_setValueAnim(&g_sample1Gauge, 0, 0);
-    Gauge_setTrailMode(&g_sample1Gauge,
-                       GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK,
-                       30,
-                       5,
-                       4);
-    Gauge_setGainMode(&g_sample1Gauge, GAUGE_GAIN_MODE_DISABLED, 0, 0);
-
-    VDP_drawText("Sample 1", SAMPLE1_X, SAMPLE1_Y + 1);
+    memset(g_activeCases, 0, sizeof(g_activeCases));
+    g_activeCaseCount = 0;
+    g_activeGaugeCount = 0;
 }
 
-static void initSample2(u16 *nextVram)
+static void clearScreenPlanes(void)
 {
-    GaugeDescription description = {
-        .mode = GAUGE_VALUE_MODE_PIP,
-        .orientation = GAUGE_ORIENT_HORIZONTAL,
-        .fillDirection = GAUGE_FILL_FORWARD,
-        .originX = SAMPLE2_X,
-        .originY = SAMPLE2_Y,
-        .maxValue = SAMPLE2_MAX_VALUE,
-        .capStartFixed = 0,
-        .capEndFixed = 0,
-        .palette = PAL0,
-        .priority = 1,
-        .verticalFlip = 0,
-        .horizontalFlip = 0
-    };
-
-    GaugeBuilder_init(&s_builder, &description);
-
-    GaugeSegmentDefinition segment = GAUGE_PIP_SEGMENT_TILESET(
-        SAMPLE2_CELL_COUNT,
-        &gauge_h_pip_basic_strip,
-        2
-    );
-    GaugeBuilder_addSegment(&s_builder, 0, &segment);
-
-    {
-        const u16 vramBase = *nextVram;
-        if (!GaugeBuilder_build(&s_builder, &g_sample2Gauge, vramBase, GAUGE_VRAM_DYNAMIC))
-        {
-            KLog((char *)"GaugeBuilder_build failed");
-            KLog((char *)"Sample 2 (PIP)");
-            return;
-        }
-        const u16 usedTiles = g_sample2Gauge.vramNextOffset;
-        logVramUsage("Sample 2 (PIP)", vramBase, usedTiles);
-        *nextVram = (u16)(vramBase + usedTiles);
-    }
-
-    Gauge_setValueAnim(&g_sample2Gauge, 1, 2);
-    Gauge_setTrailMode(&g_sample2Gauge, GAUGE_TRAIL_MODE_FOLLOW, 0, 0, 0);
-    Gauge_setGainMode(&g_sample2Gauge, GAUGE_GAIN_MODE_FOLLOW, 0, 0);
-
-    VDP_drawText("Sample 2 PIP", SAMPLE2_X, SAMPLE2_Y + 1);
+    VDP_clearPlane(BG_A, TRUE);
+    VDP_clearPlane(BG_B, TRUE);
+    VDP_clearPlane(WINDOW, TRUE);
 }
 
-static void initSample3(u16 *nextVram)
+static void syncSelectedCaseDebugMode(void)
 {
-    GaugeDescription description = {
-        .mode = GAUGE_VALUE_MODE_FILL,
-        .orientation = GAUGE_ORIENT_HORIZONTAL,
-        .fillDirection = GAUGE_FILL_FORWARD,
-        .originX = SAMPLE3_X,
-        .originY = SAMPLE3_Y,
-        .maxValue = SAMPLE3_MAX_VALUE,
-        .capStartFixed = 0,
-        .capEndFixed = 0,
-        .palette = PAL0,
-        .priority = 1,
-        .verticalFlip = 0,
-        .horizontalFlip = 0
-    };
-
-    GaugeBuilder_init(&s_builder, &description);
-
-    GaugeSegmentDefinition segment = GAUGE_SEGMENT_ATTR(
-        SAMPLE3_CELL_COUNT,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_strip_body,
-                   &gauge_h_bevel_yellow_strip_trail,
-                   &gauge_h_bevel_yellow_strip_end,
-                   NULL),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_gain_strip_body,
-                   &gauge_h_bevel_yellow_gain_strip_trail,
-                   &gauge_h_bevel_yellow_gain_strip_end,
-                   NULL),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
-    );
-
-    GaugeBuilder_addSegment(&s_builder, 0, &segment);
-
+    for (u8 caseIndex = 0; caseIndex < g_activeCaseCount; caseIndex++)
     {
-        const u16 vramBase = *nextVram;
-        if (!GaugeBuilder_build(&s_builder, &g_sample3Gauge, vramBase, GAUGE_VRAM_DYNAMIC))
+        DemoCaseRuntime *runtimeCase = &g_activeCases[caseIndex];
+        const u8 enabled = (g_traceEnabled && caseIndex == g_selectedCase) ? 1 : 0;
+
+        for (u8 gaugeIndex = 0; gaugeIndex < runtimeCase->gaugeCount; gaugeIndex++)
         {
-            KLog((char *)"GaugeBuilder_build failed");
-            KLog((char *)"Sample 3");
-            return;
+            Gauge *gauge = runtimeCase->gauges[gaugeIndex];
+            if (gauge)
+                Gauge_setDebugMode(gauge, enabled);
         }
-        const u16 usedTiles = g_sample3Gauge.vramNextOffset;
-        logVramUsage("Sample 3", vramBase, usedTiles);
-        *nextVram = (u16)(vramBase + usedTiles);
     }
-
-#if GAUGE_DEMO_SAMPLE3_RENDER_DEBUG
-    Gauge_setDebugMode(&g_sample3Gauge, 1);
-#endif
-
-    Gauge_setTrailMode(&g_sample3Gauge, GAUGE_TRAIL_MODE_FOLLOW, 0, 0, 0);
-
-    VDP_drawText("Sample 3: Bevel", SAMPLE3_X, SAMPLE3_Y + 1);
 }
 
-static void initSample4(u16 *nextVram)
+static u8 tryBuildCase(const DemoCaseSource *sourceCase,
+                       DemoCaseRuntime *runtimeCase,
+                       u8 *gaugeCursor,
+                       u16 *nextVram)
 {
-    GaugeDescription description = {
-        .mode = GAUGE_VALUE_MODE_FILL,
-        .orientation = GAUGE_ORIENT_HORIZONTAL,
-        .fillDirection = GAUGE_FILL_FORWARD,
-        .originX = SAMPLE4_X,
-        .originY = SAMPLE4_Y,
-        .maxValue = SAMPLE4_MAX_VALUE,
-        .capStartFixed = 0,
-        .capEndFixed = 0,
-        .palette = PAL0,
-        .priority = 1,
-        .verticalFlip = 0,
-        .horizontalFlip = 0
-    };
+    const u8 startGaugeIndex = *gaugeCursor;
+    u8 localGaugeCount = 0;
+    u8 sourceGaugeIndex;
 
-    GaugeBuilder_init(&s_builder, &description);
+    memset(runtimeCase, 0, sizeof(*runtimeCase));
+    runtimeCase->label = sourceCase->label;
+    runtimeCase->cursorTileX = sourceCase->cursorTileX;
+    runtimeCase->cursorTileY = sourceCase->cursorTileY;
+    runtimeCase->stepAmount = sourceCase->stepAmount;
 
-    GaugeSegmentDefinition segment0 = GAUGE_SEGMENT_ATTR(
-        4,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_strip_body,
-                   &gauge_h_bevel_lightblue_strip_trail,
-                   &gauge_h_bevel_lightblue_strip_end,
-                   &gauge_h_bevel_lightblue_to_blue_strip_bridge),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_gain_strip_body,
-                   &gauge_h_bevel_lightblue_gain_strip_trail,
-                   &gauge_h_bevel_lightblue_gain_strip_end,
-                   &gauge_h_bevel_lightblue_gain_to_blue_strip_bridge),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
-    );
-
-    GaugeSegmentDefinition segment1 = GAUGE_SEGMENT_ATTR(
-        4,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_strip_body,
-                   &gauge_h_bevel_blue_strip_trail,
-                   &gauge_h_bevel_blue_strip_end,
-                   &gauge_h_bevel_blue_to_yellow_strip_bridge),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_gain_strip_body,
-                   &gauge_h_bevel_blue_gain_strip_trail,
-                   &gauge_h_bevel_blue_gain_strip_end,
-                   &gauge_h_bevel_blue_to_yellow_gain_strip_bridge),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
-    );
-
-    GaugeSegmentDefinition segment2 = GAUGE_SEGMENT_ATTR(
-        4,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_strip_body,
-                   &gauge_h_bevel_yellow_strip_trail,
-                   &gauge_h_bevel_yellow_strip_end,
-                   NULL),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_gain_strip_body,
-                   &gauge_h_bevel_yellow_gain_strip_trail,
-                   &gauge_h_bevel_yellow_gain_strip_end,
-                   NULL),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
-    );
-
-    GaugeBuilder_addSegment(&s_builder, 0, &segment0);
-    GaugeBuilder_addSegment(&s_builder, 0, &segment1);
-    GaugeBuilder_addSegment(&s_builder, 0, &segment2);
-
+    for (sourceGaugeIndex = 0; sourceGaugeIndex < sourceCase->gaugeCount; sourceGaugeIndex++)
     {
-        const u16 vramBase = *nextVram;
-        if (!GaugeBuilder_build(&s_builder, &g_sample4Gauge, vramBase, GAUGE_VRAM_DYNAMIC))
-        {
-            KLog((char *)"GaugeBuilder_build failed");
-            KLog((char *)"Sample 4");
-            return;
-        }
-        const u16 usedTiles = g_sample4Gauge.vramNextOffset;
-        logVramUsage("Sample 4", vramBase, usedTiles);
-        *nextVram = (u16)(vramBase + usedTiles);
+        Gauge *gauge = NULL;
+        const DemoGaugeSource *sourceGauge = &sourceCase->gauges[sourceGaugeIndex];
+
+        if (*gaugeCursor >= DEMO_MAX_ACTIVE_GAUGES)
+            break;
+
+        gauge = &g_runtimeGaugePool[*gaugeCursor];
+        if (!buildGaugeFromDefinition(gauge, sourceGauge->definition, nextVram))
+            break;
+
+        Gauge_setValue(gauge, gauge->logic.maxValue);
+        runtimeCase->gauges[localGaugeCount] = gauge;
+        localGaugeCount++;
+        (*gaugeCursor)++;
     }
 
-    Gauge_setValueAnim(&g_sample4Gauge, 1, 2);
-    Gauge_setTrailMode(&g_sample4Gauge,
-                       GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK,
-                       30,
-                       3,
-                       2);
-    Gauge_setGainMode(&g_sample4Gauge, GAUGE_GAIN_MODE_FOLLOW, 4, 3);
+    if (localGaugeCount != sourceCase->gaugeCount)
+    {
+        while (*gaugeCursor > startGaugeIndex)
+        {
+            (*gaugeCursor)--;
+            Gauge_release(&g_runtimeGaugePool[*gaugeCursor]);
+            memset(&g_runtimeGaugePool[*gaugeCursor], 0, sizeof(Gauge));
+        }
+        memset(runtimeCase, 0, sizeof(*runtimeCase));
+        return 0;
+    }
 
-#if GAUGE_DEMO_SAMPLE4_RENDER_DEBUG
-    Gauge_setDebugMode(&g_sample4Gauge, 1);
-#endif
-
-#if GAUGE_DEMO_SAMPLE4_LOGS
-    KLog_U2("Sample4 init maxValue: ", description.maxValue,
-            " value: ", Gauge_getValue(&g_sample4Gauge));
-#endif
-
-    VDP_drawText("Sample 4 Bridges", SAMPLE4_X, SAMPLE4_Y + 1);
+    runtimeCase->gaugeCount = localGaugeCount;
+    return 1;
 }
 
-static void initSample5(u16 *nextVram)
+static void loadScreen(u8 screenIndex)
 {
-    GaugeDescription baseDescription = {
-        .mode = GAUGE_VALUE_MODE_FILL,
-        .orientation = GAUGE_ORIENT_HORIZONTAL,
-        .fillDirection = GAUGE_FILL_FORWARD,
-        .originX = SAMPLE5_LEFT_X,
-        .originY = SAMPLE5_LEFT_Y,
-        .maxValue = SAMPLE5_MAX_VALUE,
-        .capStartFixed = 1,
-        .capEndFixed = 1,
-        .palette = PAL0,
-        .priority = 1,
-        .verticalFlip = 0,
-        .horizontalFlip = 0
-    };
+    const DemoScreenSource *screen = &g_screens[screenIndex];
+    u8 caseIndex;
+    u8 activeCaseCount = 0;
+    u8 gaugeCursor = 0;
+    u16 nextVram = GAUGE_VRAM_BASE;
 
-    GaugeDescription mirrorDescription = {
-        .mode = GAUGE_VALUE_MODE_FILL,
-        .orientation = GAUGE_ORIENT_HORIZONTAL,
-        .fillDirection = GAUGE_FILL_REVERSE,
-        .originX = SAMPLE5_RIGHT_X,
-        .originY = SAMPLE5_RIGHT_Y,
-        .maxValue = SAMPLE5_MAX_VALUE,
-        .capStartFixed = 1,
-        .capEndFixed = 1,
-        .palette = PAL0,
-        .priority = 1,
-        .verticalFlip = 0,
-        .horizontalFlip = 1
-    };
+    releaseActiveScreen();
+    clearScreenPlanes();
+    drawHudStatic();
 
-    GaugeSegmentDefinition segment0 = GAUGE_SEGMENT_ATTR(
-        1,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_with_border_cap_start_strip_body,
-                   &gauge_h_bevel_blue_with_border_cap_start_strip_trail,
-                   &gauge_h_bevel_blue_with_border_cap_start_strip_end,
-                   NULL),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_with_border_cap_start_blink_off_strip_body,
-                   &gauge_h_bevel_blue_with_border_cap_start_blink_off_strip_trail,
-                   &gauge_h_bevel_blue_with_border_cap_start_blink_off_strip_end,
-                   NULL)
-    );
-
-    GaugeSegmentDefinition segment1 = GAUGE_SEGMENT_ATTR(
-        6,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_with_border_strip_body,
-                   &gauge_h_bevel_blue_with_border_strip_trail,
-                   &gauge_h_bevel_blue_with_border_strip_end,
-                   &gauge_h_bevel_blue_to_yellow_with_border_strip_bridge),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_with_border_blink_off_strip_body,
-                   &gauge_h_bevel_blue_with_border_blink_off_strip_trail,
-                   &gauge_h_bevel_blue_with_border_blink_off_strip_end,
-                   &gauge_h_bevel_blue_to_yellow_with_border_blink_off_strip_bridge)
-    );
-
-    GaugeSegmentDefinition segment2 = GAUGE_SEGMENT_ATTR(
-        6,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_with_border_strip_body,
-                   &gauge_h_bevel_yellow_with_border_strip_trail,
-                   &gauge_h_bevel_yellow_with_border_strip_end,
-                   NULL),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_with_border_blink_off_strip_body,
-                   &gauge_h_bevel_yellow_with_border_blink_off_strip_trail,
-                   &gauge_h_bevel_yellow_with_border_blink_off_strip_end,
-                   NULL)
-    );
-
-    GaugeSegmentDefinition segment3 = GAUGE_SEGMENT_ATTR(
-        1,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_with_border_strip_body,
-                   &gauge_h_bevel_yellow_with_border_strip_trail,
-                   &gauge_h_bevel_yellow_with_border_cap_end_strip_end,
-                   NULL),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_with_border_blink_off_strip_body,
-                   &gauge_h_bevel_yellow_with_border_blink_off_strip_trail,
-                   &gauge_h_bevel_yellow_with_border_cap_end_blink_off_strip_end,
-                   NULL)
-    );
-
-    GaugeBuilder_init(&s_builder, &baseDescription);
-    GaugeBuilder_addSegment(&s_builder, 0, &segment0);
-    GaugeBuilder_addSegment(&s_builder, 0, &segment1);
-    GaugeBuilder_addSegment(&s_builder, 0, &segment2);
-    GaugeBuilder_addSegment(&s_builder, 0, &segment3);
-
+    for (caseIndex = 0; caseIndex < screen->caseCount; caseIndex++)
     {
-        const u16 vramBase = *nextVram;
-        if (!GaugeBuilder_build(&s_builder, &g_sample5BaseGauge, vramBase, GAUGE_VRAM_DYNAMIC))
-        {
-            KLog((char *)"GaugeBuilder_build failed");
-            KLog((char *)"Sample 5 (Base)");
-            return;
-        }
-        const u16 usedTiles = g_sample5BaseGauge.vramNextOffset;
-        logVramUsage("Sample 5 (Base)", vramBase, usedTiles);
-        *nextVram = (u16)(vramBase + usedTiles);
+        DemoCaseRuntime runtimeCase;
+
+        if (!tryBuildCase(&screen->cases[caseIndex], &runtimeCase, &gaugeCursor, &nextVram))
+            continue;
+
+        g_activeCases[activeCaseCount] = runtimeCase;
+        activeCaseCount++;
     }
 
-    GaugeBuilder_init(&s_builder, &mirrorDescription);
-    GaugeBuilder_addSegment(&s_builder, 0, &segment0);
-    GaugeBuilder_addSegment(&s_builder, 0, &segment1);
-    GaugeBuilder_addSegment(&s_builder, 0, &segment2);
-    GaugeBuilder_addSegment(&s_builder, 0, &segment3);
+    g_activeCaseCount = activeCaseCount;
+    g_activeGaugeCount = gaugeCursor;
 
-    {
-        const u16 vramBase = *nextVram;
-        if (!GaugeBuilder_build(&s_builder, &g_sample5MirrorGauge, vramBase, GAUGE_VRAM_DYNAMIC))
-        {
-            KLog((char *)"GaugeBuilder_build failed");
-            KLog((char *)"Sample 5 (Mirror)");
-            return;
-        }
-        const u16 usedTiles = g_sample5MirrorGauge.vramNextOffset;
-        logVramUsage("Sample 5 (Mirror)", vramBase, usedTiles);
-        *nextVram = (u16)(vramBase + usedTiles);
-    }
+    if (g_activeCaseCount == 0)
+        g_selectedCase = 0;
+    else if (g_selectedCase >= g_activeCaseCount)
+        g_selectedCase = 0;
 
-    Gauge_setTrailMode(&g_sample5BaseGauge, GAUGE_TRAIL_MODE_FOLLOW, 0, 0, 0);
-    Gauge_setTrailMode(&g_sample5MirrorGauge, GAUGE_TRAIL_MODE_FOLLOW, 0, 0, 0);
-
-    VDP_drawText("Sample 5 - 2 players gauges", SAMPLE5_LEFT_X, SAMPLE5_LEFT_Y + 1);
+    syncSelectedCaseDebugMode();
+    updateHudDynamic();
+    updateCursorSprite();
 }
 
-static void initSample6(u16 *nextVram)
+static DemoCaseRuntime *getSelectedCase(void)
 {
-    GaugeDescription description = {
-        .mode = GAUGE_VALUE_MODE_FILL,
-        .orientation = GAUGE_ORIENT_VERTICAL,
-        .fillDirection = GAUGE_FILL_REVERSE,
-        .originX = SAMPLE6_X,
-        .originY = SAMPLE6_Y,
-        .maxValue = SAMPLE6_MAX_VALUE,
-        .capStartFixed = 0,
-        .capEndFixed = 0,
-        .palette = PAL0,
-        .priority = 1,
-        .verticalFlip = 0,
-        .horizontalFlip = 0
-    };
+    if (g_activeCaseCount == 0 || g_selectedCase >= g_activeCaseCount)
+        return NULL;
 
-    GaugeBuilder_init(&s_builder, &description);
-
-    GaugeSegmentDefinition segment0 = GAUGE_SEGMENT_ATTR(
-        3,
-        GAUGE_SEGMENT_TILESETS(&gauge_v_straight_blue_strip, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
-    );
-
-    GaugeSegmentDefinition segment1 = GAUGE_SEGMENT_ATTR(
-        5,
-        GAUGE_SEGMENT_TILESETS(&gauge_v_straight_lightblue_strip, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
-    );
-
-    GaugeSegmentDefinition segment2 = GAUGE_SEGMENT_ATTR(
-        4,
-        GAUGE_SEGMENT_TILESETS(&gauge_v_straight_yellow_strip, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
-    );
-
-    GaugeBuilder_addSegment(&s_builder, 0, &segment0);
-    GaugeBuilder_addSegment(&s_builder, 0, &segment1);
-    GaugeBuilder_addSegment(&s_builder, 0, &segment2);
-
-    {
-        const u16 vramBase = *nextVram;
-        if (!GaugeBuilder_build(&s_builder, &g_sample6Gauge, vramBase, GAUGE_VRAM_FIXED))
-        {
-            KLog((char *)"GaugeBuilder_build failed");
-            KLog((char *)"Sample 6 (Fixed)");
-            return;
-        }
-        const u16 usedTiles = g_sample6Gauge.vramNextOffset;
-        logVramUsage("Sample 6 (Fixed)", vramBase, usedTiles);
-        *nextVram = (u16)(vramBase + usedTiles);
-    }
-
-    Gauge_setTrailMode(&g_sample6Gauge, GAUGE_TRAIL_MODE_FOLLOW, 0, 0, 0);
-
-    VDP_drawText("Sample 6 Vertical", SAMPLE6_X - 8, SAMPLE6_Y + SAMPLE6_CELL_COUNT + 1);
+    return &g_activeCases[g_selectedCase];
 }
 
-static void initSample7(u16 *nextVram)
+static void applyActionToSelectedCase(u8 isIncrease, u16 amount, u8 holdFrames, u8 blinkFrames)
 {
-    GaugeDescription description = {
-        .mode = GAUGE_VALUE_MODE_FILL,
-        .orientation = GAUGE_ORIENT_HORIZONTAL,
-        .fillDirection = GAUGE_FILL_FORWARD,
-        .originX = SAMPLE7_X,
-        .originY = SAMPLE7_Y,
-        .maxValue = SAMPLE7_MAX_VALUE,
-        .capStartFixed = 0,
-        .capEndFixed = 0,
-        .palette = PAL0,
-        .priority = 1,
-        .verticalFlip = 0,
-        .horizontalFlip = 0
-    };
+    DemoCaseRuntime *selectedCase = getSelectedCase();
+    u8 gaugeIndex;
 
-    GaugeBuilder_init(&s_builder, &description);
-
-    GaugeSegmentDefinition master0 = GAUGE_SEGMENT_ATTR(
-        4,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_strip_body,
-                   &gauge_h_bevel_lightblue_strip_trail,
-                   &gauge_h_bevel_lightblue_strip_end,
-                   &gauge_h_bevel_lightblue_to_blue_strip_bridge),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_gain_strip_body,
-                   &gauge_h_bevel_lightblue_gain_strip_trail,
-                   &gauge_h_bevel_lightblue_gain_strip_end,
-                   &gauge_h_bevel_lightblue_gain_to_blue_strip_bridge),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
-    );
-
-    GaugeSegmentDefinition master1 = GAUGE_SEGMENT_ATTR(
-        4,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_strip_body,
-                   &gauge_h_bevel_blue_strip_trail,
-                   &gauge_h_bevel_blue_strip_end,
-                   &gauge_h_bevel_blue_to_yellow_strip_bridge),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_blue_gain_strip_body,
-                   &gauge_h_bevel_blue_gain_strip_trail,
-                   &gauge_h_bevel_blue_gain_strip_end,
-                   &gauge_h_bevel_blue_to_yellow_gain_strip_bridge),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
-    );
-
-    GaugeSegmentDefinition master2 = GAUGE_SEGMENT_ATTR(
-        4,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_strip_body,
-                   &gauge_h_bevel_yellow_strip_trail,
-                   &gauge_h_bevel_yellow_strip_end,
-                   NULL),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_yellow_gain_strip_body,
-                   &gauge_h_bevel_yellow_gain_strip_trail,
-                   &gauge_h_bevel_yellow_gain_strip_end,
-                   NULL),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
-    );
-
-    GaugeBuilder_addSegment(&s_builder, 0, &master0);
-    GaugeBuilder_addSegment(&s_builder, 0, &master1);
-    GaugeBuilder_addSegment(&s_builder, 0, &master2);
-
-    GaugeSlaveDescription slave = {
-        .originX = SAMPLE7_SLAVE_X,
-        .originY = SAMPLE7_SLAVE_Y,
-        .fillOffset = 8
-    };
-
-    u8 slaveIndex = 0;
-    if (!GaugeBuilder_addSlave(&s_builder, &slave, &slaveIndex))
+    if (!selectedCase)
         return;
 
-    GaugeSegmentDefinition slaveSegment = GAUGE_SEGMENT_ATTR(
-        SAMPLE7_SLAVE_LENGTH,
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_strip_body,
-                   &gauge_h_bevel_lightblue_strip_trail,
-                   &gauge_h_bevel_lightblue_strip_end,
-                   NULL),
-        GAUGE_SEGMENT_TILESETS(&gauge_h_bevel_lightblue_gain_strip_body,
-                   &gauge_h_bevel_lightblue_gain_strip_trail,
-                   &gauge_h_bevel_lightblue_gain_strip_end,
-                   NULL),
-        GAUGE_SEGMENT_TILESETS(NULL, NULL, NULL, NULL)
-    );
-
-    GaugeBuilder_addSegment(&s_builder, slaveIndex, &slaveSegment);
-
+    for (gaugeIndex = 0; gaugeIndex < selectedCase->gaugeCount; gaugeIndex++)
     {
-        const u16 vramBase = *nextVram;
-        if (!GaugeBuilder_build(&s_builder, &g_sample7Gauge, vramBase, GAUGE_VRAM_DYNAMIC))
-        {
-            KLog((char *)"GaugeBuilder_build failed");
-            KLog((char *)"Sample 7 MultiPart");
-            return;
-        }
-        const u16 usedTiles = g_sample7Gauge.vramNextOffset;
-        logVramUsage("Sample 7 MultiPart", vramBase, usedTiles);
-        *nextVram = (u16)(vramBase + usedTiles);
-    }
-
-    Gauge_setTrailMode(&g_sample7Gauge,
-                       GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK,
-                       40,
-                       0,
-                       0);
-
-    /* Independent mini PIP gauge (same row) */
-    GaugeDescription pipDescription = {
-        .mode = GAUGE_VALUE_MODE_PIP,
-        .orientation = GAUGE_ORIENT_HORIZONTAL,
-        .fillDirection = GAUGE_FILL_FORWARD,
-        .originX = SAMPLE7_PIP_X,
-        .originY = SAMPLE7_PIP_Y,
-        .maxValue = 4,
-        .capStartFixed = 0,
-        .capEndFixed = 0,
-        .palette = PAL0,
-        .priority = 1,
-        .verticalFlip = 0,
-        .horizontalFlip = 0
-    };
-
-    GaugeBuilder_init(&s_builder, &pipDescription);
-    GaugeSegmentDefinition pipSegment = GAUGE_PIP_SEGMENT_TILESET(
-        SAMPLE7_PIP_LENGTH,
-        &gauge_h_pip_mini_bar_strip,
-        2
-    );
-    GaugeBuilder_addSegment(&s_builder, 0, &pipSegment);
-    {
-        const u16 vramBase = *nextVram;
-        if (!GaugeBuilder_build(&s_builder, &g_sample7PipGauge, vramBase, GAUGE_VRAM_FIXED))
-        {
-            KLog((char *)"GaugeBuilder_build failed");
-            KLog((char *)"Sample 7 Mini PIP");
-        }
+        if (isIncrease)
+            Gauge_increase(selectedCase->gauges[gaugeIndex], amount, holdFrames, blinkFrames);
         else
-        {
-            const u16 usedTiles = g_sample7PipGauge.vramNextOffset;
-            logVramUsage("Sample 7 Mini PIP", vramBase, usedTiles);
-            *nextVram = (u16)(vramBase + usedTiles);
-        }
+            Gauge_decrease(selectedCase->gauges[gaugeIndex], amount, holdFrames, blinkFrames);
     }
-
-    VDP_drawText("Sample 7 MultiPart", SAMPLE7_X, SAMPLE7_SLAVE_Y + 1);
-    VDP_drawText("+ Mini PIP", SAMPLE7_X, SAMPLE7_SLAVE_Y + 2);
 }
 
-static void initSample8(u16 *nextVram)
+static void changeSelection(s16 direction)
 {
-    GaugeDescription description = {
-        .mode = GAUGE_VALUE_MODE_PIP,
-        .orientation = GAUGE_ORIENT_HORIZONTAL,
-        .fillDirection = GAUGE_FILL_FORWARD,
-        .originX = SAMPLE8_X,
-        .originY = SAMPLE8_Y,
-        .maxValue = SAMPLE8_MAX_VALUE,
-        .capStartFixed = 0,
-        .capEndFixed = 0,
-        .palette = PAL0,
-        .priority = 1,
-        .verticalFlip = 0,
-        .horizontalFlip = 0
-    };
+    if (g_activeCaseCount == 0)
+        return;
 
-    GaugeBuilder_init(&s_builder, &description);
+    if (direction < 0)
+        g_selectedCase = (u8)((g_selectedCase + g_activeCaseCount - 1) % g_activeCaseCount);
+    else
+        g_selectedCase = (u8)((g_selectedCase + 1) % g_activeCaseCount);
 
-    GaugeSegmentDefinition segment = GAUGE_PIP_SEGMENT_TILESET_EX(
-        SAMPLE8_CELL_COUNT,
-        &gauge_h_pip_double_quarter_strip,
-        2,
-        2,
-        0,
-        GAUGE_STRIP_COVERAGE_QUARTER
-    );
-    GaugeBuilder_addSegment(&s_builder, 0, &segment);
-
-    {
-        const u16 vramBase = *nextVram;
-        if (!GaugeBuilder_build(&s_builder, &g_sample8Gauge, vramBase, GAUGE_VRAM_DYNAMIC))
-        {
-            KLog((char *)"GaugeBuilder_build failed");
-            KLog((char *)"Sample 8 (PIP x2)");
-            return;
-        }
-        const u16 usedTiles = g_sample8Gauge.vramNextOffset;
-        logVramUsage("Sample 8 (PIP x2)", vramBase, usedTiles);
-        *nextVram = (u16)(vramBase + usedTiles);
-    }
-
-    Gauge_setValueAnim(&g_sample8Gauge, 1, 2);
-    Gauge_setTrailMode(&g_sample8Gauge, GAUGE_TRAIL_MODE_FOLLOW, 0, 0, 0);
-    Gauge_setGainMode(&g_sample8Gauge, GAUGE_GAIN_MODE_FOLLOW, 0, 0);
-
-    VDP_drawText("Sample 8 PIP 2x2", SAMPLE8_X, SAMPLE8_Y + 2);
+    g_holdA = 0;
+    g_holdB = 0;
+    syncSelectedCaseDebugMode();
+    updateHudDynamic();
+    updateCursorSprite();
 }
 
-/* -----------------------------------------------------------------------------
-   Input and update
-   ----------------------------------------------------------------------------- */
+static void changeScreen(void)
+{
+    g_selectedScreen = (u8)((g_selectedScreen + 1) % DEMO_SCREEN_COUNT);
+    g_selectedCase = 0;
+    g_holdA = 0;
+    g_holdB = 0;
+    loadScreen(g_selectedScreen);
+}
+
 static void handleInput(u16 pressed, u16 held)
 {
-#if !GAUGE_DEMO_ISOLATE_SAMPLE4
+    DemoCaseRuntime *selectedCase = getSelectedCase();
+    u16 stepAmount = DEMO_FILL_STEP;
+
+    if (pressed & BUTTON_START)
+    {
+        g_traceEnabled ^= 1;
+        syncSelectedCaseDebugMode();
+        updateHudDynamic();
+    }
+
     if (pressed & BUTTON_C)
     {
-        g_selectedGauge = (u8)((g_selectedGauge + 1) % GAUGE_COUNT);
-        updateSelectedDisplay();
+        changeScreen();
+        return;
     }
-#endif
+
+    if (pressed & (BUTTON_UP | BUTTON_LEFT))
+        changeSelection(-1);
+    else if (pressed & (BUTTON_DOWN | BUTTON_RIGHT))
+        changeSelection(1);
+
+    selectedCase = getSelectedCase();
+    if (selectedCase)
+        stepAmount = selectedCase->stepAmount;
 
     if (pressed & BUTTON_A)
     {
-        Gauge *selectedGauge = getSelectedGauge();
-        u16 amount = ((g_selectedGauge == SELECTED_SAMPLE2_PIP_INDEX) ||
-                      (g_selectedGauge == SELECTED_SAMPLE8_PIP_INDEX)) ? 1 : 4;
-#if GAUGE_DEMO_SAMPLE4_LOGS
-        const u16 beforeValue = Gauge_getValue(selectedGauge);
-#endif
-        Gauge_increase(selectedGauge, amount, 60, 40);
-        if (g_selectedGauge == SELECTED_SAMPLE5_DUAL_INDEX)
-            Gauge_increase(&g_sample5MirrorGauge, amount, 40, 20);
-#if GAUGE_DEMO_SAMPLE4_LOGS
-        const u16 afterValue = Gauge_getValue(selectedGauge);
-        KLog("Sample4 input A");
-        KLog_U3("Selected: ", (u16)g_selectedGauge,
-                " Before: ", beforeValue,
-                " After: ", afterValue);
-#endif
+        applyActionToSelectedCase(1, stepAmount, DEMO_INCREASE_HOLD, DEMO_INCREASE_BLINK);
         g_holdA = 0;
     }
 
     if (pressed & BUTTON_B)
     {
-        Gauge *selectedGauge = getSelectedGauge();
-        u16 amount = ((g_selectedGauge == SELECTED_SAMPLE2_PIP_INDEX) ||
-                      (g_selectedGauge == SELECTED_SAMPLE8_PIP_INDEX)) ? 1 : 4;
-#if GAUGE_DEMO_SAMPLE4_LOGS
-        const u16 beforeValue = Gauge_getValue(selectedGauge);
-#endif
-        Gauge_decrease(selectedGauge, amount, 40, 80);
-        if (g_selectedGauge == SELECTED_SAMPLE5_DUAL_INDEX)
-            Gauge_decrease(&g_sample5MirrorGauge, amount, 40, 80);
-#if GAUGE_DEMO_SAMPLE4_LOGS
-        const u16 afterValue = Gauge_getValue(selectedGauge);
-        KLog("Sample4 input B");
-        KLog_U3("Selected: ", (u16)g_selectedGauge,
-                " Before: ", beforeValue,
-                " After: ", afterValue);
-#endif
+        applyActionToSelectedCase(0, stepAmount, DEMO_DECREASE_HOLD, DEMO_DECREASE_BLINK);
         g_holdB = 0;
     }
 
     if (held & BUTTON_A)
     {
         g_holdA++;
-        if (g_holdA >= 12 && (g_frameCount & 3) == 0)
-        {
-            Gauge_increase(getSelectedGauge(), 1, 0, 0);
-            if (g_selectedGauge == SELECTED_SAMPLE5_DUAL_INDEX)
-                Gauge_increase(&g_sample5MirrorGauge, 1, 0, 0);
-        }
+        if (g_holdA >= DEMO_REPEAT_DELAY && (g_frameCount & DEMO_REPEAT_MASK) == 0)
+            applyActionToSelectedCase(1, 1, 0, 0);
     }
     else
     {
@@ -900,12 +1511,8 @@ static void handleInput(u16 pressed, u16 held)
     if (held & BUTTON_B)
     {
         g_holdB++;
-        if (g_holdB >= 12 && (g_frameCount & 3) == 0)
-        {
-            Gauge_decrease(getSelectedGauge(), 1, 0, 0);
-            if (g_selectedGauge == SELECTED_SAMPLE5_DUAL_INDEX)
-                Gauge_decrease(&g_sample5MirrorGauge, 1, 0, 0);
-        }
+        if (g_holdB >= DEMO_REPEAT_DELAY && (g_frameCount & DEMO_REPEAT_MASK) == 0)
+            applyActionToSelectedCase(0, 1, 0, 0);
     }
     else
     {
@@ -913,37 +1520,20 @@ static void handleInput(u16 pressed, u16 held)
     }
 }
 
-static void tickMiniPipAutoWrap(void)
+static void updateActiveGauges(void)
 {
-#if GAUGE_DEMO_ISOLATE_SAMPLE4
-    return;
-#else
-    if ((g_frameCount & 31) == 0)
-    {
-        g_sample7PipValue++;
-        if (g_sample7PipValue > 4)
-            g_sample7PipValue = 0;
-        Gauge_setValue(&g_sample7PipGauge, g_sample7PipValue);
-    }
-#endif
+    u8 gaugeIndex;
+
+    for (gaugeIndex = 0; gaugeIndex < g_activeGaugeCount; gaugeIndex++)
+        Gauge_update(&g_runtimeGaugePool[gaugeIndex]);
 }
 
-static void updateAllGauges(void)
+static void loadAllPalettes(void)
 {
-#if GAUGE_DEMO_ISOLATE_SAMPLE4
-    Gauge_update(&g_sample4Gauge);
-#else
-    Gauge_update(&g_sample1Gauge);
-    Gauge_update(&g_sample2Gauge);
-    Gauge_update(&g_sample3Gauge);
-    Gauge_update(&g_sample4Gauge);
-    Gauge_update(&g_sample5BaseGauge);
-    Gauge_update(&g_sample5MirrorGauge);
-    Gauge_update(&g_sample6Gauge);
-    Gauge_update(&g_sample7Gauge);
-    Gauge_update(&g_sample7PipGauge);
-    Gauge_update(&g_sample8Gauge);
-#endif
+    PAL_setPalette(PAL0, gauge_palette.data, DMA);
+    PAL_setPalette(PAL1, gauge_blue_palette.data, DMA);
+    PAL_setPalette(PAL2, gauge_lightblue_palette.data, DMA);
+    PAL_setPalette(PAL3, gauge_palette.data, DMA);
 }
 
 /* -----------------------------------------------------------------------------
@@ -955,60 +1545,37 @@ int main(bool hardReset)
         SYS_hardReset();
 
     DMA_setMaxQueueSize(192);
-
     JOY_init();
+    SPR_init();
     setupWindowFullScreen();
-    PAL_setPalette(PAL0, gauge_palette.data, DMA);
+    loadAllPalettes();
 
-#if GAUGE_DEMO_ISOLATE_SAMPLE4
-    g_selectedGauge = 3;
-#endif
+    g_cursorSprite = SPR_addSprite(&menu_cursor_sprite,
+                                   -32,
+                                   -32,
+                                   TILE_ATTR_FULL(PAL0, 1, FALSE, FALSE, 0));
+    if (g_cursorSprite)
+        SPR_setVisibility(g_cursorSprite, HIDDEN);
 
-    drawHeader();
-    updateSelectedDisplay();
+    updateCursorSprite();
 
-    u16 nextVram = VRAM_BASE;
-
-    KLog((char *)"=== GAUGE BUILDER V2 DEMO ===");
-#if GAUGE_DEMO_ISOLATE_SAMPLE4
-    KLog((char *)"=== SAMPLE 4 ISOLATION MODE ===");
-    initSample4(&nextVram);
-#else
-    initSample1(&nextVram);
-    initSample2(&nextVram);
-    initSample3(&nextVram);
-    initSample4(&nextVram);
-    initSample5(&nextVram);
-    initSample6(&nextVram);
-    initSample7(&nextVram);
-    initSample8(&nextVram);
-#endif
-
-    KLog_U1("Total tiles used in VRAM: ", (u16)(nextVram - VRAM_BASE));
-    /* Flush queued init DMA before first runtime update/render frame. */
+    loadScreen(g_selectedScreen);
+    SPR_update();
     SYS_doVBlankProcess();
-    //DMA_setMaxQueueSizeToDefault();
 
     while (TRUE)
     {
-        g_frameCount++;
-
         const u16 padState = JOY_readJoypad(JOY_1);
         const u16 pressed = (u16)((padState ^ g_previousPad) & padState);
+
+        g_frameCount++;
         g_previousPad = padState;
 
         handleInput(pressed, padState);
-        tickMiniPipAutoWrap();
-        updateAllGauges();
-
-#if GAUGE_DEMO_SAMPLE4_LOGS
-        if ((g_frameCount & 15) == 0)
-            KLog_U1("Sample4 currentValue: ", Gauge_getValue(&g_sample4Gauge));
-#endif
-
+        updateActiveGauges();
+        SPR_update();
         SYS_doVBlankProcess();
     }
 
     return 0;
 }
-

@@ -24,12 +24,14 @@
 
 TILESET gauge_h_straight_yellow_strip "gauge_h_straight_yellow_strip.png" NONE NONE 
 TILESET gauge_h_pip_basic_strip "gauge_h_pip_basic_strip.png" NONE NONE 
+TILESET gauge_h_pip_strip "gauge_h_pip_strip.png" NONE NONE 
 TILESET gauge_h_pip_double_strip "gauge_h_pip_double_strip.png" NONE NONE 
 TILESET gauge_h_pip_double_half_strip "gauge_h_pip_double_half_strip.png" NONE NONE 
 TILESET gauge_h_pip_double_quarter_strip "gauge_h_pip_double_quarter_strip.png" NONE NONE 
 TILESET gauge_h_pip_mini_bar_strip "gauge_h_pip_mini_bar_strip.png" NONE NONE 
 TILESET gauge_v_straight_yellow_strip "gauge_v_straight_yellow_strip.png"   NONE NONE 
 TILESET gauge_h_straight_small_blue_strip "gauge_h_straight_small_blue_strip.png" NONE NONE 
+SPRITE menu_cursor_sprite "menu-cursor.png" 1 1 NONE
 
 TILESET gauge_seg0h_capstart_trail "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg0h_capstart_trail.png" NONE NONE 
 TILESET gauge_seg0h_capstart_body "D:/genesis/projects/VectorF/Project-Faster/res/draft/ui/gauge_seg0h_capstart_body.png" NONE NONE 
@@ -123,3 +125,5 @@ TILESET gauge_h_straight_lightblue_strip "gauge_h_straight_lightblue_strip.png" 
 TILESET gauge_v_straight_lightblue_strip "gauge_v_straight_lightblue_strip.png" NONE NONE 
 
 PALETTE gauge_palette "gauge_h_straight_yellow_strip.png" NONE NONE 
+PALETTE gauge_blue_palette "gauge_h_straight_blue_strip.png" NONE NONE 
+PALETTE gauge_lightblue_palette "gauge_h_straight_lightblue_strip.png" NONE NONE 
