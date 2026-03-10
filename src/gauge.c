@@ -1151,7 +1151,7 @@ typedef struct
     u8 useBlinkVariant;         /* 1 when decision strip comes from blink-off variant */
 } CellDecision;
 
-/* Debug trace helpers (used by gauge_tick_and_render_fill). */
+/* Debug trace helpers (used by gauge_tick_and_render_fill/pip). */
 #if GAUGE_ENABLE_TRACE
 typedef struct
 {
@@ -1231,6 +1231,20 @@ static const char *trail_mode_to_text(u8 trailMode)
     }
 }
 
+static const char *pip_state_to_text(u8 pipState)
+{
+    switch (pipState)
+    {
+    case PIP_STATE_VALUE: return "VALUE";
+    case PIP_STATE_LOSS: return "LOSS";
+    case PIP_STATE_GAIN: return "GAIN";
+    case PIP_STATE_BLINK_OFF: return "BLINK_OFF";
+    case PIP_STATE_EMPTY:
+    default:
+        return "EMPTY";
+    }
+}
+
 static const char *render_state_to_text(u8 trailMode,
                                         u8 blinkOffActive,
                                         u16 valuePixels,
@@ -1299,6 +1313,38 @@ static void trace_emit_cell_line(u8 cellIndex,
         terminalOverrideApplied ? "TERM_END" : "NONE",
         decision_type_to_text(baseLaneType),
         (unsigned int)baseLaneIdx
+    );
+}
+
+static void trace_emit_pip_cell_line(u8 cellIndex,
+                                     u8 segmentId,
+                                     u8 renderIndex,
+                                     u8 dynamicMode,
+                                     const u32 *pipStrip,
+                                     u8 stripIndex,
+                                     u16 tileIndex,
+                                     u8 requestedState,
+                                     u8 resolvedState,
+                                     u8 stateCount,
+                                     u8 changed)
+{
+    if (!s_traceContext.active)
+        return;
+
+    kprintf(
+        "GAUGE_TRACE CELL lane=%u cell=%u seg=%u class=PIP type=%s strip=0x%08lX idx=%u req=%s res=%s tile=%u render=%u changed=%u states=%u\n",
+        (unsigned int)s_traceContext.laneIndex,
+        (unsigned int)cellIndex,
+        (unsigned int)segmentId,
+        dynamicMode ? "DYNAMIC" : "FIXED",
+        (unsigned long)(u32)pipStrip,
+        (unsigned int)stripIndex,
+        pip_state_to_text(requestedState),
+        pip_state_to_text(resolvedState),
+        (unsigned int)tileIndex,
+        (unsigned int)renderIndex,
+        (unsigned int)changed,
+        (unsigned int)stateCount
     );
 }
 
@@ -6194,12 +6240,18 @@ static void process_pip_mode(GaugeLaneInstance *lane,
             const u8 resolvedState = resolve_available_pip_state(requestedState,
                                                                  pipStateCount,
                                                                  trailMode);
+            const u8 stripIndex = compute_pip_strip_index(sourceWidth,
+                                                          pipStateCount,
+                                                          resolvedState,
+                                                          sourceRow,
+                                                          sourceCol);
             const u16 desiredTile = (u16)(pipBaseTile +
                                           ((u16)resolvedState * (sourceWidth * sourceHeight)) +
                                           (sourceRow * sourceWidth) +
                                           sourceCol);
+            const u8 changed = (dyn->cellCurrentTileIndex[renderIndex] != desiredTile);
 
-            if (dyn->cellCurrentTileIndex[renderIndex] != desiredTile)
+            if (changed)
             {
                 u16 x = 0;
                 u16 y = 0;
@@ -6213,6 +6265,20 @@ static void process_pip_mode(GaugeLaneInstance *lane,
                                  y);
                 dyn->cellCurrentTileIndex[renderIndex] = desiredTile;
             }
+
+#if GAUGE_ENABLE_TRACE
+            trace_emit_pip_cell_line(cellIndex,
+                                     segmentId,
+                                     renderIndex,
+                                     1,
+                                     layout->pipTilesetBySegment[segmentId],
+                                     stripIndex,
+                                     desiredTile,
+                                     requestedState,
+                                     resolvedState,
+                                     pipStateCount,
+                                     changed);
+#endif
         }
 
         return;
@@ -6251,8 +6317,23 @@ static void process_pip_mode(GaugeLaneInstance *lane,
                                                        pipState,
                                                        sourceRow,
                                                        sourceCol);
+        const u8 changed = (cell->cachedStripIndex != stripIndex);
 
         upload_cell_if_needed(cell, pipStrip, stripIndex);
+
+#if GAUGE_ENABLE_TRACE
+        trace_emit_pip_cell_line(cellIndex,
+                                 segmentId,
+                                 renderIndex,
+                                 0,
+                                 pipStrip,
+                                 stripIndex,
+                                 cell->vramTileIndex,
+                                 requestedState,
+                                 pipState,
+                                 stateCount,
+                                 changed);
+#endif
     }
 }
 
@@ -6616,13 +6697,7 @@ void Gauge_init(Gauge *gauge, const GaugeInit *init)
         return;
 
     /* Gauge_init expects a fresh Gauge (or one previously released). */
-#if GAUGE_ENABLE_TRACE
-    const u8 initialDebugMode = gauge->debugMode ? 1 : 0;
-#endif
     memset(gauge, 0, sizeof(*gauge));
-#if GAUGE_ENABLE_TRACE
-    gauge->debugMode = initialDebugMode;
-#endif
 
     u16 maxValue = init->maxValue;
     const u16 maxFillPixels = (u16)(init->layout->length * GAUGE_PIXELS_PER_TILE);
@@ -7400,6 +7475,15 @@ static void release_built_layout(GaugeLaneLayout **layoutPtr)
     gauge_free_ptr((void **)layoutPtr);
 }
 
+static void release_built_layouts(GaugeLaneLayout **builtLayouts)
+{
+    if (!builtLayouts)
+        return;
+
+    for (u8 laneIndex = 0; laneIndex < GAUGE_MAX_LANES; laneIndex++)
+        release_built_layout(&builtLayouts[laneIndex]);
+}
+
 static u8 build_segment_id_by_cell_from_lane(GaugeMode mode,
                                              GaugeFillDirection fillDirection,
                                              const GaugeLane *lane,
@@ -7670,9 +7754,6 @@ u8 Gauge_build(Gauge *gauge,
     if (!gauge || !definition)
         return 0;
 
-#if GAUGE_ENABLE_TRACE
-    const u8 initialDebugMode = gauge->debugMode ? 1 : 0;
-#endif
     memset(&s_buildScratch, 0, sizeof(s_buildScratch));
     GaugeDefinition *sanitized = &s_buildScratch.sanitizedDefinition;
     *sanitized = *definition;
@@ -7706,7 +7787,10 @@ u8 Gauge_build(Gauge *gauge,
             continue;
 
         if (laneCount >= GAUGE_MAX_LANES)
-            goto fail;
+        {
+            release_built_layouts(builtLayouts);
+            return 0;
+        }
 
         if (!build_lane_plan(sanitized,
                              laneIndex,
@@ -7714,7 +7798,8 @@ u8 Gauge_build(Gauge *gauge,
                              baseLane,
                              &lanePlans[laneCount]))
         {
-            goto fail;
+            release_built_layouts(builtLayouts);
+            return 0;
         }
 
         if (lanePlans[laneCount].length > longestLaneLength)
@@ -7738,14 +7823,12 @@ u8 Gauge_build(Gauge *gauge,
                                          &lanePlans[laneIndex],
                                          &builtLayouts[laneIndex]))
         {
-            goto fail;
+            release_built_layouts(builtLayouts);
+            return 0;
         }
     }
 
     Gauge_release(gauge);
-#if GAUGE_ENABLE_TRACE
-    gauge->debugMode = initialDebugMode;
-#endif
     Gauge_init(gauge, &(GaugeInit){
         .maxValue = resolvedMaxValue,
         .initialValue = resolvedMaxValue,
@@ -7756,7 +7839,11 @@ u8 Gauge_build(Gauge *gauge,
     });
 
     if (!gauge->tickAndRenderHandler)
-        goto fail_after_init;
+    {
+        Gauge_release(gauge);
+        release_built_layouts(builtLayouts);
+        return 0;
+    }
 
     Gauge_setValueAnim(gauge,
                        sanitized->behavior.valueAnimEnabled,
@@ -7778,7 +7865,9 @@ u8 Gauge_build(Gauge *gauge,
                            lanePlans[laneIndex].originX,
                            lanePlans[laneIndex].originY))
         {
-            goto fail_after_init;
+            Gauge_release(gauge);
+            release_built_layouts(builtLayouts);
+            return 0;
         }
     }
 
@@ -7786,18 +7875,9 @@ u8 Gauge_build(Gauge *gauge,
     for (u8 laneIndex = 0; laneIndex < laneCount; laneIndex++)
         gauge->ownedLayouts[laneIndex] = builtLayouts[laneIndex];
 
+    DMA_flushQueue();
+
     return 1;
-
-fail_after_init:
-    Gauge_release(gauge);
-#if GAUGE_ENABLE_TRACE
-    gauge->debugMode = initialDebugMode;
-#endif
-
-fail:
-    for (u8 laneIndex = 0; laneIndex < GAUGE_MAX_LANES; laneIndex++)
-        release_built_layout(&builtLayouts[laneIndex]);
-    return 0;
 }
 
 /**
@@ -8106,6 +8186,11 @@ static void gauge_tick_and_render_pip(Gauge *gauge)
                                   bs.trailMode);
     s_activeGaugeForRender = gauge;
 
+#if GAUGE_ENABLE_TRACE
+    trace_begin_frame(gauge, valuePixels, trailPixelsRendered, trailPixelsActual,
+                      bs.trailMode, pipBlinkOffActive);
+#endif
+
     /* --- Render all lanes --- */
     u8 i = gauge->laneCount;
     while (i--)
@@ -8113,11 +8198,17 @@ static void gauge_tick_and_render_pip(Gauge *gauge)
         GaugeLaneInstance *lane = gauge->lanes[i];
         if (!lane)
             continue;
+#if GAUGE_ENABLE_TRACE
+        trace_set_lane_index(i);
+#endif
         lane->renderHandler(lane, valuePixels, trailPixelsRendered, trailPixelsActual,
                             pipBlinkOffActive, bs.blinkOnChanged,
                             bs.trailMode, bs.trailModeChanged);
     }
 
+#if GAUGE_ENABLE_TRACE
+    trace_end_frame();
+#endif
     s_activeGaugeForRender = NULL;
 }
 
