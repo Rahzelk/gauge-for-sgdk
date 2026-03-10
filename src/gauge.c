@@ -1151,16 +1151,25 @@ typedef struct
     u8 useBlinkVariant;         /* 1 when decision strip comes from blink-off variant */
 } CellDecision;
 
-/* Debug trace context (filled in gauge_tick_and_render_fill). */
+/* Debug trace helpers (used by gauge_tick_and_render_fill). */
 #if GAUGE_ENABLE_TRACE
 typedef struct
 {
     u8 active;
     u8 laneIndex;
-    u32 traceId;
 } GaugeTraceContext;
 
-static GaugeTraceContext s_traceContext = {0, 0, 0};
+typedef struct
+{
+    u8 used;
+    u8 segmentId;
+    CellDecisionType baseLaneType;
+    u8 baseLaneIdx;
+    u8 terminalOverrideApplied;
+    CellDecision decision;
+} GaugeTraceCell;
+
+static GaugeTraceContext s_traceContext = {0, 0};
 
 static const char *decision_type_to_text(CellDecisionType type)
 {
@@ -1236,6 +1245,36 @@ static const char *render_state_to_text(u8 trailMode,
     return "NORMAL";
 }
 
+static void trace_reset_context(void)
+{
+    s_traceContext.active = 0;
+    s_traceContext.laneIndex = 0;
+}
+
+static void trace_set_lane_index(u8 laneIndex)
+{
+    s_traceContext.laneIndex = laneIndex;
+}
+
+static void trace_emit_frame_line(u16 valuePixels,
+                                  u16 trailPixelsRendered,
+                                  u16 trailPixelsActual,
+                                  u8 trailMode,
+                                  u8 blinkOffActive)
+{
+    if (!s_traceContext.active)
+        return;
+
+    kprintf(
+        "GAUGE_TRACE FRAME valuePixels=%u trailRendered=%u trailActual=%u trailMode=%s state=%s\n",
+        (unsigned int)valuePixels,
+        (unsigned int)trailPixelsRendered,
+        (unsigned int)trailPixelsActual,
+        trail_mode_to_text(trailMode),
+        render_state_to_text(trailMode, blinkOffActive, valuePixels, trailPixelsRendered)
+    );
+}
+
 static void trace_emit_cell_line(u8 cellIndex,
                                  u8 segmentId,
                                  CellDecisionType baseLaneType,
@@ -1247,21 +1286,87 @@ static void trace_emit_cell_line(u8 cellIndex,
         return;
 
     kprintf(
-        "GAUGE_TRACE CELL traceId=%lu lane=%u cell=%u seg=%u baseLaneType=%s baseLaneIdx=%u ovr=%s class=%s type=%s strip=0x%08lX idx=%u\n",
-        (unsigned long)s_traceContext.traceId,
+        "GAUGE_TRACE CELL lane=%u cell=%u seg=%u class=%s type=%s strip=0x%08lX idx=%u ovr=%s baseLaneType=%s baseLaneIdx=%u\n",
         (unsigned int)s_traceContext.laneIndex,
         (unsigned int)cellIndex,
         (unsigned int)segmentId,
-        decision_type_to_text(baseLaneType),
-        (unsigned int)baseLaneIdx,
-        terminalOverrideApplied ? "TERM_END" : "NONE",
         decision_class_to_text(decision->type,
                                decision->capStartUsesBreak,
                                decision->capStartUsesTrail),
         decision_type_to_text(decision->type),
         (unsigned long)(u32)decision->strip,
-        (unsigned int)decision->fillStripIndex
+        (unsigned int)decision->fillStripIndex,
+        terminalOverrideApplied ? "TERM_END" : "NONE",
+        decision_type_to_text(baseLaneType),
+        (unsigned int)baseLaneIdx
     );
+}
+
+static void trace_begin_frame(const Gauge *gauge,
+                              u16 valuePixels,
+                              u16 trailPixelsRendered,
+                              u16 trailPixelsActual,
+                              u8 trailMode,
+                              u8 blinkOffActive)
+{
+    trace_reset_context();
+
+    if (!gauge || !gauge->debugMode)
+        return;
+
+    s_traceContext.active = 1;
+    trace_emit_frame_line(valuePixels, trailPixelsRendered, trailPixelsActual,
+                          trailMode, blinkOffActive);
+}
+
+static void trace_end_frame(void)
+{
+    trace_reset_context();
+}
+
+static void trace_clear_recorded_cells(GaugeTraceCell *traceByCell, u8 cellCount)
+{
+    for (u8 cellIndex = 0; cellIndex < cellCount; cellIndex++)
+        traceByCell[cellIndex].used = 0;
+}
+
+static void trace_record_cell(GaugeTraceCell *traceByCell,
+                              u8 cellIndex,
+                              u8 segmentId,
+                              CellDecisionType baseLaneType,
+                              u8 baseLaneIdx,
+                              u8 terminalOverrideApplied,
+                              const CellDecision *decision)
+{
+    if (!traceByCell || !decision || cellIndex >= GAUGE_MAX_LENGTH)
+        return;
+
+    traceByCell[cellIndex].used = 1;
+    traceByCell[cellIndex].segmentId = segmentId;
+    traceByCell[cellIndex].baseLaneType = baseLaneType;
+    traceByCell[cellIndex].baseLaneIdx = baseLaneIdx;
+    traceByCell[cellIndex].terminalOverrideApplied = terminalOverrideApplied;
+    traceByCell[cellIndex].decision = *decision;
+}
+
+static void trace_emit_recorded_cells(const GaugeLaneLayout *layout,
+                                      const GaugeTraceCell *traceByCell)
+{
+    if (!layout || !traceByCell)
+        return;
+
+    for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
+    {
+        if (!traceByCell[cellIndex].used)
+            continue;
+
+        trace_emit_cell_line(cellIndex,
+                             traceByCell[cellIndex].segmentId,
+                             traceByCell[cellIndex].baseLaneType,
+                             traceByCell[cellIndex].baseLaneIdx,
+                             traceByCell[cellIndex].terminalOverrideApplied,
+                             &traceByCell[cellIndex].decision);
+    }
 }
 #endif
 
@@ -1924,14 +2029,12 @@ static void layout_free_optional_ptr(void **ptr,
                                      const void *defaultViewC);
 static u8 layout_sync_optional_segment_tilesets_by_usage(u8 hasAny,
                                                           const u32 ***segmentTilesetsBySegment,
-                                                          u8 segmentCount,
-                                                          const char *allocErrorLog);
+                                                          u8 segmentCount);
 static u8 layout_sync_optional_segment_flags_by_usage(u8 hasAny,
                                                        u8 **segmentFlags,
                                                        u8 segmentCount,
                                                        const u8 *defaultView,
-                                                       u8 defaultValue,
-                                                       const char *allocErrorLog);
+                                                       u8 defaultValue);
 static void layout_copy_segment_tilesets(const u32 **destinationTilesets,
                                          const u32 * const *sourceTilesets,
                                          u8 segmentCount);
@@ -2074,7 +2177,6 @@ static void build_bridge_luts(GaugeLaneLayout *layout)
                                          s_zeroCellFlags,
                                          0))
     {
-        KLog("Gauge bridge LUT alloc failed");
         layout_free_optional_ptr((void **)&layout->bridgeEndByFillIndex, s_zeroCellFlags, NULL, NULL);
         layout_free_optional_ptr((void **)&layout->bridgeBreakByFillIndex, s_zeroCellFlags, NULL, NULL);
         layout_free_optional_ptr((void **)&layout->bridgeBreakBoundaryByFillIndex, s_zeroCellFlags, NULL, NULL);
@@ -2319,7 +2421,6 @@ static void build_pip_luts(GaugeLaneLayout *layout)
                                          s_zeroCellFlags,
                                          0))
     {
-        KLog("Gauge pip LUT alloc failed");
         layout->pipCount = 0;
         layout->pipRenderCount = 0;
         layout_free_optional_ptr((void **)&layout->pipIndexByFillIndex, s_invalidCellIndexes, NULL, NULL);
@@ -2656,8 +2757,7 @@ static u8 layout_ensure_cell_flag_storage(u8 **cellFlags,
 
 static u8 layout_sync_optional_segment_tilesets_by_usage(u8 hasAny,
                                                           const u32 ***segmentTilesetsBySegment,
-                                                          u8 segmentCount,
-                                                          const char *allocErrorLog)
+                                                          u8 segmentCount)
 {
     if (!segmentTilesetsBySegment)
         return 0;
@@ -2671,8 +2771,6 @@ static u8 layout_sync_optional_segment_tilesets_by_usage(u8 hasAny,
 
     if (!layout_ensure_segment_tileset_storage(segmentTilesetsBySegment, segmentCount))
     {
-        if (allocErrorLog)
-            KLog(allocErrorLog);
         *segmentTilesetsBySegment = (const u32 **)s_nullSegmentTilesets;
         return 0;
     }
@@ -2684,8 +2782,7 @@ static u8 layout_sync_optional_segment_flags_by_usage(u8 hasAny,
                                                        u8 **segmentFlags,
                                                        u8 segmentCount,
                                                        const u8 *defaultView,
-                                                       u8 defaultValue,
-                                                       const char *allocErrorLog)
+                                                       u8 defaultValue)
 {
     if (!segmentFlags)
         return 0;
@@ -2702,8 +2799,6 @@ static u8 layout_sync_optional_segment_flags_by_usage(u8 hasAny,
                                             defaultView,
                                             defaultValue))
     {
-        if (allocErrorLog)
-            KLog(allocErrorLog);
         *segmentFlags = (u8 *)defaultView;
         return 0;
     }
@@ -2777,59 +2872,6 @@ typedef struct
 {
     const u32 * const *sourceBySlot[LAYOUT_TILESET_SLOT_COUNT];
 } LayoutContextSourceView;
-
-static const char *layout_alloc_error_label(LayoutStyleContext context,
-                                            LayoutTilesetSlot slot)
-{
-    static const char * const labels[4][LAYOUT_TILESET_SLOT_COUNT] =
-    {
-        {
-            "Gauge base BODY alloc failed",
-            "Gauge base END alloc failed",
-            "Gauge base TRAIL alloc failed",
-            "Gauge base BRIDGE alloc failed",
-            "Gauge base CAP START alloc failed",
-            "Gauge base CAP END alloc failed",
-            "Gauge base CAP START BREAK alloc failed",
-            "Gauge base CAP START TRAIL alloc failed"
-        },
-        {
-            "Gauge gain BODY alloc failed",
-            "Gauge gain END alloc failed",
-            "Gauge gain TRAIL alloc failed",
-            "Gauge gain BRIDGE alloc failed",
-            "Gauge gain CAP START alloc failed",
-            "Gauge gain CAP END alloc failed",
-            "Gauge gain CAP START BREAK alloc failed",
-            "Gauge gain CAP START TRAIL alloc failed"
-        },
-        {
-            "Gauge blink BODY alloc failed",
-            "Gauge blink END alloc failed",
-            "Gauge blink TRAIL alloc failed",
-            "Gauge blink BRIDGE alloc failed",
-            "Gauge blink CAP START alloc failed",
-            "Gauge blink CAP END alloc failed",
-            "Gauge blink CAP START BREAK alloc failed",
-            "Gauge blink CAP START TRAIL alloc failed"
-        },
-        {
-            "Gauge gain blink BODY alloc failed",
-            "Gauge gain blink END alloc failed",
-            "Gauge gain blink TRAIL alloc failed",
-            "Gauge gain blink BRIDGE alloc failed",
-            "Gauge gain blink CAP START alloc failed",
-            "Gauge gain blink CAP END alloc failed",
-            "Gauge gain blink CAP START BREAK alloc failed",
-            "Gauge gain blink CAP START TRAIL alloc failed"
-        }
-    };
-
-    if (context > LAYOUT_STYLE_CONTEXT_GAIN_BLINK || slot >= LAYOUT_TILESET_SLOT_COUNT)
-        return "Gauge layout alloc failed";
-
-    return labels[context][slot];
-}
 
 static void build_layout_context_target_view(GaugeLaneLayout *layout,
                                              LayoutStyleContext context,
@@ -2966,8 +3008,7 @@ static void apply_layout_context_sources(GaugeLaneLayout *layout,
         layout_sync_optional_segment_tilesets_by_usage(
             segment_tileset_array_has_any(sourceTilesets, layout->segmentCount),
             targetField,
-            layout->segmentCount,
-            layout_alloc_error_label(context, slotId));
+            layout->segmentCount);
 
         layout_copy_segment_tilesets(*targetField, sourceTilesets, layout->segmentCount);
     }
@@ -3101,7 +3142,6 @@ static u8 layout_alloc_buffers(GaugeLaneLayout *layout, u8 length, u8 segmentCou
         !layout->tilemapPosByCell || !layout->tilesetBySegment)
     {
         layout_free_buffers(layout);
-        KLog("Gauge layout alloc failed");
         return 0;
     }
 
@@ -3151,10 +3191,7 @@ void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
 
     /* Rebuild dynamic buffers (layout must not be retained while rebuilt). */
     if (layout->refCount != 0)
-    {
-        KLog_U1("GaugeLaneLayout_initEx refused, refCount: ", layout->refCount);
         return;
-    }
     layout_free_buffers(layout);
     if (!layout_alloc_buffers(layout, length, segmentCount))
         return;
@@ -3166,20 +3203,17 @@ void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
     layout_sync_optional_segment_tilesets_by_usage(
         segment_tileset_array_has_any(endTilesets, layout->segmentCount),
         &layout->tilesetEndBySegment,
-        layout->segmentCount,
-        "Gauge layout optional alloc failed: end");
+        layout->segmentCount);
 
     layout_sync_optional_segment_tilesets_by_usage(
         segment_tileset_array_has_any(trailTilesets, layout->segmentCount),
         &layout->tilesetTrailBySegment,
-        layout->segmentCount,
-        "Gauge layout optional alloc failed: trail");
+        layout->segmentCount);
 
     layout_sync_optional_segment_tilesets_by_usage(
         segment_tileset_array_has_any(bridgeTilesets, layout->segmentCount),
         &layout->tilesetBridgeBySegment,
-        layout->segmentCount,
-        "Gauge layout optional alloc failed: bridge");
+        layout->segmentCount);
 
     /* Copy mandatory BODY tilesets. */
     for (u8 i = 0; i < layout->segmentCount; i++)
@@ -3427,8 +3461,7 @@ void GaugeLaneLayout_setCapTilesets(GaugeLaneLayout *layout,
         &layout->capEndBySegment,
         layout->segmentCount,
         s_zeroSegmentFlags,
-        0,
-        "Gauge capEnd flags alloc failed");
+        0);
 
     layout_copy_segment_bool_flags(layout->capEndBySegment,
                                    capEndBySegment,
@@ -3640,64 +3673,55 @@ void GaugeLaneLayout_setPipStyles(GaugeLaneLayout *layout,
     layout_sync_optional_segment_tilesets_by_usage(
         hasPipStyles,
         &layout->pipTilesetBySegment,
-        layout->segmentCount,
-        "Gauge pip tileset alloc failed");
+        layout->segmentCount);
     layout_sync_optional_segment_flags_by_usage(
         hasPipStyles && hasCustomWidths,
         &layout->pipWidthBySegment,
         layout->segmentCount,
         s_oneSegmentFlags,
-        1,
-        "Gauge pip width alloc failed");
+        1);
     layout_sync_optional_segment_flags_by_usage(
         hasPipStyles && hasCustomHeights,
         &layout->pipHeightBySegment,
         layout->segmentCount,
         s_oneSegmentFlags,
-        1,
-        "Gauge pip height alloc failed");
+        1);
     layout_sync_optional_segment_flags_by_usage(
         hasPipStyles && hasCustomOffsets,
         &layout->pipOffsetBySegment,
         layout->segmentCount,
         s_zeroSegmentFlags,
-        0,
-        "Gauge pip offset alloc failed");
+        0);
     layout_sync_optional_segment_flags_by_usage(
         hasPipStyles,
         &layout->pipStateCountBySegment,
         layout->segmentCount,
         s_zeroSegmentFlags,
-        0,
-        "Gauge pip state count alloc failed");
+        0);
     layout_sync_optional_segment_flags_by_usage(
         hasPipStyles && hasCustomCoverage,
         &layout->pipStripCoverageBySegment,
         layout->segmentCount,
         s_zeroSegmentFlags,
-        GAUGE_STRIP_COVERAGE_FULL,
-        "Gauge pip coverage alloc failed");
+        GAUGE_STRIP_COVERAGE_FULL);
     layout_sync_optional_segment_flags_by_usage(
         hasPipStyles && hasCustomHalfAxis,
         &layout->pipHalfAxisBySegment,
         layout->segmentCount,
         s_zeroSegmentFlags,
-        PIP_HALF_AXIS_HORIZONTAL,
-        "Gauge pip half-axis alloc failed");
+        PIP_HALF_AXIS_HORIZONTAL);
     layout_sync_optional_segment_flags_by_usage(
         hasPipStyles && hasCustomSourceWidths,
         &layout->pipSourceWidthBySegment,
         layout->segmentCount,
         s_oneSegmentFlags,
-        1,
-        "Gauge pip source width alloc failed");
+        1);
     layout_sync_optional_segment_flags_by_usage(
         hasPipStyles && hasCustomSourceHeights,
         &layout->pipSourceHeightBySegment,
         layout->segmentCount,
         s_oneSegmentFlags,
-        1,
-        "Gauge pip source height alloc failed");
+        1);
 
     layout_copy_segment_tilesets(layout->pipTilesetBySegment, pipTilesets, layout->segmentCount);
     if (layout->pipWidthBySegment != s_oneSegmentFlags)
@@ -3860,8 +3884,7 @@ static void sync_layout_context_slots_from_usage(GaugeLaneLayout *layout,
         layout_sync_optional_segment_tilesets_by_usage(
             usage_flag_for_slot(usageFlags, slotId),
             targetField,
-            layout->segmentCount,
-            layout_alloc_error_label(context, slotId));
+            layout->segmentCount);
     }
 }
 
@@ -3937,8 +3960,7 @@ static void sync_base_allocations(GaugeLaneLayout *layout,
                                          LAYOUT_TILESET_SLOT_MASK_ALL);
 
     layout_sync_optional_segment_flags_by_usage(hasCapEndFlags,
-        &layout->capEndBySegment, sc, s_zeroSegmentFlags, 0,
-        "Gauge build capEnd flags alloc failed");
+        &layout->capEndBySegment, sc, s_zeroSegmentFlags, 0);
 }
 
 /**
@@ -4037,11 +4059,6 @@ void GaugeLaneLayout_build(GaugeLaneLayout *layout, const GaugeLaneLayoutInit *i
                                             LAYOUT_STYLE_CONTEXT_GAIN_BLINK,
                                             LAYOUT_TILESET_SLOT_MASK_ALL);
 
-        if (layout->segmentCount)
-            KLog_U4("Gauge build ctx sync segments: ", layout->segmentCount,
-                    " baseCaps: ", (u32)capEndFlags,
-                    " gainBody: ", (u32)gainFlags.body,
-                    " blinkBody: ", (u32)blinkFlags.body);
     }
 
     finalize_layout_derived_state(layout);
@@ -4483,7 +4500,6 @@ static u8 alloc_dynamic_buffers(GaugeDynamic *dyn, u8 segmentCount, u8 cellCount
         !dyn->cellCurrentTileIndex || !dyn->cellValid)
     {
         free_dynamic_buffers(dyn);
-        KLog("Gauge dynamic alloc failed");
         return 0;
     }
     dyn->segmentCount = segmentCount;
@@ -5730,22 +5746,10 @@ static void process_fixed_mode(GaugeLaneInstance *lane,
 
 #if GAUGE_ENABLE_TRACE
     const u8 traceEnabled = s_traceContext.active;
-    typedef struct
-    {
-        u8 used;
-        u8 segmentId;
-        CellDecisionType baseLaneType;
-        u8 baseLaneIdx;
-        u8 terminalOverrideApplied;
-        CellDecision decision;
-    } FixedTraceCell;
-    FixedTraceCell traceByCell[GAUGE_MAX_LENGTH];
+    GaugeTraceCell traceByCell[GAUGE_MAX_LENGTH];
 
     if (traceEnabled)
-    {
-        for (u8 cellIndex = 0; cellIndex < GAUGE_MAX_LENGTH; cellIndex++)
-            traceByCell[cellIndex].used = 0;
-    }
+        trace_clear_recorded_cells(traceByCell, layout->length);
 #endif
 
     /* Countdown loop: 68000 zero-flag test is free after decrement (dbra) */
@@ -5784,15 +5788,9 @@ static void process_fixed_mode(GaugeLaneInstance *lane,
         decision.useBlinkVariant = useBlinkVariant;
 
 #if GAUGE_ENABLE_TRACE
-        if (traceEnabled && cellIndex < GAUGE_MAX_LENGTH)
-        {
-            traceByCell[cellIndex].used = 1;
-            traceByCell[cellIndex].segmentId = segmentId;
-            traceByCell[cellIndex].baseLaneType = baseLaneType;
-            traceByCell[cellIndex].baseLaneIdx = baseLaneIdx;
-            traceByCell[cellIndex].terminalOverrideApplied = resolved.terminalOverrideApplied;
-            traceByCell[cellIndex].decision = decision;
-        }
+        if (traceEnabled)
+            trace_record_cell(traceByCell, cellIndex, segmentId, baseLaneType, baseLaneIdx,
+                              resolved.terminalOverrideApplied, &decision);
 #endif
 
         upload_cell_if_needed(cell, decision.strip, decision.fillStripIndex);
@@ -5800,19 +5798,7 @@ static void process_fixed_mode(GaugeLaneInstance *lane,
 
 #if GAUGE_ENABLE_TRACE
     if (traceEnabled)
-    {
-        for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
-        {
-            if (!traceByCell[cellIndex].used)
-                continue;
-            trace_emit_cell_line(cellIndex,
-                                 traceByCell[cellIndex].segmentId,
-                                 traceByCell[cellIndex].baseLaneType,
-                                 traceByCell[cellIndex].baseLaneIdx,
-                                 traceByCell[cellIndex].terminalOverrideApplied,
-                                 &traceByCell[cellIndex].decision);
-        }
-    }
+        trace_emit_recorded_cells(layout, traceByCell);
 #endif
 }
 
@@ -6526,41 +6512,27 @@ static u16 compute_pip_total_pixels(const GaugeLaneLayout *layout)
  *
  * Checks: pipCount > 0, all segments have compact tilesets, pipIndex mapping
  * is valid, pip widths match segment styles, maxValue == pipCount, and
- * total pixel span matches maxFillPixels. Logs errors via KLog on failure.
+ * total pixel span matches maxFillPixels.
  *
  * @return 1 if valid, 0 if any check fails
  */
 static u8 validate_pip_layout(const GaugeLogic *logic, const GaugeLaneLayout *layout)
 {
     if (layout->pipCount == 0)
-    {
-        KLog("Gauge PIP config error: layout pipCount is zero");
         return 0;
-    }
 
     for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
     {
         const u8 segmentId = layout->segmentIdByCell[cellIndex];
         if (layout->pipTilesetBySegment[segmentId] == NULL)
-        {
-            KLog_U1("Gauge PIP config error missing compact tileset segmentId: ", segmentId);
             return 0;
-        }
         if (layout->pipStateCountBySegment[segmentId] < 2)
-        {
-            KLog_U2("Gauge PIP config error invalid stateCount segmentId: ", segmentId,
-                    " stateCount: ", layout->pipStateCountBySegment[segmentId]);
             return 0;
-        }
         u8 pipHeight = layout->pipHeightBySegment[segmentId];
         if (pipHeight == 0)
             pipHeight = 1;
         if (pipHeight > 4)
-        {
-            KLog_U2("Gauge PIP config error invalid height segmentId: ", segmentId,
-                    " height: ", pipHeight);
             return 0;
-        }
     }
 
     for (u8 fillIndex = 0; fillIndex < layout->length; fillIndex++)
@@ -6569,10 +6541,7 @@ static u8 validate_pip_layout(const GaugeLogic *logic, const GaugeLaneLayout *la
         const u8 localTile = layout->pipLocalTileByFillIndex[fillIndex];
 
         if (pipIndex == CACHE_INVALID_U8)
-        {
-            KLog_U1("Gauge PIP config error invalid pipIndex fillIndex: ", fillIndex);
             return 0;
-        }
 
         if (localTile == 0)
         {
@@ -6583,28 +6552,16 @@ static u8 validate_pip_layout(const GaugeLogic *logic, const GaugeLaneLayout *la
                 styleWidth = 1;
 
             if (layout->pipWidthByPipIndex[pipIndex] != styleWidth)
-            {
-                KLog_U2("Gauge PIP config error pipWidth style: ", styleWidth,
-                        " pipWidth run: ", layout->pipWidthByPipIndex[pipIndex]);
                 return 0;
-            }
         }
     }
 
     if (logic->maxValue != layout->pipCount)
-    {
-        KLog_U2("Gauge PIP config error maxValue: ", logic->maxValue,
-                " pipCount: ", layout->pipCount);
         return 0;
-    }
 
     const u16 totalPixels = compute_pip_total_pixels(layout);
     if (totalPixels != logic->maxFillPixels)
-    {
-        KLog_U2("Gauge PIP config error maxFillPx: ", logic->maxFillPixels,
-                " pipTotalPx: ", totalPixels);
         return 0;
-    }
 
     return 1;
 }
@@ -6659,18 +6616,20 @@ void Gauge_init(Gauge *gauge, const GaugeInit *init)
         return;
 
     /* Gauge_init expects a fresh Gauge (or one previously released). */
+#if GAUGE_ENABLE_TRACE
+    const u8 initialDebugMode = gauge->debugMode ? 1 : 0;
+#endif
     memset(gauge, 0, sizeof(*gauge));
+#if GAUGE_ENABLE_TRACE
+    gauge->debugMode = initialDebugMode;
+#endif
 
     u16 maxValue = init->maxValue;
     const u16 maxFillPixels = (u16)(init->layout->length * GAUGE_PIXELS_PER_TILE);
     GaugeValueMode valueMode = init->valueMode;
 
     if (maxValue > GAUGE_LUT_CAPACITY)
-    {
-        KLog_U2("Gauge init maxValue: ", maxValue,
-                " clamped to: ", GAUGE_LUT_CAPACITY);
         maxValue = GAUGE_LUT_CAPACITY;
-    }
 
     if (valueMode != GAUGE_VALUE_MODE_PIP)
         valueMode = GAUGE_VALUE_MODE_FILL;
@@ -6689,10 +6648,7 @@ void Gauge_init(Gauge *gauge, const GaugeInit *init)
         gauge->logic.valueToPixelsData = (u16 *)gauge_alloc_bytes(
             (u16)((maxValue + 1) * (u8)sizeof(u16)));
         if (!gauge->logic.valueToPixelsData)
-        {
-            KLog("Gauge init alloc failed: valueToPixelsData");
             return;
-        }
         fill_value_to_pixels_lut(gauge->logic.valueToPixelsData, maxValue, maxFillPixels);
         lut = gauge->logic.valueToPixelsData;
     }
@@ -6700,25 +6656,14 @@ void Gauge_init(Gauge *gauge, const GaugeInit *init)
     {
         u16 validatedPipCount = init->layout->pipCount;
         if (validatedPipCount > GAUGE_LUT_CAPACITY)
-        {
-            KLog_U2("Gauge PIP pipCount: ", validatedPipCount,
-                    " clamped to: ", GAUGE_LUT_CAPACITY);
             validatedPipCount = GAUGE_LUT_CAPACITY;
-        }
         if (maxValue != validatedPipCount)
-        {
-            KLog_U2("Gauge PIP maxValue: ", maxValue,
-                    " adjusted to pipCount: ", validatedPipCount);
             maxValue = validatedPipCount;
-        }
 
         gauge->logic.valueToPixelsData = (u16 *)gauge_alloc_bytes(
             (u16)((maxValue + 1) * (u8)sizeof(u16)));
         if (!gauge->logic.valueToPixelsData)
-        {
-            KLog("Gauge init alloc failed: PIP LUT");
             return;
-        }
 
         fill_pip_value_lut(gauge->logic.valueToPixelsData, maxValue, init->layout);
         lut = gauge->logic.valueToPixelsData;
@@ -6817,21 +6762,6 @@ void Gauge_setGainMode(Gauge *gauge,
     invalidate_render_cache(logic);
 }
 
-void Gauge_setDebugMode(Gauge *gauge, u8 enabled)
-{
-    if (!gauge)
-        return;
-
-    gauge->debugMode = enabled ? 1 : 0;
-}
-
-u8 Gauge_getDebugMode(const Gauge *gauge)
-{
-    if (!gauge)
-        return 0;
-    return gauge->debugMode;
-}
-
 static void set_max_fill_pixels_internal(Gauge *gauge, u16 maxFillPixels)
 {
     GaugeLogic *logic = &gauge->logic;
@@ -6848,10 +6778,7 @@ static void set_max_fill_pixels_internal(Gauge *gauge, u16 maxFillPixels)
             logic->valueToPixelsData = (u16 *)gauge_alloc_bytes(
                 (u16)((logic->maxValue + 1) * (u8)sizeof(u16)));
             if (!logic->valueToPixelsData)
-            {
-                KLog("Gauge setMaxFillPixels alloc failed");
                 return;
-            }
         }
         fill_value_to_pixels_lut(logic->valueToPixelsData, logic->maxValue, maxFillPixels);
         logic->valueToPixelsLUT = logic->valueToPixelsData;
@@ -6910,7 +6837,6 @@ static void gauge_sync_pip_baseLane_logic(Gauge *gauge)
         (u16)((baseLanePipCount + 1) * (u8)sizeof(u16)));
     if (!newValueToPixels)
     {
-        KLog("Gauge PIP baseLane sync alloc failed");
         logic->valueToPixelsLUT = logic->valueToPixelsData;
         return;
     }
@@ -7744,6 +7670,9 @@ u8 Gauge_build(Gauge *gauge,
     if (!gauge || !definition)
         return 0;
 
+#if GAUGE_ENABLE_TRACE
+    const u8 initialDebugMode = gauge->debugMode ? 1 : 0;
+#endif
     memset(&s_buildScratch, 0, sizeof(s_buildScratch));
     GaugeDefinition *sanitized = &s_buildScratch.sanitizedDefinition;
     *sanitized = *definition;
@@ -7757,7 +7686,6 @@ u8 Gauge_build(Gauge *gauge,
     sanitized->horizontalFlip = sanitized->horizontalFlip ? 1 : 0;
     sanitized->fixedStartCap = sanitized->fixedStartCap ? 1 : 0;
     sanitized->fixedEndCap = sanitized->fixedEndCap ? 1 : 0;
-    sanitized->debug = sanitized->debug ? 1 : 0;
     if (sanitized->maxValue > GAUGE_LUT_CAPACITY)
         sanitized->maxValue = GAUGE_LUT_CAPACITY;
 
@@ -7815,6 +7743,9 @@ u8 Gauge_build(Gauge *gauge,
     }
 
     Gauge_release(gauge);
+#if GAUGE_ENABLE_TRACE
+    gauge->debugMode = initialDebugMode;
+#endif
     Gauge_init(gauge, &(GaugeInit){
         .maxValue = resolvedMaxValue,
         .initialValue = resolvedMaxValue,
@@ -7839,7 +7770,6 @@ u8 Gauge_build(Gauge *gauge,
                       sanitized->behavior.gainMode,
                       sanitized->behavior.gainAnimShift,
                       sanitized->behavior.gainBlinkShift);
-    Gauge_setDebugMode(gauge, sanitized->debug);
 
     for (u8 laneIndex = 0; laneIndex < laneCount; laneIndex++)
     {
@@ -7860,6 +7790,9 @@ u8 Gauge_build(Gauge *gauge,
 
 fail_after_init:
     Gauge_release(gauge);
+#if GAUGE_ENABLE_TRACE
+    gauge->debugMode = initialDebugMode;
+#endif
 
 fail:
     for (u8 laneIndex = 0; laneIndex < GAUGE_MAX_LANES; laneIndex++)
@@ -8064,29 +7997,8 @@ static void gauge_tick_and_render_fill(Gauge *gauge)
     s_activeGaugeForRender = gauge;
 
 #if GAUGE_ENABLE_TRACE
-    s_traceContext.active = 0;
-    if (gauge->debugMode)
-    {
-        gauge->debugTraceId++;
-        s_traceContext.active = 1;
-        s_traceContext.traceId = gauge->debugTraceId;
-
-        kprintf(
-            "GAUGE_TRACE FRAME traceId=%lu valuePixels=%u trailRendered=%u trailActual=%u trailMode=%s state=%s blinkOffActive=%u blinkOnChanged=%u trailModeChanged=%u laneCount=%u baseLane=%u\n",
-            (unsigned long)gauge->debugTraceId,
-            (unsigned int)valuePixels,
-            (unsigned int)trailPixelsRendered,
-            (unsigned int)trailPixelsActual,
-            trail_mode_to_text(bs.trailMode),
-            render_state_to_text(bs.trailMode, bs.blinkOffActive,
-                                 valuePixels, trailPixelsRendered),
-            (unsigned int)bs.blinkOffActive,
-            (unsigned int)bs.blinkOnChanged,
-            (unsigned int)bs.trailModeChanged,
-            (unsigned int)gauge->laneCount,
-            (unsigned int)gauge->baseLaneIndex
-        );
-    }
+    trace_begin_frame(gauge, valuePixels, trailPixelsRendered, trailPixelsActual,
+                      bs.trailMode, bs.blinkOffActive);
 #endif
 
     /* --- Render all lanes (countdown: 68000 dbra optimization) --- */
@@ -8097,7 +8009,7 @@ static void gauge_tick_and_render_fill(Gauge *gauge)
         if (!lane)
             continue;
 #if GAUGE_ENABLE_TRACE
-        s_traceContext.laneIndex = i;
+        trace_set_lane_index(i);
 #endif
         lane->renderHandler(lane, valuePixels, trailPixelsRendered, trailPixelsActual,
                             bs.blinkOffActive, bs.blinkOnChanged,
@@ -8105,7 +8017,7 @@ static void gauge_tick_and_render_fill(Gauge *gauge)
     }
 
 #if GAUGE_ENABLE_TRACE
-    s_traceContext.active = 0;
+    trace_end_frame();
 #endif
     s_activeGaugeForRender = NULL;
 }
@@ -8371,6 +8283,26 @@ void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
         /* Non-follow damage mode keeps its own visual contract. */
         apply_non_follow_trail_mode_state(logic, 0);
     }
+}
+
+u16 Gauge_getValue(const Gauge *gauge)
+{
+    return gauge ? gauge->logic.currentValue : 0;
+}
+
+u16 Gauge_getMaxValue(const Gauge *gauge)
+{
+    return gauge ? gauge->logic.maxValue : 0;
+}
+
+u8 Gauge_isEmpty(const Gauge *gauge)
+{
+    return (gauge && gauge->logic.currentValue == 0) ? 1 : 0;
+}
+
+u8 Gauge_isFull(const Gauge *gauge)
+{
+    return (gauge && gauge->logic.currentValue == gauge->logic.maxValue) ? 1 : 0;
 }
 
 

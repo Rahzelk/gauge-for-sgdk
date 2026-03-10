@@ -3,6 +3,224 @@
 
 #include <genesis.h>
 
+/* Compile-time trace switch:
+ * 0 = trace code compiled out
+ * 1 = trace code compiled in */
+#define GAUGE_ENABLE_TRACE 1
+
+/* =============================================================================
+   Public API
+   =============================================================================
+
+   The public integration surface comes first. Internal data layout and
+   renderer-specific details remain in this same header after the separator
+   further below so the module stays self-contained in `gauge.h` / `gauge.c`.
+   ============================================================================= */
+
+/* -----------------------------------------------------------------------------
+   Public compile-time limits
+   ----------------------------------------------------------------------------- */
+#define GAUGE_MAX_SEGMENTS    12   /* Maximum different tile styles per lane */
+#define GAUGE_MAX_LENGTH      16   /* Maximum tiles per gauge */
+#define GAUGE_MAX_LANES        8   /* Maximum lanes described by GaugeDefinition */
+
+#ifndef GAUGE_LUT_CAPACITY
+#define GAUGE_LUT_CAPACITY  160
+#endif
+
+#define GAUGE_PIXELS_PER_TILE  8
+#define GAUGE_FILL_TILE_COUNT 45
+#define GAUGE_TILE_U32_COUNT   8
+
+#define GAUGE_FILL_PX_MIN  0
+#define GAUGE_FILL_PX_MAX  8
+
+/* -----------------------------------------------------------------------------
+   Public enumerations
+   ----------------------------------------------------------------------------- */
+typedef enum
+{
+    GAUGE_ORIENT_HORIZONTAL = 0,
+    GAUGE_ORIENT_VERTICAL   = 1
+} GaugeOrientation;
+
+typedef enum
+{
+    GAUGE_FILL_FORWARD = 0,
+    GAUGE_FILL_REVERSE = 1
+} GaugeFillDirection;
+
+typedef enum
+{
+    GAUGE_VRAM_FIXED   = 0,
+    GAUGE_VRAM_DYNAMIC = 1
+} GaugeVramMode;
+
+typedef enum
+{
+    GAUGE_VALUE_MODE_FILL = 0,
+    GAUGE_VALUE_MODE_PIP  = 1
+} GaugeValueMode;
+
+typedef GaugeValueMode GaugeMode;
+
+#define GAUGE_MODE_FILL GAUGE_VALUE_MODE_FILL
+#define GAUGE_MODE_PIP  GAUGE_VALUE_MODE_PIP
+
+typedef enum
+{
+    GAUGE_STRIP_COVERAGE_FULL    = 0,
+    GAUGE_STRIP_COVERAGE_HALF    = 1,
+    GAUGE_STRIP_COVERAGE_QUARTER = 2
+} GaugeStripCoverage;
+
+typedef GaugeStripCoverage GaugePipCoverage;
+
+#define GAUGE_PIP_COVERAGE_FULL    GAUGE_STRIP_COVERAGE_FULL
+#define GAUGE_PIP_COVERAGE_HALF    GAUGE_STRIP_COVERAGE_HALF
+#define GAUGE_PIP_COVERAGE_QUARTER GAUGE_STRIP_COVERAGE_QUARTER
+
+typedef enum
+{
+    GAUGE_TRAIL_MODE_DISABLED             = 0,
+    GAUGE_TRAIL_MODE_FOLLOW               = 1,
+    GAUGE_TRAIL_MODE_STATIC_TRAIL         = 2,
+    GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK = 3,
+    GAUGE_TRAIL_MODE_CRITICAL_TRAIL_BLINK = 4,
+    GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK = 5
+} GaugeTrailMode;
+
+typedef enum
+{
+    GAUGE_CAP_INACTIVE = 0,
+    GAUGE_CAP_ACTIVE   = 1
+} GaugeCapEndState;
+
+typedef enum
+{
+    GAUGE_GAIN_MODE_DISABLED   = 0,
+    GAUGE_GAIN_MODE_FOLLOW     = 1,
+    GAUGE_GAIN_MODE_RESERVED_1 = 2,
+    GAUGE_GAIN_MODE_RESERVED_2 = 3
+} GaugeGainMode;
+
+/* -----------------------------------------------------------------------------
+   Public types
+   ----------------------------------------------------------------------------- */
+typedef struct Gauge Gauge;
+
+typedef struct
+{
+    const TileSet *body;
+    const TileSet *trail;
+    const TileSet *end;
+    const TileSet *bridge;
+} GaugeFillAssets;
+
+typedef struct
+{
+    GaugeFillAssets normal;
+    GaugeFillAssets gain;
+    GaugeFillAssets blinkOff;
+} GaugeFillSkin;
+
+typedef struct
+{
+    const TileSet *tileset;
+    u8 pipWidth;
+    u8 pipHeight;
+    GaugePipCoverage coverage;
+} GaugePipSkin;
+
+typedef struct
+{
+    GaugeFillSkin fill;
+    GaugePipSkin pip;
+} GaugeSkin;
+
+typedef struct
+{
+    u8 cells;
+    const GaugeSkin *skin;
+} GaugeSegment;
+
+typedef struct
+{
+    s8 offsetX;
+    s8 offsetY;
+    u8 firstValueCell;
+    u8 overridePalette;                  /* 0 = use GaugeDefinition.palette */
+    u8 palette;                          /* PAL0..PAL3 when overridePalette!=0 */
+    GaugeSegment segments[GAUGE_MAX_SEGMENTS];
+} GaugeLane;
+
+typedef struct
+{
+    u8 valueAnimEnabled;
+    u8 valueAnimShift;
+    GaugeTrailMode damageMode;
+    u16 criticalValue;
+    u8 damageAnimShift;
+    u8 damageBlinkShift;
+    GaugeGainMode gainMode;
+    u8 gainAnimShift;
+    u8 gainBlinkShift;
+} GaugeBehavior;
+
+typedef struct
+{
+    GaugeMode mode;
+    GaugeOrientation orientation;
+    GaugeFillDirection fillDirection;
+    GaugeVramMode vramMode;
+    u16 originX;
+    u16 originY;                          /* Bottom tile for vertical gauges */
+    u16 maxValue;                         /* 0 = auto from longest lane */
+    u8 fixedStartCap;
+    u8 fixedEndCap;
+    u8 palette;                           /* Default palette for all lanes */
+    u8 priority;
+    u8 verticalFlip;
+    u8 horizontalFlip;
+    GaugeLane lanes[GAUGE_MAX_LANES];
+    GaugeBehavior behavior;
+} GaugeDefinition;
+
+/* -----------------------------------------------------------------------------
+   Public functions
+   ----------------------------------------------------------------------------- */
+u8 Gauge_build(Gauge *gauge,
+               const GaugeDefinition *definition,
+               u16 vramBase);
+
+void Gauge_setValueAnim(Gauge *gauge, u8 enabled, u8 shift);
+void Gauge_setTrailMode(Gauge *gauge,
+                        GaugeTrailMode mode,
+                        u16 criticalValue,
+                        u8 shift,
+                        u8 blinkShift);
+void Gauge_setGainMode(Gauge *gauge,
+                       GaugeGainMode mode,
+                       u8 shift,
+                       u8 blinkShift);
+void Gauge_release(Gauge *gauge);
+void Gauge_update(Gauge *gauge);
+void Gauge_setValue(Gauge *gauge, u16 newValue);
+void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
+void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
+u16 Gauge_getValue(const Gauge *gauge);
+u16 Gauge_getMaxValue(const Gauge *gauge);
+u8 Gauge_isEmpty(const Gauge *gauge);
+u8 Gauge_isFull(const Gauge *gauge);
+
+/* =============================================================================
+   Internal Implementation Details
+   =============================================================================
+
+   Everything below is internal module layout kept in this header so the gauge
+   system remains integrable as only two files: `gauge.h` and `gauge.c`.
+   ============================================================================= */
+
 /* =============================================================================
    gauge.h / gauge.c - Pixel-perfect HUD gauge for SGDK / Mega Drive
    =============================================================================
@@ -381,221 +599,10 @@
    positioned at adjacent tiles (Y+1 for horizontal, X+1 for vertical).
 
    ============================================================================= */
-/* -----------------------------------------------------------------------------
-   Compile-time limits
-   ----------------------------------------------------------------------------- */
-#define GAUGE_MAX_SEGMENTS    12   /* Maximum different tile styles per lane */
-#define GAUGE_MAX_LENGTH      16   /* Maximum tiles per gauge */
-#define GAUGE_MAX_LANES        8   /* Internal render lanes safety guard */
-
-/* Compile-time trace switch:
- * 0 = trace code compiled out
- * 1 = trace code compiled in (runtime still requires Gauge_setDebugMode(..., 1)) */
-#define GAUGE_ENABLE_TRACE 1
-
-/* Maximum logical value (maxValue) supported by the LUT buffer.
- * Each Gauge allocates a value-to-pixels lookup table of
- * (GAUGE_LUT_CAPACITY + 1) entries when needed.
- *
- * Any GaugeDefinition.maxValue must be <= GAUGE_LUT_CAPACITY.
- * Set this to the largest maxValue you'll use across all gauges.
- *
- * Default: 160 (= 20 tiles * 8 pixels/tile).
- *
- * Worst-case RAM cost per Gauge instance: (GAUGE_LUT_CAPACITY + 1) * 2 bytes.
- *   GAUGE_LUT_CAPACITY  96  -> 194 bytes/gauge (12-tile gauges)
- *   GAUGE_LUT_CAPACITY 128  -> 258 bytes/gauge (16-tile gauges)
- *   GAUGE_LUT_CAPACITY 160  -> 322 bytes/gauge (20-tile gauges, default)
- *
- * Note: FILL mode 1:1 (maxValue == maxFillPixels) does not need the LUT.
- * LUT allocation is dynamic and can be omitted in this case.
- */
-#ifndef GAUGE_LUT_CAPACITY
-#define GAUGE_LUT_CAPACITY  160
-#endif
-
-/* Tile properties */
-#define GAUGE_PIXELS_PER_TILE  8   /* Pixels per tile (8x8) */
-#define GAUGE_FILL_TILE_COUNT 45   /* Tiles in a 45-tile fill strip */
-#define GAUGE_TILE_U32_COUNT   8   /* 32-bit words per tile (8x8 @ 4bpp = 32 bytes) */
-
-/* Fill pixel range */
-#define GAUGE_FILL_PX_MIN  0
-#define GAUGE_FILL_PX_MAX  8
-
-/* -----------------------------------------------------------------------------
-   Enumerations
-   ----------------------------------------------------------------------------- */
-
-/**
- * Gauge orientation on screen.
- * HORIZONTAL: fills left-to-right (or right-to-left if reversed)
- * VERTICAL: fills bottom-to-top (or top-to-bottom if reversed)
- */
-typedef enum
-{
-    GAUGE_ORIENT_HORIZONTAL = 0,
-    GAUGE_ORIENT_VERTICAL   = 1
-} GaugeOrientation;
-
-/**
- * Fill direction determines which end fills first.
- * FORWARD: cell 0 fills first (left for horizontal, bottom for vertical)
- * REVERSE: last cell fills first (right for horizontal, top for vertical)
- */
-typedef enum
-{
-    GAUGE_FILL_FORWARD = 0,
-    GAUGE_FILL_REVERSE = 1
-} GaugeFillDirection;
-
-/**
- * VRAM allocation mode for rendering.
- *
- * FIXED:   Each cell gets its own VRAM tile. When a cell changes, 32 bytes
- *          of tile data are DMA'd to its slot. Simple but uses N VRAM tiles
- *          for an N-cell gauge.
- *          Best for: small gauges, mirrors, when VRAM is plentiful.
- *
- * DYNAMIC: All cells share a small pool of VRAM tiles (3-7 tiles typical).
- *          The tilemap is updated to point cells at the right shared tile.
- *          Uses much less VRAM but more CPU (tilemap writes each frame).
- *          Best for: large gauges, when VRAM is tight.
- *
- *   VRAM usage comparison for a 10-cell gauge with trail:
- *     FIXED:   10 tiles (1 per cell)
- *     DYNAMIC: ~5-7 tiles (3 standard + 2-4 partial/bridge/cap)
- */
-typedef enum
-{
-    GAUGE_VRAM_FIXED   = 0,
-    GAUGE_VRAM_DYNAMIC = 1
-} GaugeVramMode;
-
-/**
- * Gauge value mode.
- *
- * FILL: Classic continuous gauge. Each tile fills pixel by pixel (0..8 px).
- *       This is the standard mode for health bars and energy gauges.
- *       Example: [########|####....|........]  (16 px filled out of 24)
- *
- * PIP:  Discrete gauge. Each "pip" is 1 or more tiles that switch states
- *       without partial fill. Guaranteed states are EMPTY and VALUE.
- *       Optional states (LOSS, GAIN, BLINK_OFF) are available only if
- *       provided by the compact tileset.
- *       Example: [VALUE] [VALUE] [VALUE] [LOSS ] [EMPTY]  (3/5 pips filled)
- *
- *       PIP setup requires:
- *       - Provide pip.tileset + pipWidth in each GaugeSkin used by PIP segments
- *       - stateCount is derived automatically from pipTileset size and
- *         stripCoverage (FULL / HALF / QUARTER)
- *       - Pip count is computed from segment geometry
- *       - maxValue is auto-adjusted to pip count during Gauge_build()
- */
-typedef enum
-{
-    GAUGE_VALUE_MODE_FILL = 0,
-    GAUGE_VALUE_MODE_PIP  = 1
-} GaugeValueMode;
-
-typedef GaugeValueMode GaugeMode;
-
-#define GAUGE_MODE_FILL GAUGE_VALUE_MODE_FILL
-#define GAUGE_MODE_PIP  GAUGE_VALUE_MODE_PIP
-
-/**
- * Coverage mode for compact strips.
- *
- * FULL:
- *   Strip stores the full tile surface.
- * HALF:
- *   Strip stores half surface. Missing half is reconstructed with flip flags.
- * QUARTER:
- *   Strip stores quarter surface. Remaining quadrants are reconstructed with
- *   horizontal/vertical flips.
- *
- * In this version, stripCoverage is active in PIP mode only.
- */
-typedef enum
-{
-    GAUGE_STRIP_COVERAGE_FULL    = 0,
-    GAUGE_STRIP_COVERAGE_HALF    = 1,
-    GAUGE_STRIP_COVERAGE_QUARTER = 2
-} GaugeStripCoverage;
-
-typedef GaugeStripCoverage GaugePipCoverage;
-
-#define GAUGE_PIP_COVERAGE_FULL    GAUGE_STRIP_COVERAGE_FULL
-#define GAUGE_PIP_COVERAGE_HALF    GAUGE_STRIP_COVERAGE_HALF
-#define GAUGE_PIP_COVERAGE_QUARTER GAUGE_STRIP_COVERAGE_QUARTER
-
-/**
- * Gauge trail behavior mode.
- *
- * DISABLED:
- *   No trail.
- *
- * FOLLOW:
- *   Classic damage behavior (hold/blink/shrink on decrease).
- *
- * STATIC_TRAIL:
- *   Persistent trail region. No blink, no shrink.
- *
- * STATIC_TRAIL_CRITICAL_BLINK:
- *   Persistent trail region like STATIC_TRAIL.
- *   Trail blinks continuously only when currentValue <= criticalValue.
- *
- * CRITICAL_TRAIL_BLINK:
- *   No trail above criticalValue. When currentValue <= criticalValue,
- *   trail spans max->value and blinks continuously.
- *
- * CRITICAL_VALUE_BLINK:
- *   No trail. When currentValue <= criticalValue, remaining value blinks.
- */
-typedef enum
-{
-    GAUGE_TRAIL_MODE_DISABLED             = 0,
-    GAUGE_TRAIL_MODE_FOLLOW               = 1,
-    GAUGE_TRAIL_MODE_STATIC_TRAIL         = 2,
-    GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK = 3,
-    GAUGE_TRAIL_MODE_CRITICAL_TRAIL_BLINK = 4,
-    GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK = 5
-} GaugeTrailMode;
-
-/**
- * Cap end enable flag for capEndBySegment arrays.
- */
-typedef enum
-{
-    GAUGE_CAP_INACTIVE = 0,
-    GAUGE_CAP_ACTIVE   = 1
-} GaugeCapEndState;
-
-/**
- * Gain behavior mode (used by Gauge_increase).
- *
- * DISABLED:
- *   No gain trail. Value changes according to current value animation config.
- *
- * FOLLOW:
- *   Gain trail leads on increase (hold/blink), then value catches up.
- *
- * RESERVED_*:
- *   Placeholders for future gain styles.
- */
-typedef enum
-{
-    GAUGE_GAIN_MODE_DISABLED   = 0,
-    GAUGE_GAIN_MODE_FOLLOW     = 1,
-    GAUGE_GAIN_MODE_RESERVED_1 = 2,
-    GAUGE_GAIN_MODE_RESERVED_2 = 3
-} GaugeGainMode;
-
 /* =============================================================================
    Forward declarations (needed for circular references)
    ============================================================================= */
 typedef struct GaugeLogic GaugeLogic;
-typedef struct Gauge Gauge;
 typedef struct GaugeLaneInstance GaugeLaneInstance;
 
 /**
@@ -1415,8 +1422,7 @@ struct Gauge
     u8 baseLaneIndex;           /* baseLane used to compute shared decisions */
     u8 baseLaneHasBridge;       /* 1 when baseLane has bridge topology */
     u8 runtimeLocked;           /* Runtime state: 0=open, 1=has lanes, 2=closed after first update */
-    u8 debugMode;               /* Runtime debug traces (0=off, 1=on) */
-    u32 debugTraceId;           /* Monotonic trace block counter (increments per rendered frame) */
+    u8 debugMode;               /* Trace state for this gauge (0=off, 1=on). */
     u16 baseLaneSpanPixels;     /* baseLane logical span in pixels (length * 8) */
 
     /* --- baseLane decision cache (indexed by baseLane fill index) --- */
@@ -1437,261 +1443,5 @@ struct Gauge
     GaugeVramMode vramMode;         /* Default VRAM mode for lanes */
     GaugeValueMode valueMode;       /* Value quantization mode */
 };
-
-
-/* -----------------------------------------------------------------------------
-   Gauge Definition API (public initialization path)
-   ----------------------------------------------------------------------------- */
-
-typedef struct
-{
-    const TileSet *body;
-    const TileSet *trail;
-    const TileSet *end;
-    const TileSet *bridge;
-} GaugeFillAssets;
-
-typedef struct
-{
-    GaugeFillAssets normal;
-    GaugeFillAssets gain;
-    GaugeFillAssets blinkOff;
-} GaugeFillSkin;
-
-typedef struct
-{
-    const TileSet *tileset;
-    u8 pipWidth;
-    u8 pipHeight;
-    GaugePipCoverage coverage;
-} GaugePipSkin;
-
-typedef struct
-{
-    GaugeFillSkin fill;
-    GaugePipSkin pip;
-} GaugeSkin;
-
-typedef struct
-{
-    u8 cells;
-    const GaugeSkin *skin;
-} GaugeSegment;
-
-typedef struct
-{
-    s8 offsetX;
-    s8 offsetY;
-    u8 firstValueCell;
-    u8 overridePalette;                  /* 0 = use GaugeDefinition.palette */
-    u8 palette;                          /* PAL0..PAL3 when overridePalette!=0 */
-    GaugeSegment segments[GAUGE_MAX_SEGMENTS];
-} GaugeLane;
-
-typedef struct
-{
-    u8 valueAnimEnabled;
-    u8 valueAnimShift;
-    GaugeTrailMode damageMode;
-    u16 criticalValue;
-    u8 damageAnimShift;
-    u8 damageBlinkShift;
-    GaugeGainMode gainMode;
-    u8 gainAnimShift;
-    u8 gainBlinkShift;
-} GaugeBehavior;
-
-typedef struct
-{
-    GaugeMode mode;
-    GaugeOrientation orientation;
-    GaugeFillDirection fillDirection;
-    GaugeVramMode vramMode;
-    u16 originX;
-    u16 originY;                          /* Bottom tile for vertical gauges */
-    u16 maxValue;                        /* 0 = auto from longest lane */
-    u8 fixedStartCap;
-    u8 fixedEndCap;
-    u8 palette;                          /* Default palette for all lanes */
-    u8 priority;
-    u8 verticalFlip;
-    u8 horizontalFlip;
-    u8 debug;
-    GaugeLane lanes[GAUGE_MAX_LANES];
-    GaugeBehavior behavior;
-} GaugeDefinition;
-
-/**
- * Build one gauge from a declarative definition.
- *
- * Unused lanes / segments are simply left zero-initialized in their arrays.
- * The first non-empty lane becomes the first rendered lane, but the engine
- * internally picks the longest lane as the shared logical baseLane used for projection.
- *
- * In FILL mode, maxValue==0 defaults to the longest lane span in pixels.
- * In PIP mode, maxValue is auto-aligned to the computed pip count.
- */
-u8 Gauge_build(Gauge *gauge,
-               const GaugeDefinition *definition,
-               u16 vramBase);
-
-
-/* -----------------------------------------------------------------------------
-   Gauge Runtime API
-   ----------------------------------------------------------------------------- */
-
-/**
- * Configure value animation.
- *
- * Configuration-time only:
- * - allowed before first Gauge_update() call
- * - no-op after first Gauge_update() call (runtime closed)
- *
- * @param gauge    Gauge to configure
- * @param enabled  Enable animated value changes (0=instant, 1=animated)
- * @param shift    Animation speed divider (3-6 recommended, 0=use default 4)
- */
-void Gauge_setValueAnim(Gauge *gauge, u8 enabled, u8 shift);
-
-/**
- * Configure damage trail behavior mode and timing.
- *
- * Configuration-time only:
- * - allowed before first Gauge_update() call
- * - no-op after first Gauge_update() call (runtime closed)
- *
- * @param gauge         Gauge to configure
- * @param mode          Damage trail behavior mode
- * @param criticalValue Critical threshold in logical value units (CRITICAL_* modes)
- * @param shift         Damage trail shrink speed divider (3-6 recommended, 0=use default 4)
- * @param blinkShift    Damage blink frequency divider (2-4 recommended, 0=use default 3)
- */
-void Gauge_setTrailMode(Gauge *gauge,
-                        GaugeTrailMode mode,
-                        u16 criticalValue,
-                        u8 shift,
-                        u8 blinkShift);
-
-/**
- * Configure gain behavior mode and timing.
- *
- * Configuration-time only:
- * - allowed before first Gauge_update() call
- * - no-op after first Gauge_update() call (runtime closed)
- *
- * @param gauge      Gauge to configure
- * @param mode       Gain behavior mode
- * @param shift      Gain catch-up speed divider (3-6 recommended, 0=use default 4)
- * @param blinkShift Gain blink frequency divider (2-4 recommended, 0=use default 3)
- */
-void Gauge_setGainMode(Gauge *gauge,
-                       GaugeGainMode mode,
-                       u8 shift,
-                       u8 blinkShift);
-
-/**
- * Enable or disable runtime debug traces for this gauge.
- *
- * This only has effect when GAUGE_ENABLE_TRACE is set to 1 at compile time.
- *
- * When enabled (and trace code compiled in), fill-mode render emits GAUGE_TRACE
- * logs on visual changes:
- * - one frame header
- * - one line per rendered cell decision
- *
- * @param gauge    Gauge to modify
- * @param enabled  0=off, non-zero=on
- */
-void Gauge_setDebugMode(Gauge *gauge, u8 enabled);
-
-/**
- * Get current debug mode state.
- *
- * @param gauge  Gauge to query
- * @return 1 if debug mode is enabled, 0 otherwise
- */
-u8 Gauge_getDebugMode(const Gauge *gauge);
-
-/**
- * Release all allocations owned by the gauge (lanes, buffers, retained layouts, LUTs).
- * Safe to call multiple times.
- */
-void Gauge_release(Gauge *gauge);
-
-/**
- * Update gauge: tick logic + render all lanes.
- * Call once per frame.
- * First call locks runtime configuration APIs.
- *
- * Performs:
- * - Value animation (if enabled)
- * - Trail mode processing (follow/static/critical)
- * - Tile streaming for all lanes
- * - Early return optimization if nothing changed
- */
-void Gauge_update(Gauge *gauge);
-
-/**
- * Set gauge value directly (instant, no trail effect).
- *
- * @param gauge     Gauge to modify
- * @param newValue  New value (clamped to maxValue)
- */
-void Gauge_setValue(Gauge *gauge, u16 newValue);
-
-/**
- * Decrease gauge value (damage).
- * Trail holds then blinks before shrinking toward new value.
- *
- * @param gauge       Gauge to modify
- * @param amount      Amount to decrease
- * @param holdFrames  Frames to hold trail before blinking
- * @param blinkFrames Frames to blink before shrinking
- */
-void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
- 
-/**
- * Increase gauge value (heal).
- * If gain mode is FOLLOW and valueAnim is enabled,
- * triggers gain trail (lead blink then catch-up).
- *
- * @param gauge   Gauge to modify
- * @param amount  Amount to increase
- * @param holdFrames  Frames to hold gain trail before blinking
- * @param blinkFrames Frames to blink gain trail before value catches up
- */
-void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
-
-/**
- * Get current gauge value.
- */
-static inline u16 Gauge_getValue(const Gauge *gauge)
-{
-    return gauge->logic.currentValue;
-}
-
-/**
- * Get maximum gauge value.
- */
-static inline u16 Gauge_getMaxValue(const Gauge *gauge)
-{
-    return gauge->logic.maxValue;
-}
-
-/**
- * Check if gauge is empty (value == 0).
- */
-static inline u8 Gauge_isEmpty(const Gauge *gauge)
-{
-    return gauge->logic.currentValue == 0;
-}
-
-/**
- * Check if gauge is full (value == maxValue).
- */
-static inline u8 Gauge_isFull(const Gauge *gauge)
-{
-    return gauge->logic.currentValue == gauge->logic.maxValue;
-}
 
 #endif /* GAUGE_H */

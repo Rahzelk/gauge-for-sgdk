@@ -68,7 +68,6 @@ static u8 g_selectedScreen = 0;
 static u8 g_selectedCase = 0;
 static u8 g_holdA = 0;
 static u8 g_holdB = 0;
-static u8 g_traceEnabled = 0;
 static u16 g_frameCount = 0;
 static Sprite *g_cursorSprite = NULL;
 
@@ -113,7 +112,6 @@ static void drawHudStatic(void)
 
     VDP_drawText("A: increase   B: decrease", 1, 0);
     VDP_drawText("U/L prev  D/R next  C: change screen", 1, 1);
-    VDP_drawText("START: trace", 1, 2);
     VDP_drawText("Screen:", 1, 3);
     VDP_drawText("Selected:", 1, 4);
     VDP_drawText("VRAM mode:", 1, 5);
@@ -1234,7 +1232,6 @@ static void updateHudDynamic(void)
 {
     const DemoScreenSource *screen = &g_screens[g_selectedScreen];
     const char *selectedLabel = "No case available";
-    const char *traceLabel = g_traceEnabled ? "ON" : "OFF";
 
     if (g_activeCaseCount > 0 && g_selectedCase < g_activeCaseCount)
         selectedLabel = g_activeCases[g_selectedCase].label;
@@ -1243,11 +1240,9 @@ static void updateHudDynamic(void)
     clearHudLine(3);
     clearHudLine(4);
     clearHudLine(5);
-    VDP_drawText("START: trace", 1, 2);
     VDP_drawText("Screen:", 1, 3);
     VDP_drawText("Selected:", 1, 4);
     VDP_drawText("VRAM mode:", 1, 5);
-    VDP_drawText(traceLabel, 15, 2);
     VDP_drawText(screen->title, 9, 3);
     VDP_drawText(selectedLabel, 11, 4);
     VDP_drawText(getVramModeName(), 12, 5);
@@ -1304,22 +1299,6 @@ static void clearScreenPlanes(void)
     VDP_clearPlane(BG_A, TRUE);
     VDP_clearPlane(BG_B, TRUE);
     VDP_clearPlane(WINDOW, TRUE);
-}
-
-static void syncSelectedCaseDebugMode(void)
-{
-    for (u8 caseIndex = 0; caseIndex < g_activeCaseCount; caseIndex++)
-    {
-        DemoCaseRuntime *runtimeCase = &g_activeCases[caseIndex];
-        const u8 enabled = (g_traceEnabled && caseIndex == g_selectedCase) ? 1 : 0;
-
-        for (u8 gaugeIndex = 0; gaugeIndex < runtimeCase->gaugeCount; gaugeIndex++)
-        {
-            Gauge *gauge = runtimeCase->gauges[gaugeIndex];
-            if (gauge)
-                Gauge_setDebugMode(gauge, enabled);
-        }
-    }
 }
 
 static u8 tryBuildCase(const DemoCaseSource *sourceCase,
@@ -1402,7 +1381,6 @@ static void loadScreen(u8 screenIndex)
     else if (g_selectedCase >= g_activeCaseCount)
         g_selectedCase = 0;
 
-    syncSelectedCaseDebugMode();
     updateHudDynamic();
     updateCursorSprite();
 }
@@ -1444,7 +1422,6 @@ static void changeSelection(s16 direction)
 
     g_holdA = 0;
     g_holdB = 0;
-    syncSelectedCaseDebugMode();
     updateHudDynamic();
     updateCursorSprite();
 }
@@ -1465,9 +1442,18 @@ static void handleInput(u16 pressed, u16 held)
 
     if (pressed & BUTTON_START)
     {
-        g_traceEnabled ^= 1;
-        syncSelectedCaseDebugMode();
-        updateHudDynamic();
+        if (selectedCase && selectedCase->gaugeCount > 0)
+        {
+            const u8 enabled = selectedCase->gauges[0] ?
+                (selectedCase->gauges[0]->debugMode ? 0 : 1) : 1;
+
+            for (u8 gaugeIndex = 0; gaugeIndex < selectedCase->gaugeCount; gaugeIndex++)
+            {
+                Gauge *gauge = selectedCase->gauges[gaugeIndex];
+                if (gauge)
+                    gauge->debugMode = enabled;
+            }
+        }
     }
 
     if (pressed & BUTTON_C)
