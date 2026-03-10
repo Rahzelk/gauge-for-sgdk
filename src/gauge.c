@@ -6317,7 +6317,9 @@ static void process_pip_mode(GaugeLaneInstance *lane,
                                                        pipState,
                                                        sourceRow,
                                                        sourceCol);
-        const u8 changed = (cell->cachedStripIndex != stripIndex);
+        const u8 changed =
+            (cell->cachedFillIndex != stripIndex) ||
+            (cell->cachedStrip != pipStrip);
 
         upload_cell_if_needed(cell, pipStrip, stripIndex);
 
