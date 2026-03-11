@@ -3,59 +3,99 @@
 
 #include <genesis.h>
 
-/* Compile-time trace switch:
- * 0 = trace code compiled out
- * 1 = trace code compiled in */
+/*
+ * Compile-time trace switch.
+ *
+ * Set to 1 to compile GAUGE_TRACE FRAME / GAUGE_TRACE CELL support.
+ * Set to 0 to remove all trace helpers and trace strings from the ROM.
+ */
 #define GAUGE_ENABLE_TRACE 1
 
 /* =============================================================================
    Public API
    =============================================================================
 
-   The public integration surface comes first. Internal data layout and
-   renderer-specific details remain in this same header after the separator
-   further below so the module stays self-contained in `gauge.h` / `gauge.c`.
+   This section is the integration contract of the module.
+   A game only needs to understand the types and functions below to:
+
+   1. describe the graphics used by a gauge
+   2. describe one or more lanes and their behavior
+   3. build a Gauge instance
+   4. update it once per frame and change its value over time
+
+   The detailed renderer internals stay later in this same file so the module
+   remains easy to integrate as only two files: `gauge.h` and `gauge.c`.
    ============================================================================= */
 
 /* -----------------------------------------------------------------------------
    Public compile-time limits
    ----------------------------------------------------------------------------- */
-#define GAUGE_MAX_SEGMENTS    12   /* Maximum different tile styles per lane */
-#define GAUGE_MAX_LENGTH      16   /* Maximum tiles per gauge */
-#define GAUGE_MAX_LANES        8   /* Maximum lanes described by GaugeDefinition */
+/* Maximum number of visual segments in one lane definition. */
+#define GAUGE_MAX_SEGMENTS    12
+/* Maximum number of 8x8 cells in one rendered lane. */
+#define GAUGE_MAX_LENGTH      16
+/* Maximum number of lanes declared in one GaugeDefinition. */
+#define GAUGE_MAX_LANES        8
 
 #ifndef GAUGE_LUT_CAPACITY
+/* Internal scratch capacity used when building value-to-pixel lookup tables. */
 #define GAUGE_LUT_CAPACITY  160
 #endif
 
+/* One Mega Drive tile is 8 pixels wide/high. */
 #define GAUGE_PIXELS_PER_TILE  8
+/* BODY / END / BRIDGE strips contain 45 valid fill combinations. */
 #define GAUGE_FILL_TILE_COUNT 45
+/* One 8x8 tile is 8 u32 words in SGDK tile data format. */
 #define GAUGE_TILE_U32_COUNT   8
 
+/* Per-cell fill values are always expressed in the inclusive range [0..8]. */
 #define GAUGE_FILL_PX_MIN  0
 #define GAUGE_FILL_PX_MAX  8
 
 /* -----------------------------------------------------------------------------
    Public enumerations
    ----------------------------------------------------------------------------- */
+/* Direction in which the lane grows on screen. */
 typedef enum
 {
     GAUGE_ORIENT_HORIZONTAL = 0,
     GAUGE_ORIENT_VERTICAL   = 1
 } GaugeOrientation;
 
+/* Direction in which value progression moves inside the lane. */
 typedef enum
 {
     GAUGE_FILL_FORWARD = 0,
     GAUGE_FILL_REVERSE = 1
 } GaugeFillDirection;
 
+/*
+ * VRAM strategy used by the renderer.
+ *
+ * FIXED:
+ *   one dedicated VRAM tile per rendered cell
+ *   simpler mental model, higher VRAM cost
+ *
+ * DYNAMIC:
+ *   a small shared VRAM cache is reused and tiles are uploaded on demand
+ *   lower VRAM cost, more DMA activity during updates
+ */
 typedef enum
 {
     GAUGE_VRAM_FIXED   = 0,
     GAUGE_VRAM_DYNAMIC = 1
 } GaugeVramMode;
 
+/*
+ * Visual mode of the gauge.
+ *
+ * FILL:
+ *   pixel-precise bar, can show partial tiles and trail edges
+ *
+ * PIP:
+ *   step-based display where each unit is rendered as a discrete pip state
+ */
 typedef enum
 {
     GAUGE_VALUE_MODE_FILL = 0,
@@ -67,6 +107,7 @@ typedef GaugeValueMode GaugeMode;
 #define GAUGE_MODE_FILL GAUGE_VALUE_MODE_FILL
 #define GAUGE_MODE_PIP  GAUGE_VALUE_MODE_PIP
 
+/* Coverage preset used by the PIP builder when slicing a source tileset. */
 typedef enum
 {
     GAUGE_STRIP_COVERAGE_FULL    = 0,
@@ -80,6 +121,13 @@ typedef GaugeStripCoverage GaugePipCoverage;
 #define GAUGE_PIP_COVERAGE_HALF    GAUGE_STRIP_COVERAGE_HALF
 #define GAUGE_PIP_COVERAGE_QUARTER GAUGE_STRIP_COVERAGE_QUARTER
 
+/*
+ * Damage trail behavior.
+ *
+ * The trail is the delayed visual ghost left behind when the value changes.
+ * Some modes keep it hidden, some keep it static, others use blinking when
+ * the gauge reaches a critical threshold.
+ */
 typedef enum
 {
     GAUGE_TRAIL_MODE_DISABLED             = 0,
@@ -90,12 +138,19 @@ typedef enum
     GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK = 5
 } GaugeTrailMode;
 
+/* Optional fixed caps at the start and end of the lane. */
 typedef enum
 {
     GAUGE_CAP_INACTIVE = 0,
     GAUGE_CAP_ACTIVE   = 1
 } GaugeCapEndState;
 
+/*
+ * Gain trail behavior used when the logical value increases.
+ *
+ * Only FOLLOW is currently implemented as a distinct runtime mode.
+ * The RESERVED values are kept for future expansion and should not be used.
+ */
 typedef enum
 {
     GAUGE_GAIN_MODE_DISABLED   = 0,
@@ -107,8 +162,17 @@ typedef enum
 /* -----------------------------------------------------------------------------
    Public types
    ----------------------------------------------------------------------------- */
+/* Runtime gauge object. Declare one instance per gauge on screen. */
 typedef struct Gauge Gauge;
 
+/*
+ * Fill-mode tilesets for one visual context.
+ *
+ * `body` is the main strip for regular cells.
+ * `trail`, `end`, and `bridge` are optional refinements.
+ * Cap graphics are derived automatically by the build from the available fill
+ * strips, so there is no explicit public cap field here.
+ */
 typedef struct
 {
     const TileSet *body;
@@ -117,6 +181,16 @@ typedef struct
     const TileSet *bridge;
 } GaugeFillAssets;
 
+/*
+ * Complete fill-mode skin for one segment.
+ *
+ * normal:
+ *   default rendering
+ * gain:
+ *   optional alternate graphics used while a gain trail is active
+ * blinkOff:
+ *   optional alternate graphics used during blink-off frames
+ */
 typedef struct
 {
     GaugeFillAssets normal;
@@ -124,6 +198,14 @@ typedef struct
     GaugeFillAssets blinkOff;
 } GaugeFillSkin;
 
+/*
+ * PIP-mode source graphics for one segment.
+ *
+ * `tileset` must contain the compact PIP states for that segment.
+ * Width/height describe one state footprint in tiles.
+ * coverage controls how much of the source strip is interpreted by the PIP
+ * builder when generating the runtime lookup tables.
+ */
 typedef struct
 {
     const TileSet *tileset;
@@ -132,18 +214,39 @@ typedef struct
     GaugePipCoverage coverage;
 } GaugePipSkin;
 
+/* Complete skin for one segment. A segment may define fill art, pip art, or both. */
 typedef struct
 {
     GaugeFillSkin fill;
     GaugePipSkin pip;
 } GaugeSkin;
 
+/*
+ * One contiguous segment inside a lane.
+ *
+ * Example:
+ *   a 12-cell lane may use 6 blue cells, 4 yellow cells, 2 red cells
+ *   by declaring three GaugeSegment entries with different skins.
+ */
 typedef struct
 {
     u8 cells;
     const GaugeSkin *skin;
 } GaugeSegment;
 
+/*
+ * One visual lane of the gauge.
+ *
+ * offsetX / offsetY:
+ *   lane position relative to GaugeDefinition.originX / originY
+ *
+ * firstValueCell:
+ *   number of base-lane cells skipped before this lane starts participating
+ *   in fill progression; useful for asymmetrical multi-lane gauges
+ *
+ * overridePalette / palette:
+ *   let one lane use a different palette line than the gauge default
+ */
 typedef struct
 {
     s8 offsetX;
@@ -154,6 +257,12 @@ typedef struct
     GaugeSegment segments[GAUGE_MAX_SEGMENTS];
 } GaugeLane;
 
+/*
+ * Runtime behavior knobs shared by the whole gauge.
+ *
+ * The shifts are frame-based speed divisors:
+ * higher values mean slower visible motion or slower blinking cadence.
+ */
 typedef struct
 {
     u8 valueAnimEnabled;
@@ -167,6 +276,19 @@ typedef struct
     u8 gainBlinkShift;
 } GaugeBehavior;
 
+/*
+ * Full declarative description used by Gauge_build().
+ *
+ * Typical workflow:
+ *   1. describe the skins used by each segment
+ *   2. fill one GaugeDefinition
+ *   3. call Gauge_build(&gauge, &definition, vramBase)
+ *
+ * Notes:
+ * - `maxValue = 0` means "derive it automatically from the longest lane"
+ * - `originY` is the bottom tile for vertical gauges
+ * - a lane is considered active only if its first segment has both cells and a skin
+ */
 typedef struct
 {
     GaugeMode mode;
@@ -189,29 +311,45 @@ typedef struct
 /* -----------------------------------------------------------------------------
    Public functions
    ----------------------------------------------------------------------------- */
+/*
+ * Build or rebuild a gauge from a declarative definition.
+ *
+ * `vramBase` is expressed in VRAM tile units, not in bytes.
+ * On success, the gauge owns every internal layout and runtime buffer needed
+ * for rendering. Rebuilding an existing Gauge is supported; previous resources
+ * are released internally before the new build succeeds.
+ *
+ * Returns 1 on success, 0 on failure.
+ */
 u8 Gauge_build(Gauge *gauge,
                const GaugeDefinition *definition,
                u16 vramBase);
 
+/* Enable or disable smooth value animation. */
 void Gauge_setValueAnim(Gauge *gauge, u8 enabled, u8 shift);
+/* Configure damage-trail rendering and its blink timing. */
 void Gauge_setTrailMode(Gauge *gauge,
                         GaugeTrailMode mode,
                         u16 criticalValue,
                         u8 shift,
                         u8 blinkShift);
+/* Configure the gain trail shown when the value increases. */
 void Gauge_setGainMode(Gauge *gauge,
                        GaugeGainMode mode,
                        u8 shift,
                        u8 blinkShift);
+/* Release every runtime resource owned by a previously built gauge. */
 void Gauge_release(Gauge *gauge);
+/* Tick the state machine and render the gauge. Call once per frame. */
 void Gauge_update(Gauge *gauge);
+/* Set the logical value immediately (clamped to the configured range). */
 void Gauge_setValue(Gauge *gauge, u16 newValue);
+/* Decrease the logical value and optionally start hold/blink phases. */
 void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
+/* Increase the logical value and optionally start hold/blink phases. */
 void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
+/* Read the current logical value of the gauge. */
 u16 Gauge_getValue(const Gauge *gauge);
-u16 Gauge_getMaxValue(const Gauge *gauge);
-u8 Gauge_isEmpty(const Gauge *gauge);
-u8 Gauge_isFull(const Gauge *gauge);
 
 /* =============================================================================
    Internal Implementation Details
@@ -235,15 +373,9 @@ u8 Gauge_isFull(const Gauge *gauge);
      [################............]   value = 60%
       <-- filled -->  <-- empty -->
 
-   PUBLIC API NOTE:
-   ----------------
-   Gauge initialization is declarative:
-     - describe reusable GaugeSkin objects
-     - declare one GaugeDefinition with its lanes and segments
-     - call Gauge_build()
-
-   GaugeLaneLayout/GaugeLaneInstance are internal architecture details kept documented below
-   to explain rendering behavior, but they are not exposed by the public init API.
+   GaugeLaneLayout and GaugeLaneInstance are internal architecture details.
+   They stay documented below to explain how the renderer works, but game code
+   should build gauges only through GaugeDefinition + Gauge_build().
 
 
    ============================================================================
@@ -636,8 +768,8 @@ typedef void GaugeLaneRenderHandler(GaugeLaneInstance *laneInstance,
    =============================================================================
 
    A GaugeLaneLayout describes what a gauge looks like.
-   Geometry is initialized once, and optional feature sets can be updated
-   through dedicated setters.
+   Geometry and optional feature sets are populated during the internal
+   layout build phase driven by GaugeLaneLayout_build().
 
    It contains:
    - How many cells the gauge has
@@ -964,7 +1096,7 @@ typedef struct
 
 
 /* -----------------------------------------------------------------------------
-   Internal legacy layout style structs (for renderer internals)
+   Internal layout style/build structs
    ----------------------------------------------------------------------------- */
 
 /**
@@ -1048,10 +1180,10 @@ typedef struct
 } GaugeSegmentStyle;
 
 /**
- * Legacy internal layout initialization config.
+ * Internal layout build description.
  *
- * Kept for internal build plumbing in gauge.c.
- * Public initialization should use GaugeDefinition + Gauge_build() instead.
+ * This is the normalized form consumed by GaugeLaneLayout_build() after the
+ * public GaugeDefinition has been sanitized and expanded.
  */
 typedef struct
 {

@@ -2084,23 +2084,9 @@ static u8 layout_sync_optional_segment_flags_by_usage(u8 hasAny,
 static void layout_copy_segment_tilesets(const u32 **destinationTilesets,
                                          const u32 * const *sourceTilesets,
                                          u8 segmentCount);
-static void layout_copy_segment_bool_flags(u8 *destinationFlags,
-                                           const u8 *sourceFlags,
-                                           u8 segmentCount,
-                                           const u8 *defaultView);
 
-/* GaugeLaneLayout public-facing helpers are internal to this translation unit. */
+/* GaugeLaneLayout helpers used only by the module build/runtime plumbing. */
 void GaugeLaneLayout_build(GaugeLaneLayout *layout, const GaugeLaneLayoutInit *init);
-void GaugeLaneLayout_init(GaugeLaneLayout *layout,
-                      u8 length,
-                      GaugeFillDirection fillDirection,
-                      const u32 * const *tilesets,
-                      const u8 *segmentIdByCell,
-                      GaugeOrientation orientation,
-                      u8 palette,
-                      u8 priority,
-                      u8 verticalFlip,
-                      u8 horizontalFlip);
 void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
                         u8 length,
                         GaugeFillDirection fillDirection,
@@ -2117,42 +2103,8 @@ void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
 void GaugeLaneLayout_setFillOffset(GaugeLaneLayout *layout, u16 fillOffsetPixels);
 void GaugeLaneLayout_setFillForward(GaugeLaneLayout *layout);
 void GaugeLaneLayout_setFillReverse(GaugeLaneLayout *layout);
-void GaugeLaneLayout_makeMirror(GaugeLaneLayout *dst, const GaugeLaneLayout *src);
 void GaugeLaneLayout_retain(GaugeLaneLayout *layout);
 void GaugeLaneLayout_release(GaugeLaneLayout *layout);
-void GaugeLaneLayout_setCapTilesets(GaugeLaneLayout *layout,
-                                const u32 * const *capStartTilesets,
-                                const u32 * const *capEndTilesets,
-                                const u32 * const *capStartBreakTilesets,
-                                const u32 * const *capStartTrailTilesets,
-                                const u8 *capEndBySegment);
-void GaugeLaneLayout_setBlinkOffTilesets(GaugeLaneLayout *layout,
-                                     const u32 * const *blinkOffBodyTilesets,
-                                     const u32 * const *blinkOffEndTilesets,
-                                     const u32 * const *blinkOffTrailTilesets,
-                                     const u32 * const *blinkOffBridgeTilesets,
-                                     const u32 * const *blinkOffCapStartTilesets,
-                                     const u32 * const *blinkOffCapEndTilesets,
-                                     const u32 * const *blinkOffCapStartBreakTilesets,
-                                     const u32 * const *blinkOffCapStartTrailTilesets);
-void GaugeLaneLayout_setGainTrailTilesets(GaugeLaneLayout *layout,
-                                      const u32 * const *gainBodyTilesets,
-                                      const u32 * const *gainEndTilesets,
-                                      const u32 * const *gainTrailTilesets,
-                                      const u32 * const *gainBridgeTilesets,
-                                      const u32 * const *gainCapStartTilesets,
-                                      const u32 * const *gainCapEndTilesets,
-                                      const u32 * const *gainCapStartBreakTilesets,
-                                      const u32 * const *gainCapStartTrailTilesets);
-void GaugeLaneLayout_setGainBlinkOffTilesets(GaugeLaneLayout *layout,
-                                         const u32 * const *gainBlinkOffBodyTilesets,
-                                         const u32 * const *gainBlinkOffEndTilesets,
-                                         const u32 * const *gainBlinkOffTrailTilesets,
-                                         const u32 * const *gainBlinkOffBridgeTilesets,
-                                         const u32 * const *gainBlinkOffCapStartTilesets,
-                                         const u32 * const *gainBlinkOffCapEndTilesets,
-                                         const u32 * const *gainBlinkOffCapStartBreakTilesets,
-                                         const u32 * const *gainBlinkOffCapStartTrailTilesets);
 void GaugeLaneLayout_setPipStyles(GaugeLaneLayout *layout,
                               const u32 * const *pipTilesets,
                               const u8 *pipWidthBySegment,
@@ -2865,20 +2817,6 @@ static void layout_copy_segment_tilesets(const u32 **destinationTilesets,
     }
 }
 
-static void layout_copy_segment_bool_flags(u8 *destinationFlags,
-                                           const u8 *sourceFlags,
-                                           u8 segmentCount,
-                                           const u8 *defaultView)
-{
-    if (!destinationFlags || destinationFlags == defaultView)
-        return;
-
-    for (u8 segmentId = 0; segmentId < segmentCount; segmentId++)
-    {
-        destinationFlags[segmentId] = sourceFlags ? (sourceFlags[segmentId] ? 1 : 0) : 0;
-    }
-}
-
 typedef enum
 {
     LAYOUT_TILESET_SLOT_BODY = 0,
@@ -2904,20 +2842,11 @@ typedef u16 LayoutTilesetSlotMask;
 
 #define LAYOUT_TILESET_SLOT_MASK(slot) ((LayoutTilesetSlotMask)(1u << (slot)))
 #define LAYOUT_TILESET_SLOT_MASK_ALL ((LayoutTilesetSlotMask)((1u << LAYOUT_TILESET_SLOT_COUNT) - 1u))
-#define LAYOUT_TILESET_SLOT_MASK_CAPS (LAYOUT_TILESET_SLOT_MASK(LAYOUT_TILESET_SLOT_CAP_START) | \
-                                       LAYOUT_TILESET_SLOT_MASK(LAYOUT_TILESET_SLOT_CAP_END) | \
-                                       LAYOUT_TILESET_SLOT_MASK(LAYOUT_TILESET_SLOT_CAP_START_BREAK) | \
-                                       LAYOUT_TILESET_SLOT_MASK(LAYOUT_TILESET_SLOT_CAP_START_TRAIL))
 
 typedef struct
 {
     const u32 ***targetBySlot[LAYOUT_TILESET_SLOT_COUNT];
 } LayoutContextTargetView;
-
-typedef struct
-{
-    const u32 * const *sourceBySlot[LAYOUT_TILESET_SLOT_COUNT];
-} LayoutContextSourceView;
 
 static void build_layout_context_target_view(GaugeLaneLayout *layout,
                                              LayoutStyleContext context,
@@ -3019,44 +2948,6 @@ static inline const u32 *skin_set_tileset_for_slot(const GaugeSkinSet *skinSet,
         return skinSet->capStartTrail;
     default:
         return NULL;
-    }
-}
-
-static void apply_layout_context_sources(GaugeLaneLayout *layout,
-                                         LayoutStyleContext context,
-                                         const LayoutContextSourceView *sources,
-                                         LayoutTilesetSlotMask slotMask)
-{
-    if (!layout || !sources)
-        return;
-
-    LayoutContextTargetView targetView;
-    build_layout_context_target_view(layout, context, &targetView);
-
-    for (u8 slot = 0; slot < LAYOUT_TILESET_SLOT_COUNT; slot++)
-    {
-        const LayoutTilesetSlot slotId = (LayoutTilesetSlot)slot;
-        if ((slotMask & LAYOUT_TILESET_SLOT_MASK(slotId)) == 0)
-            continue;
-
-        const u32 ***targetField = targetView.targetBySlot[slotId];
-        if (!targetField)
-            continue;
-
-        const u32 * const *sourceTilesets = sources->sourceBySlot[slotId];
-
-        if (context == LAYOUT_STYLE_CONTEXT_BASE && slotId == LAYOUT_TILESET_SLOT_BODY)
-        {
-            layout_copy_segment_tilesets(*targetField, sourceTilesets, layout->segmentCount);
-            continue;
-        }
-
-        layout_sync_optional_segment_tilesets_by_usage(
-            segment_tileset_array_has_any(sourceTilesets, layout->segmentCount),
-            targetField,
-            layout->segmentCount);
-
-        layout_copy_segment_tilesets(*targetField, sourceTilesets, layout->segmentCount);
     }
 }
 
@@ -3176,7 +3067,7 @@ static u8 layout_alloc_buffers(GaugeLaneLayout *layout, u8 length, u8 segmentCou
     const u16 segPtrBytes = (u16)(segmentCount * (u8)sizeof(const u32 *));
 
     /* Mandatory geometry and BODY tileset bindings only.
-     * Optional features are allocated lazily by dedicated setters/build paths. */
+     * Optional features are allocated lazily by the layout build path. */
     layout->segmentIdByCell = (u8 *)gauge_alloc_bytes(cellBytes);
     layout->fillIndexByCell = (u8 *)gauge_alloc_bytes(cellBytes);
     layout->cellIndexByFillIndex = (u8 *)gauge_alloc_bytes(cellBytes);
@@ -3292,24 +3183,8 @@ void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
     layout->verticalFlip = verticalFlip ? 1 : 0;
     layout->horizontalFlip = horizontalFlip ? 1 : 0;
 
-    /* Initialize cached flags (computed later by setters/build) */
+    /* Initialize cached flags. GaugeLaneLayout_build() refreshes them after style import. */
     layout_zero_optional_flags(layout);
-}
-
-void GaugeLaneLayout_init(GaugeLaneLayout *layout,
-                      u8 length,
-                      GaugeFillDirection fillDirection,
-                      const u32 * const *tilesets,
-                      const u8 *segmentIdByCell,
-                      GaugeOrientation orientation,
-                      u8 palette,
-                      u8 priority,
-                      u8 verticalFlip,
-                      u8 horizontalFlip)
-{
-    GaugeLaneLayout_initEx(layout, length, fillDirection, tilesets, NULL,
-                       NULL, NULL, segmentIdByCell, orientation, palette,
-                       priority, verticalFlip, horizontalFlip);
 }
 
 /** Set fill direction to forward: cell 0 fills first (left-to-right / bottom-to-top). */
@@ -3354,113 +3229,6 @@ void GaugeLaneLayout_setFillReverse(GaugeLaneLayout *layout)
     build_pip_luts(layout);
 }
 
-/**
- * Create a mirrored copy of a layout (for P2/opponent side).
- *
- * Reverses segment order and swaps fill direction.
- * Copies flip flags from the source layout (no automatic flip).
- * Copies all tilesets by reference (no deep copy needed since tilesets are in ROM).
- */
-void GaugeLaneLayout_makeMirror(GaugeLaneLayout *dst, const GaugeLaneLayout *src)
-{
-    if (!dst || !src)
-        return;
-
-    /* Rebuild target layout with reversed segment map and same segment arrays. */
-    u8 reversedSegmentIds[GAUGE_MAX_LENGTH];
-    for (u8 c = 0; c < src->length; c++)
-    {
-        const u8 srcCell = (u8)(src->length - 1 - c);
-        reversedSegmentIds[c] = src->segmentIdByCell[srcCell];
-    }
-
-    GaugeLaneLayout_initEx(dst,
-                       src->length,
-                       (src->fillIndexByCell[0] == 0) ? GAUGE_FILL_REVERSE : GAUGE_FILL_FORWARD,
-                       src->tilesetBySegment,
-                       src->tilesetEndBySegment,
-                       src->tilesetTrailBySegment,
-                       src->tilesetBridgeBySegment,
-                       reversedSegmentIds,
-                       src->orientation,
-                       src->palette,
-                       src->priority,
-                       src->verticalFlip,
-                       src->horizontalFlip);
-    dst->fillOffset = src->fillOffset;
-    dst->endOverrideEnabled = src->endOverrideEnabled;
-
-    /* Copy optional style groups through public setters (lazy allocations). */
-    GaugeLaneLayout_setCapTilesets(dst,
-                               src->tilesetCapStartBySegment,
-                               src->tilesetCapEndBySegment,
-                               src->tilesetCapStartBreakBySegment,
-                               src->tilesetCapStartTrailBySegment,
-                               src->capEndBySegment);
-    GaugeLaneLayout_setBlinkOffTilesets(dst,
-                                    src->blinkOffTilesetBySegment,
-                                    src->blinkOffTilesetEndBySegment,
-                                    src->blinkOffTilesetTrailBySegment,
-                                    src->blinkOffTilesetBridgeBySegment,
-                                    src->blinkOffTilesetCapStartBySegment,
-                                    src->blinkOffTilesetCapEndBySegment,
-                                    src->blinkOffTilesetCapStartBreakBySegment,
-                                    src->blinkOffTilesetCapStartTrailBySegment);
-    GaugeLaneLayout_setGainTrailTilesets(dst,
-                                     src->gainTilesetBySegment,
-                                     src->gainTilesetEndBySegment,
-                                     src->gainTilesetTrailBySegment,
-                                     src->gainTilesetBridgeBySegment,
-                                     src->gainTilesetCapStartBySegment,
-                                     src->gainTilesetCapEndBySegment,
-                                     src->gainTilesetCapStartBreakBySegment,
-                                     src->gainTilesetCapStartTrailBySegment);
-    GaugeLaneLayout_setGainBlinkOffTilesets(dst,
-                                        src->gainBlinkOffTilesetBySegment,
-                                        src->gainBlinkOffTilesetEndBySegment,
-                                        src->gainBlinkOffTilesetTrailBySegment,
-                                        src->gainBlinkOffTilesetBridgeBySegment,
-                                        src->gainBlinkOffTilesetCapStartBySegment,
-                                        src->gainBlinkOffTilesetCapEndBySegment,
-                                        src->gainBlinkOffTilesetCapStartBreakBySegment,
-                                        src->gainBlinkOffTilesetCapStartTrailBySegment);
-    GaugeLaneLayout_setPipStyles(dst,
-                             src->pipTilesetBySegment,
-                             src->pipWidthBySegment,
-                             src->pipHeightBySegment,
-                             src->pipOffsetBySegment,
-                             src->pipStateCountBySegment,
-                             src->pipStripCoverageBySegment,
-                             src->pipHalfAxisBySegment,
-                             src->pipSourceWidthBySegment,
-                             src->pipSourceHeightBySegment);
-
-    /* Opposite fill direction from source */
-    if (src->fillIndexByCell[0] == 0)
-        GaugeLaneLayout_setFillReverse(dst);
-    else
-        GaugeLaneLayout_setFillForward(dst);
-
-
-    /* Copy base visual properties */
-    dst->orientation = src->orientation;
-    dst->palette = src->palette;
-    dst->priority = src->priority;
-
-    /* Set flip based on orientation */
-    if (src->orientation == GAUGE_ORIENT_HORIZONTAL)
-    {
-        dst->horizontalFlip = 1;
-        dst->verticalFlip = 0;
-    }
-    else
-    {
-        dst->horizontalFlip = 0;
-        dst->verticalFlip = 1;
-    }
-
-}
-
 void GaugeLaneLayout_retain(GaugeLaneLayout *layout)
 {
     if (!layout)
@@ -3478,141 +3246,6 @@ void GaugeLaneLayout_release(GaugeLaneLayout *layout)
 
     if (layout->refCount == 0)
         layout_free_buffers(layout);
-}
-
-void GaugeLaneLayout_setCapTilesets(GaugeLaneLayout *layout,
-                                const u32 * const *capStartTilesets,
-                                const u32 * const *capEndTilesets,
-                                const u32 * const *capStartBreakTilesets,
-                                const u32 * const *capStartTrailTilesets,
-                                const u8 *capEndBySegment)
-{
-    if (!layout)
-        return;
-
-    LayoutContextSourceView sourceView;
-    memset(&sourceView, 0, sizeof(sourceView));
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_CAP_START] = capStartTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_CAP_END] = capEndTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_CAP_START_BREAK] = capStartBreakTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_CAP_START_TRAIL] = capStartTrailTilesets;
-
-    apply_layout_context_sources(layout,
-                                 LAYOUT_STYLE_CONTEXT_BASE,
-                                 &sourceView,
-                                 LAYOUT_TILESET_SLOT_MASK_CAPS);
-
-    layout_sync_optional_segment_flags_by_usage(
-        segment_flag_array_has_any(capEndBySegment, layout->segmentCount),
-        &layout->capEndBySegment,
-        layout->segmentCount,
-        s_zeroSegmentFlags,
-        0);
-
-    layout_copy_segment_bool_flags(layout->capEndBySegment,
-                                   capEndBySegment,
-                                   layout->segmentCount,
-                                   s_zeroSegmentFlags);
-
-    /* Update cached cap flags */
-    detect_caps_enabled(layout, &layout->capStartEnabled, &layout->capEndEnabled);
-}
-
-void GaugeLaneLayout_setBlinkOffTilesets(GaugeLaneLayout *layout,
-                                      const u32 * const *blinkOffBodyTilesets,
-                                      const u32 * const *blinkOffEndTilesets,
-                                      const u32 * const *blinkOffTrailTilesets,
-                                      const u32 * const *blinkOffBridgeTilesets,
-                                     const u32 * const *blinkOffCapStartTilesets,
-                                     const u32 * const *blinkOffCapEndTilesets,
-                                     const u32 * const *blinkOffCapStartBreakTilesets,
-                                     const u32 * const *blinkOffCapStartTrailTilesets)
-{
-    if (!layout)
-        return;
-
-    LayoutContextSourceView sourceView;
-    memset(&sourceView, 0, sizeof(sourceView));
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_BODY] = blinkOffBodyTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_END] = blinkOffEndTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_TRAIL] = blinkOffTrailTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_BRIDGE] = blinkOffBridgeTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_CAP_START] = blinkOffCapStartTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_CAP_END] = blinkOffCapEndTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_CAP_START_BREAK] = blinkOffCapStartBreakTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_CAP_START_TRAIL] = blinkOffCapStartTrailTilesets;
-
-    apply_layout_context_sources(layout,
-                                 LAYOUT_STYLE_CONTEXT_BLINK,
-                                 &sourceView,
-                                 LAYOUT_TILESET_SLOT_MASK_ALL);
-
-    layout->hasBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_STATE_DAMAGE);
-}
-
-void GaugeLaneLayout_setGainTrailTilesets(GaugeLaneLayout *layout,
-                                       const u32 * const *gainBodyTilesets,
-                                       const u32 * const *gainEndTilesets,
-                                       const u32 * const *gainTrailTilesets,
-                                       const u32 * const *gainBridgeTilesets,
-                                      const u32 * const *gainCapStartTilesets,
-                                      const u32 * const *gainCapEndTilesets,
-                                      const u32 * const *gainCapStartBreakTilesets,
-                                      const u32 * const *gainCapStartTrailTilesets)
-{
-    if (!layout)
-        return;
-
-    LayoutContextSourceView sourceView;
-    memset(&sourceView, 0, sizeof(sourceView));
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_BODY] = gainBodyTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_END] = gainEndTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_TRAIL] = gainTrailTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_BRIDGE] = gainBridgeTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_CAP_START] = gainCapStartTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_CAP_END] = gainCapEndTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_CAP_START_BREAK] = gainCapStartBreakTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_CAP_START_TRAIL] = gainCapStartTrailTilesets;
-
-    apply_layout_context_sources(layout,
-                                 LAYOUT_STYLE_CONTEXT_GAIN,
-                                 &sourceView,
-                                 LAYOUT_TILESET_SLOT_MASK_ALL);
-
-    /* Gain bridges can affect bridge LUTs */
-    build_bridge_luts(layout);
-}
-
-void GaugeLaneLayout_setGainBlinkOffTilesets(GaugeLaneLayout *layout,
-                                          const u32 * const *gainBlinkOffBodyTilesets,
-                                          const u32 * const *gainBlinkOffEndTilesets,
-                                          const u32 * const *gainBlinkOffTrailTilesets,
-                                          const u32 * const *gainBlinkOffBridgeTilesets,
-                                         const u32 * const *gainBlinkOffCapStartTilesets,
-                                         const u32 * const *gainBlinkOffCapEndTilesets,
-                                         const u32 * const *gainBlinkOffCapStartBreakTilesets,
-                                         const u32 * const *gainBlinkOffCapStartTrailTilesets)
-{
-    if (!layout)
-        return;
-
-    LayoutContextSourceView sourceView;
-    memset(&sourceView, 0, sizeof(sourceView));
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_BODY] = gainBlinkOffBodyTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_END] = gainBlinkOffEndTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_TRAIL] = gainBlinkOffTrailTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_BRIDGE] = gainBlinkOffBridgeTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_CAP_START] = gainBlinkOffCapStartTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_CAP_END] = gainBlinkOffCapEndTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_CAP_START_BREAK] = gainBlinkOffCapStartBreakTilesets;
-    sourceView.sourceBySlot[LAYOUT_TILESET_SLOT_CAP_START_TRAIL] = gainBlinkOffCapStartTrailTilesets;
-
-    apply_layout_context_sources(layout,
-                                 LAYOUT_STYLE_CONTEXT_GAIN_BLINK,
-                                 &sourceView,
-                                 LAYOUT_TILESET_SLOT_MASK_ALL);
-
-    layout->hasGainBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_STATE_GAIN);
 }
 
 void GaugeLaneLayout_setPipStyles(GaugeLaneLayout *layout,
@@ -4047,11 +3680,11 @@ static void finalize_layout_derived_state(GaugeLaneLayout *layout)
 
 
 /**
- * Build a layout from a GaugeLaneLayoutInit config (preferred one-call API).
+ * Build one fully configured internal layout from GaugeLaneLayoutInit.
  *
- * Initializes geometry, copies all segment styles (base/gain/blinkOff/gainBlinkOff),
- * and sets cached flags. Equivalent to calling initEx + setCaps + setGainTrail +
- * setBlinkOff + setGainBlinkOff individually.
+ * This is the only layout construction entry point still used by the module.
+ * It initializes geometry, copies all style contexts, allocates optional arrays
+ * only when needed, and computes cached flags/LUTs consumed by the renderers.
  */
 void GaugeLaneLayout_build(GaugeLaneLayout *layout, const GaugeLaneLayoutInit *init)
 {
@@ -8381,21 +8014,6 @@ void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
 u16 Gauge_getValue(const Gauge *gauge)
 {
     return gauge ? gauge->logic.currentValue : 0;
-}
-
-u16 Gauge_getMaxValue(const Gauge *gauge)
-{
-    return gauge ? gauge->logic.maxValue : 0;
-}
-
-u8 Gauge_isEmpty(const Gauge *gauge)
-{
-    return (gauge && gauge->logic.currentValue == 0) ? 1 : 0;
-}
-
-u8 Gauge_isFull(const Gauge *gauge)
-{
-    return (gauge && gauge->logic.currentValue == gauge->logic.maxValue) ? 1 : 0;
 }
 
 
