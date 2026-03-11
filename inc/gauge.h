@@ -769,7 +769,7 @@ typedef void GaugeLaneRenderHandler(GaugeLaneInstance *laneInstance,
 
    A GaugeLaneLayout describes what a gauge looks like.
    Geometry and optional feature sets are populated during the internal
-   layout build phase driven by GaugeLaneLayout_build().
+   build phase directly from the sanitized GaugeDefinition and lane skins.
 
    It contains:
    - How many cells the gauge has
@@ -1093,110 +1093,6 @@ typedef struct
     u16 refCount;                                 /* Reference count (retained by lane instances) */
 
 } GaugeLaneLayout;
-
-
-/* -----------------------------------------------------------------------------
-   Internal layout style/build structs
-   ----------------------------------------------------------------------------- */
-
-/**
- * Set of tilesets for one visual context.
- *
- * A GaugeSkinSet groups the 8 tileset pointers needed for one rendering
- * context. There are 4 contexts per segment (see GaugeSegmentStyle below).
- *
- * Each field points to a pre-rendered strip of tiles in ROM.
- * Set a field to NULL to disable that feature or fall back to the parent
- * context's tileset (e.g., if gain.body is NULL, the base.body is used).
- *
- *   body:          Main interior strip (45 tiles). Required for at least
- *                  one context (base or gain).
- *   end:           Edge/termination strip (45 tiles). Gives the value/trail
- *                  edge a polished look (rounded tip, etc.).
- *   trail:         Trail-specific strip (64 tiles). For cells in the trail
- *                  break zone (where the trail edge falls).
- *   bridge:        Segment transition strip (45 tiles). For the last cell of
- *                  a segment, blending into the next segment.
- *   capStart:      First cell border strip (45 tiles). Decorative cap at
- *                  the gauge start.
- *   capEnd:        Last cell border strip (45 tiles). Decorative cap at
- *                  the gauge end.
- *   capStartBreak: Cap start variant for full/empty state (45 tiles).
- *   capStartTrail: Cap start variant when trail is visible (45 tiles).
- *
- * Example (minimal -- only body):
- *   GaugeSkinSet base = { .body = myBodyStrip.tiles };
- *
- * Example (body + end):
- *   GaugeSkinSet base = { .body = myBodyStrip.tiles, .end = myEndStrip.tiles };
- */
-typedef struct
-{
-    const u32 *body;
-    const u32 *end;
-    const u32 *trail;
-    const u32 *bridge;
-    const u32 *capStart;
-    const u32 *capEnd;
-    const u32 *capStartBreak;
-    const u32 *capStartTrail;
-} GaugeSkinSet;
-
-/**
- * Complete style for one segment across all 4 visual contexts.
- *
- * Each segment can look different depending on the current trail state.
- * The renderer picks the right tileset automatically:
- *
- *   Trail state              | Context used
- *   -------------------------|------------------
- *   No trail / damage trail  | base (normal)
- *   Gain trail               | gain (falls back to base if NULL)
- *   Damage blink OFF frame   | blinkOff (falls back to hiding trail)
- *   Gain blink OFF frame     | gainBlinkOff (falls back to hiding trail)
- *
- * capEndEnabled: set to 1 if this segment should render a cap end tile
- *   when the last cell in fill order belongs to this segment.
- *
- * Example (segment with body only, no special features):
- *   GaugeSegmentStyle style = {
- *       .base = { .body = myStrip.tiles }
- *   };
- *
- * Example (segment with body + end + trail + blink-off):
- *   GaugeSegmentStyle style = {
- *       .base     = { .body = bodyStrip.tiles, .end = endStrip.tiles,
- *                     .trail = trailStrip.tiles },
- *       .blinkOff = { .body = blinkStrip.tiles }
- *   };
- */
-typedef struct
-{
-    GaugeSkinSet base;         /* Normal tilesets (required) */
-    GaugeSkinSet gain;         /* Gain trail tilesets (optional, falls back to base) */
-    GaugeSkinSet blinkOff;     /* Blink-off tilesets for damage (optional) */
-    GaugeSkinSet gainBlinkOff; /* Blink-off tilesets for gain (optional) */
-    u8 capEndEnabled;          /* 1 = enable cap end tile for this segment */
-} GaugeSegmentStyle;
-
-/**
- * Internal layout build description.
- *
- * This is the normalized form consumed by GaugeLaneLayout_build() after the
- * public GaugeDefinition has been sanitized and expanded.
- */
-typedef struct
-{
-    u8 length;                               /* Number of cells (1..GAUGE_MAX_LENGTH) */
-    GaugeFillDirection fillDirection;         /* GAUGE_FILL_FORWARD or GAUGE_FILL_REVERSE */
-    GaugeOrientation orientation;             /* GAUGE_ORIENT_HORIZONTAL or GAUGE_ORIENT_VERTICAL */
-    u8 palette;                              /* Palette line (0-3) */
-    u8 priority;                             /* Tile priority (0 or 1) */
-    u8 verticalFlip;                         /* Vertical flip flag */
-    u8 horizontalFlip;                       /* Horizontal flip flag */
-    const u8 *segmentIdByCell;               /* Segment assignment per cell (NULL => all segment 0) */
-    const GaugeSegmentStyle *segmentStyles;  /* Style per segment (NULL => no tilesets) */
-} GaugeLaneLayoutInit;
 
 
 /* =============================================================================

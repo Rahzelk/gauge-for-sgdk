@@ -2086,7 +2086,6 @@ static void layout_copy_segment_tilesets(const u32 **destinationTilesets,
                                          u8 segmentCount);
 
 /* GaugeLaneLayout helpers used only by the module build/runtime plumbing. */
-void GaugeLaneLayout_build(GaugeLaneLayout *layout, const GaugeLaneLayoutInit *init);
 void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
                         u8 length,
                         GaugeFillDirection fillDirection,
@@ -2105,16 +2104,6 @@ void GaugeLaneLayout_setFillForward(GaugeLaneLayout *layout);
 void GaugeLaneLayout_setFillReverse(GaugeLaneLayout *layout);
 void GaugeLaneLayout_retain(GaugeLaneLayout *layout);
 void GaugeLaneLayout_release(GaugeLaneLayout *layout);
-void GaugeLaneLayout_setPipStyles(GaugeLaneLayout *layout,
-                              const u32 * const *pipTilesets,
-                              const u8 *pipWidthBySegment,
-                              const u8 *pipHeightBySegment,
-                              const u8 *pipOffsetBySegment,
-                              const u8 *pipStateCountBySegment,
-                              const u8 *pipStripCoverageBySegment,
-                              const u8 *pipHalfAxisBySegment,
-                              const u8 *pipSourceWidthBySegment,
-                              const u8 *pipSourceHeightBySegment);
 
 /* Internal gauge-lane builders used by Gauge_build(). */
 u8 Gauge_addLaneEx(Gauge *gauge,
@@ -2905,82 +2894,6 @@ static void build_layout_context_target_view(GaugeLaneLayout *layout,
     }
 }
 
-static inline const GaugeSkinSet *skin_set_for_context(const GaugeSegmentStyle *style,
-                                                       LayoutStyleContext context)
-{
-    switch (context)
-    {
-    case LAYOUT_STYLE_CONTEXT_GAIN:
-        return &style->gain;
-    case LAYOUT_STYLE_CONTEXT_BLINK:
-        return &style->blinkOff;
-    case LAYOUT_STYLE_CONTEXT_GAIN_BLINK:
-        return &style->gainBlinkOff;
-    case LAYOUT_STYLE_CONTEXT_BASE:
-    default:
-        return &style->base;
-    }
-}
-
-static inline const u32 *skin_set_tileset_for_slot(const GaugeSkinSet *skinSet,
-                                                    LayoutTilesetSlot slot)
-{
-    if (!skinSet)
-        return NULL;
-
-    switch (slot)
-    {
-    case LAYOUT_TILESET_SLOT_BODY:
-        return skinSet->body;
-    case LAYOUT_TILESET_SLOT_END:
-        return skinSet->end;
-    case LAYOUT_TILESET_SLOT_TRAIL:
-        return skinSet->trail;
-    case LAYOUT_TILESET_SLOT_BRIDGE:
-        return skinSet->bridge;
-    case LAYOUT_TILESET_SLOT_CAP_START:
-        return skinSet->capStart;
-    case LAYOUT_TILESET_SLOT_CAP_END:
-        return skinSet->capEnd;
-    case LAYOUT_TILESET_SLOT_CAP_START_BREAK:
-        return skinSet->capStartBreak;
-    case LAYOUT_TILESET_SLOT_CAP_START_TRAIL:
-        return skinSet->capStartTrail;
-    default:
-        return NULL;
-    }
-}
-
-static void populate_layout_context_from_styles(GaugeLaneLayout *layout,
-                                                const GaugeSegmentStyle *styles,
-                                                LayoutStyleContext context,
-                                                LayoutTilesetSlotMask slotMask)
-{
-    if (!layout || !styles)
-        return;
-
-    LayoutContextTargetView targetView;
-    build_layout_context_target_view(layout, context, &targetView);
-
-    for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-    {
-        const GaugeSkinSet *skinSet = skin_set_for_context(&styles[segmentId], context);
-
-        for (u8 slot = 0; slot < LAYOUT_TILESET_SLOT_COUNT; slot++)
-        {
-            const LayoutTilesetSlot slotId = (LayoutTilesetSlot)slot;
-            if ((slotMask & LAYOUT_TILESET_SLOT_MASK(slotId)) == 0)
-                continue;
-
-            const u32 ***targetField = targetView.targetBySlot[slotId];
-            if (!targetField || !*targetField || *targetField == s_nullSegmentTilesets)
-                continue;
-
-            (*targetField)[segmentId] = skin_set_tileset_for_slot(skinSet, slotId);
-        }
-    }
-}
-
 static void layout_free_buffers(GaugeLaneLayout *layout)
 {
     if (!layout)
@@ -3183,7 +3096,7 @@ void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
     layout->verticalFlip = verticalFlip ? 1 : 0;
     layout->horizontalFlip = horizontalFlip ? 1 : 0;
 
-    /* Initialize cached flags. GaugeLaneLayout_build() refreshes them after style import. */
+    /* Direct layout builders refresh these cached flags after optional tilesets are wired. */
     layout_zero_optional_flags(layout);
 }
 
@@ -3248,247 +3161,8 @@ void GaugeLaneLayout_release(GaugeLaneLayout *layout)
         layout_free_buffers(layout);
 }
 
-void GaugeLaneLayout_setPipStyles(GaugeLaneLayout *layout,
-                              const u32 * const *pipTilesets,
-                              const u8 *pipWidthBySegment,
-                              const u8 *pipHeightBySegment,
-                              const u8 *pipOffsetBySegment,
-                              const u8 *pipStateCountBySegment,
-                              const u8 *pipStripCoverageBySegment,
-                              const u8 *pipHalfAxisBySegment,
-                              const u8 *pipSourceWidthBySegment,
-                              const u8 *pipSourceHeightBySegment)
-{
-    if (!layout)
-        return;
-
-    const u8 hasPipStyles = segment_tileset_array_has_any(pipTilesets, layout->segmentCount);
-    u8 hasCustomWidths = 0;
-    u8 hasCustomHeights = 0;
-    u8 hasCustomOffsets = 0;
-    u8 hasCustomCoverage = 0;
-    u8 hasCustomHalfAxis = 0;
-    u8 hasCustomSourceWidths = 0;
-    u8 hasCustomSourceHeights = 0;
-
-    if (hasPipStyles && pipWidthBySegment)
-    {
-        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-        {
-            if (pipWidthBySegment[segmentId] > 1)
-            {
-                hasCustomWidths = 1;
-                break;
-            }
-        }
-    }
-    if (hasPipStyles && pipHeightBySegment)
-    {
-        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-        {
-            if (pipHeightBySegment[segmentId] > 1)
-            {
-                hasCustomHeights = 1;
-                break;
-            }
-        }
-    }
-    if (hasPipStyles && pipOffsetBySegment)
-    {
-        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-        {
-            if (pipOffsetBySegment[segmentId] != 0)
-            {
-                hasCustomOffsets = 1;
-                break;
-            }
-        }
-    }
-    if (hasPipStyles && pipStripCoverageBySegment)
-    {
-        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-        {
-            if (pipStripCoverageBySegment[segmentId] != GAUGE_STRIP_COVERAGE_FULL)
-            {
-                hasCustomCoverage = 1;
-                break;
-            }
-        }
-    }
-    if (hasPipStyles && pipHalfAxisBySegment)
-    {
-        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-        {
-            if (pipHalfAxisBySegment[segmentId] != PIP_HALF_AXIS_HORIZONTAL)
-            {
-                hasCustomHalfAxis = 1;
-                break;
-            }
-        }
-    }
-    if (hasPipStyles && pipSourceWidthBySegment)
-    {
-        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-        {
-            if (pipSourceWidthBySegment[segmentId] > 1)
-            {
-                hasCustomSourceWidths = 1;
-                break;
-            }
-        }
-    }
-    if (hasPipStyles && pipSourceHeightBySegment)
-    {
-        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-        {
-            if (pipSourceHeightBySegment[segmentId] > 1)
-            {
-                hasCustomSourceHeights = 1;
-                break;
-            }
-        }
-    }
-
-    layout_sync_optional_segment_tilesets_by_usage(
-        hasPipStyles,
-        &layout->pipTilesetBySegment,
-        layout->segmentCount);
-    layout_sync_optional_segment_flags_by_usage(
-        hasPipStyles && hasCustomWidths,
-        &layout->pipWidthBySegment,
-        layout->segmentCount,
-        s_oneSegmentFlags,
-        1);
-    layout_sync_optional_segment_flags_by_usage(
-        hasPipStyles && hasCustomHeights,
-        &layout->pipHeightBySegment,
-        layout->segmentCount,
-        s_oneSegmentFlags,
-        1);
-    layout_sync_optional_segment_flags_by_usage(
-        hasPipStyles && hasCustomOffsets,
-        &layout->pipOffsetBySegment,
-        layout->segmentCount,
-        s_zeroSegmentFlags,
-        0);
-    layout_sync_optional_segment_flags_by_usage(
-        hasPipStyles,
-        &layout->pipStateCountBySegment,
-        layout->segmentCount,
-        s_zeroSegmentFlags,
-        0);
-    layout_sync_optional_segment_flags_by_usage(
-        hasPipStyles && hasCustomCoverage,
-        &layout->pipStripCoverageBySegment,
-        layout->segmentCount,
-        s_zeroSegmentFlags,
-        GAUGE_STRIP_COVERAGE_FULL);
-    layout_sync_optional_segment_flags_by_usage(
-        hasPipStyles && hasCustomHalfAxis,
-        &layout->pipHalfAxisBySegment,
-        layout->segmentCount,
-        s_zeroSegmentFlags,
-        PIP_HALF_AXIS_HORIZONTAL);
-    layout_sync_optional_segment_flags_by_usage(
-        hasPipStyles && hasCustomSourceWidths,
-        &layout->pipSourceWidthBySegment,
-        layout->segmentCount,
-        s_oneSegmentFlags,
-        1);
-    layout_sync_optional_segment_flags_by_usage(
-        hasPipStyles && hasCustomSourceHeights,
-        &layout->pipSourceHeightBySegment,
-        layout->segmentCount,
-        s_oneSegmentFlags,
-        1);
-
-    layout_copy_segment_tilesets(layout->pipTilesetBySegment, pipTilesets, layout->segmentCount);
-    if (layout->pipWidthBySegment != s_oneSegmentFlags)
-    {
-        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-        {
-            u8 widthInTiles = pipWidthBySegment ? pipWidthBySegment[segmentId] : 1;
-            if (widthInTiles == 0)
-                widthInTiles = 1;
-            layout->pipWidthBySegment[segmentId] = widthInTiles;
-        }
-    }
-    if (layout->pipHeightBySegment != s_oneSegmentFlags)
-    {
-        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-        {
-            u8 heightInTiles = pipHeightBySegment ? pipHeightBySegment[segmentId] : 1;
-            if (heightInTiles == 0)
-                heightInTiles = 1;
-            if (heightInTiles > 4)
-                heightInTiles = 4;
-            layout->pipHeightBySegment[segmentId] = heightInTiles;
-        }
-    }
-    if (layout->pipOffsetBySegment != s_zeroSegmentFlags)
-    {
-        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-        {
-            const u8 offsetTiles = pipOffsetBySegment ? pipOffsetBySegment[segmentId] : 0;
-            layout->pipOffsetBySegment[segmentId] = offsetTiles;
-        }
-    }
-    if (layout->pipStateCountBySegment != s_zeroSegmentFlags)
-    {
-        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-        {
-            u8 stateCount = pipStateCountBySegment ? pipStateCountBySegment[segmentId] : 0;
-            layout->pipStateCountBySegment[segmentId] = stateCount;
-        }
-    }
-    if (layout->pipStripCoverageBySegment != s_zeroSegmentFlags)
-    {
-        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-        {
-            u8 coverage = pipStripCoverageBySegment ? pipStripCoverageBySegment[segmentId] : GAUGE_STRIP_COVERAGE_FULL;
-            if (coverage > GAUGE_STRIP_COVERAGE_QUARTER)
-                coverage = GAUGE_STRIP_COVERAGE_FULL;
-            layout->pipStripCoverageBySegment[segmentId] = coverage;
-        }
-    }
-    if (layout->pipHalfAxisBySegment != s_zeroSegmentFlags)
-    {
-        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-        {
-            u8 halfAxis = pipHalfAxisBySegment ? pipHalfAxisBySegment[segmentId] : PIP_HALF_AXIS_HORIZONTAL;
-            if (halfAxis > PIP_HALF_AXIS_VERTICAL)
-                halfAxis = PIP_HALF_AXIS_HORIZONTAL;
-            layout->pipHalfAxisBySegment[segmentId] = halfAxis;
-        }
-    }
-    if (layout->pipSourceWidthBySegment != s_oneSegmentFlags)
-    {
-        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-        {
-            u8 sourceWidth = pipSourceWidthBySegment ? pipSourceWidthBySegment[segmentId] : 1;
-            if (sourceWidth == 0)
-                sourceWidth = 1;
-            layout->pipSourceWidthBySegment[segmentId] = sourceWidth;
-        }
-    }
-    if (layout->pipSourceHeightBySegment != s_oneSegmentFlags)
-    {
-        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-        {
-            u8 sourceHeight = pipSourceHeightBySegment ? pipSourceHeightBySegment[segmentId] : 1;
-            if (sourceHeight == 0)
-                sourceHeight = 1;
-            if (sourceHeight > 4)
-                sourceHeight = 4;
-            layout->pipSourceHeightBySegment[segmentId] = sourceHeight;
-        }
-    }
-
-    build_pip_luts(layout);
-}
-
 /* =============================================================================
-   GaugeLaneLayout_build sub-functions
+   Direct layout build helpers
    ============================================================================= */
 
 /**
@@ -3570,57 +3244,6 @@ static void sync_layout_context_slots_from_usage(GaugeLaneLayout *layout,
 /**
  * Scan helper: OR-combine a SkinSet's non-NULL pointers into usage flags.
  */
-static inline void scan_skin_set(const GaugeSkinSet *skin, SkinSetUsageFlags *f)
-{
-    f->body |= (skin->body != NULL);
-    f->end |= (skin->end != NULL);
-    f->trail |= (skin->trail != NULL);
-    f->bridge |= (skin->bridge != NULL);
-    f->capStart |= (skin->capStart != NULL);
-    f->capEnd |= (skin->capEnd != NULL);
-    f->capStartBreak |= (skin->capStartBreak != NULL);
-    f->capStartTrail |= (skin->capStartTrail != NULL);
-}
-
-/**
- * Scan all segment styles and collect usage flags.
- *
- * For each tileset context (base/gain/blinkOff/gainBlinkOff), determines which
- * tileset types are used by at least one segment. This drives lazy allocation:
- * arrays are only allocated for tileset types that actually appear.
- *
- * @param styles         Segment style array (one per segment)
- * @param segmentCount   Number of segments
- * @param baseFlags      [out] Base tileset usage (body unused: always required)
- * @param gainFlags      [out] Gain tileset usage
- * @param blinkFlags     [out] Blink-off tileset usage
- * @param gainBlinkFlags [out] Gain blink-off tileset usage
- * @param capEndFlags    [out] 1 if any segment sets capEndEnabled
- */
-static void scan_segment_style_usage(const GaugeSegmentStyle *styles,
-                                     u8 segmentCount,
-                                     SkinSetUsageFlags *baseFlags,
-                                     SkinSetUsageFlags *gainFlags,
-                                     SkinSetUsageFlags *blinkFlags,
-                                     SkinSetUsageFlags *gainBlinkFlags,
-                                     u8 *capEndFlags)
-{
-    memset(baseFlags, 0, sizeof(*baseFlags));
-    memset(gainFlags, 0, sizeof(*gainFlags));
-    memset(blinkFlags, 0, sizeof(*blinkFlags));
-    memset(gainBlinkFlags, 0, sizeof(*gainBlinkFlags));
-    *capEndFlags = 0;
-    for (u8 i = 0; i < segmentCount; i++)
-    {
-        const GaugeSegmentStyle *style = &styles[i];
-        scan_skin_set(&style->base, baseFlags);
-        scan_skin_set(&style->gain, gainFlags);
-        scan_skin_set(&style->blinkOff, blinkFlags);
-        scan_skin_set(&style->gainBlinkOff, gainBlinkFlags);
-        *capEndFlags |= (style->capEndEnabled != 0);
-    }
-}
-
 /**
  * Sync base tileset allocations (end/trail/bridge/caps + capEnd flags).
  *
@@ -3648,21 +3271,6 @@ static void sync_base_allocations(GaugeLaneLayout *layout,
  * body is always assigned. Optional arrays are only written when allocated
  * (checked via != s_nullSegmentTilesets / s_zeroSegmentFlags sentinel).
  */
-static void populate_base_tilesets(GaugeLaneLayout *layout,
-                                   const GaugeSegmentStyle *styles)
-{
-    populate_layout_context_from_styles(layout,
-                                        styles,
-                                        LAYOUT_STYLE_CONTEXT_BASE,
-                                        LAYOUT_TILESET_SLOT_MASK_ALL);
-
-    if (layout->capEndBySegment != s_zeroSegmentFlags)
-    {
-        for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-            layout->capEndBySegment[segmentId] = styles[segmentId].capEndEnabled ? 1 : 0;
-    }
-}
-
 /**
  * Compute all derived layout state after tilesets are populated.
  *
@@ -3676,71 +3284,6 @@ static void finalize_layout_derived_state(GaugeLaneLayout *layout)
     detect_caps_enabled(layout, &layout->capStartEnabled, &layout->capEndEnabled);
     build_bridge_luts(layout);
     build_pip_luts(layout);
-}
-
-
-/**
- * Build one fully configured internal layout from GaugeLaneLayoutInit.
- *
- * This is the only layout construction entry point still used by the module.
- * It initializes geometry, copies all style contexts, allocates optional arrays
- * only when needed, and computes cached flags/LUTs consumed by the renderers.
- */
-void GaugeLaneLayout_build(GaugeLaneLayout *layout, const GaugeLaneLayoutInit *init)
-{
-    if (!layout || !init)
-        return;
-
-    GaugeLaneLayout_initEx(layout,
-                       init->length,
-                       init->fillDirection,
-                       NULL, NULL, NULL, NULL,
-                       init->segmentIdByCell,
-                       init->orientation,
-                       init->palette,
-                       init->priority,
-                       init->verticalFlip,
-                       init->horizontalFlip);
-
-    if (init->segmentStyles)
-    {
-        SkinSetUsageFlags baseFlags, gainFlags, blinkFlags, gainBlinkFlags;
-        u8 capEndFlags;
-        scan_segment_style_usage(init->segmentStyles, layout->segmentCount,
-                                 &baseFlags, &gainFlags, &blinkFlags,
-                                 &gainBlinkFlags, &capEndFlags);
-
-        sync_base_allocations(layout, &baseFlags, capEndFlags);
-        sync_layout_context_slots_from_usage(layout,
-                                             LAYOUT_STYLE_CONTEXT_GAIN,
-                                             &gainFlags,
-                                             LAYOUT_TILESET_SLOT_MASK_ALL);
-        sync_layout_context_slots_from_usage(layout,
-                                             LAYOUT_STYLE_CONTEXT_BLINK,
-                                             &blinkFlags,
-                                             LAYOUT_TILESET_SLOT_MASK_ALL);
-        sync_layout_context_slots_from_usage(layout,
-                                             LAYOUT_STYLE_CONTEXT_GAIN_BLINK,
-                                             &gainBlinkFlags,
-                                             LAYOUT_TILESET_SLOT_MASK_ALL);
-
-        populate_base_tilesets(layout, init->segmentStyles);
-        populate_layout_context_from_styles(layout,
-                                            init->segmentStyles,
-                                            LAYOUT_STYLE_CONTEXT_GAIN,
-                                            LAYOUT_TILESET_SLOT_MASK_ALL);
-        populate_layout_context_from_styles(layout,
-                                            init->segmentStyles,
-                                            LAYOUT_STYLE_CONTEXT_BLINK,
-                                            LAYOUT_TILESET_SLOT_MASK_ALL);
-        populate_layout_context_from_styles(layout,
-                                            init->segmentStyles,
-                                            LAYOUT_STYLE_CONTEXT_GAIN_BLINK,
-                                            LAYOUT_TILESET_SLOT_MASK_ALL);
-
-    }
-
-    finalize_layout_derived_state(layout);
 }
 
 
@@ -6983,26 +6526,11 @@ typedef struct
 
 typedef struct
 {
-    GaugeSegmentStyle segmentStyles[GAUGE_MAX_SEGMENTS];
-    const u32 *pipTilesets[GAUGE_MAX_SEGMENTS];
-    u8 pipWidths[GAUGE_MAX_SEGMENTS];
-    u8 pipHeights[GAUGE_MAX_SEGMENTS];
-    u8 pipOffsets[GAUGE_MAX_SEGMENTS];
-    u8 pipStateCounts[GAUGE_MAX_SEGMENTS];
-    u8 pipStripCoverages[GAUGE_MAX_SEGMENTS];
-    u8 pipHalfAxes[GAUGE_MAX_SEGMENTS];
-    u8 pipSourceWidths[GAUGE_MAX_SEGMENTS];
-    u8 pipSourceHeights[GAUGE_MAX_SEGMENTS];
-} GaugeBuildLayoutScratch;
-
-typedef struct
-{
     GaugeDefinition sanitizedDefinition;
     GaugeBuildLanePlan lanePlans[GAUGE_MAX_LANES];
     GaugeLaneLayout *builtLayouts[GAUGE_MAX_LANES];
 } GaugeBuildScratch;
 
-static GaugeBuildLayoutScratch s_buildLayoutScratch;
 static GaugeBuildScratch s_buildScratch;
 
 static inline u8 sanitize_vram_mode(u8 vramMode)
@@ -7174,66 +6702,348 @@ static u8 build_segment_id_by_cell_from_lane(GaugeMode mode,
     return 1;
 }
 
-static void fill_skin_set_from_assets(const GaugeFillAssets *assets,
-                                      GaugeSkinSet *outSet)
+static inline const u32 *tileset_asset_to_rom(const TileSet *tileset)
 {
-    if (!outSet)
-        return;
-
-    memset(outSet, 0, sizeof(*outSet));
-    if (!assets)
-        return;
-
-    outSet->body = assets->body ? assets->body->tiles : NULL;
-    outSet->trail = assets->trail ? assets->trail->tiles : NULL;
-    outSet->end = assets->end ? assets->end->tiles : NULL;
-    outSet->bridge = assets->bridge ? assets->bridge->tiles : NULL;
+    return tileset ? tileset->tiles : NULL;
 }
 
-static void build_segment_style_from_fill_skin(const GaugeFillSkin *skin,
-                                               u8 fixedStartCap,
-                                               u8 fixedEndCap,
-                                               GaugeSegmentStyle *outStyle)
+static void scan_fill_assets_usage(const GaugeFillAssets *assets,
+                                   u8 fixedStartCap,
+                                   u8 fixedEndCap,
+                                   SkinSetUsageFlags *usageFlags)
 {
-    if (!outStyle)
+    if (!usageFlags)
         return;
 
-    memset(outStyle, 0, sizeof(*outStyle));
-    if (!skin)
+    const u32 *body = assets ? tileset_asset_to_rom(assets->body) : NULL;
+    const u32 *end = assets ? tileset_asset_to_rom(assets->end) : NULL;
+    const u32 *trail = assets ? tileset_asset_to_rom(assets->trail) : NULL;
+    const u32 *bridge = assets ? tileset_asset_to_rom(assets->bridge) : NULL;
+    const u32 *capStart = fixedStartCap ? (end ? end : body) : NULL;
+    const u32 *capStartBreak = fixedStartCap ? body : NULL;
+    const u32 *capStartTrail = fixedStartCap ? trail : NULL;
+    const u32 *capEnd = fixedEndCap ? (end ? end : body) : NULL;
+
+    usageFlags->body |= (body != NULL);
+    usageFlags->end |= (end != NULL);
+    usageFlags->trail |= (trail != NULL);
+    usageFlags->bridge |= (bridge != NULL);
+    usageFlags->capStart |= (capStart != NULL);
+    usageFlags->capEnd |= (capEnd != NULL);
+    usageFlags->capStartBreak |= (capStartBreak != NULL);
+    usageFlags->capStartTrail |= (capStartTrail != NULL);
+}
+
+static void assign_layout_context_slot(const LayoutContextTargetView *targetView,
+                                       LayoutTilesetSlot slot,
+                                       u8 segmentId,
+                                       const u32 *tileset)
+{
+    if (!targetView)
         return;
 
-    fill_skin_set_from_assets(&skin->normal, &outStyle->base);
-    fill_skin_set_from_assets(&skin->gain, &outStyle->gain);
-    fill_skin_set_from_assets(&skin->blinkOff, &outStyle->blinkOff);
-    outStyle->gainBlinkOff = outStyle->blinkOff;
+    const u32 ***targetField = targetView->targetBySlot[slot];
+    if (!targetField || !*targetField)
+        return;
 
-    if (fixedStartCap)
+    if (*targetField == s_nullSegmentTilesets && slot != LAYOUT_TILESET_SLOT_BODY)
+        return;
+
+    (*targetField)[segmentId] = tileset;
+}
+
+static void populate_layout_context_from_fill_assets(const LayoutContextTargetView *targetView,
+                                                     u8 segmentId,
+                                                     const GaugeFillAssets *assets,
+                                                     u8 fixedStartCap,
+                                                     u8 fixedEndCap)
+{
+    const u32 *body = assets ? tileset_asset_to_rom(assets->body) : NULL;
+    const u32 *end = assets ? tileset_asset_to_rom(assets->end) : NULL;
+    const u32 *trail = assets ? tileset_asset_to_rom(assets->trail) : NULL;
+    const u32 *bridge = assets ? tileset_asset_to_rom(assets->bridge) : NULL;
+    const u32 *capStart = fixedStartCap ? (end ? end : body) : NULL;
+    const u32 *capStartBreak = fixedStartCap ? body : NULL;
+    const u32 *capStartTrail = fixedStartCap ? trail : NULL;
+    const u32 *capEnd = fixedEndCap ? (end ? end : body) : NULL;
+
+    assign_layout_context_slot(targetView, LAYOUT_TILESET_SLOT_BODY, segmentId, body);
+    assign_layout_context_slot(targetView, LAYOUT_TILESET_SLOT_END, segmentId, end);
+    assign_layout_context_slot(targetView, LAYOUT_TILESET_SLOT_TRAIL, segmentId, trail);
+    assign_layout_context_slot(targetView, LAYOUT_TILESET_SLOT_BRIDGE, segmentId, bridge);
+    assign_layout_context_slot(targetView, LAYOUT_TILESET_SLOT_CAP_START, segmentId, capStart);
+    assign_layout_context_slot(targetView, LAYOUT_TILESET_SLOT_CAP_END, segmentId, capEnd);
+    assign_layout_context_slot(targetView, LAYOUT_TILESET_SLOT_CAP_START_BREAK, segmentId, capStartBreak);
+    assign_layout_context_slot(targetView, LAYOUT_TILESET_SLOT_CAP_START_TRAIL, segmentId, capStartTrail);
+}
+
+static u8 build_fill_layout_direct(const GaugeDefinition *definition,
+                                   const GaugeBuildLanePlan *lanePlan,
+                                   GaugeLaneLayout *layout)
+{
+    const u8 segmentCount = lanePlan->segmentCount;
+    const u32 *baseBodyTilesets[GAUGE_MAX_SEGMENTS] = {0};
+    SkinSetUsageFlags baseFlags;
+    SkinSetUsageFlags gainFlags;
+    SkinSetUsageFlags blinkFlags;
+    SkinSetUsageFlags gainBlinkFlags;
+    const u8 capEndFlags = definition->fixedEndCap ? 1 : 0;
+
+    memset(&baseFlags, 0, sizeof(baseFlags));
+    memset(&gainFlags, 0, sizeof(gainFlags));
+    memset(&blinkFlags, 0, sizeof(blinkFlags));
+    memset(&gainBlinkFlags, 0, sizeof(gainBlinkFlags));
+
+    for (u8 segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++)
     {
-        outStyle->base.capStart = outStyle->base.end ? outStyle->base.end : outStyle->base.body;
-        outStyle->base.capStartBreak = outStyle->base.body;
-        outStyle->base.capStartTrail = outStyle->base.trail;
+        const GaugeSegment *segment = &lanePlan->lane->segments[segmentIndex];
+        if (!segment->skin || !segment->skin->fill.normal.body)
+            return 0;
 
-        outStyle->gain.capStart = outStyle->gain.end ? outStyle->gain.end : outStyle->gain.body;
-        outStyle->gain.capStartBreak = outStyle->gain.body;
-        outStyle->gain.capStartTrail = outStyle->gain.trail;
-
-        outStyle->blinkOff.capStart = outStyle->blinkOff.end ? outStyle->blinkOff.end : outStyle->blinkOff.body;
-        outStyle->blinkOff.capStartBreak = outStyle->blinkOff.body;
-        outStyle->blinkOff.capStartTrail = outStyle->blinkOff.trail;
-
-        outStyle->gainBlinkOff.capStart = outStyle->blinkOff.capStart;
-        outStyle->gainBlinkOff.capStartBreak = outStyle->blinkOff.capStartBreak;
-        outStyle->gainBlinkOff.capStartTrail = outStyle->blinkOff.capStartTrail;
+        baseBodyTilesets[segmentIndex] = segment->skin->fill.normal.body->tiles;
+        scan_fill_assets_usage(&segment->skin->fill.normal,
+                               definition->fixedStartCap,
+                               definition->fixedEndCap,
+                               &baseFlags);
+        scan_fill_assets_usage(&segment->skin->fill.gain,
+                               definition->fixedStartCap,
+                               definition->fixedEndCap,
+                               &gainFlags);
+        scan_fill_assets_usage(&segment->skin->fill.blinkOff,
+                               definition->fixedStartCap,
+                               definition->fixedEndCap,
+                               &blinkFlags);
+        scan_fill_assets_usage(&segment->skin->fill.blinkOff,
+                               definition->fixedStartCap,
+                               definition->fixedEndCap,
+                               &gainBlinkFlags);
     }
 
-    if (fixedEndCap)
+    GaugeLaneLayout_initEx(layout,
+                           lanePlan->length,
+                           definition->fillDirection,
+                           baseBodyTilesets,
+                           NULL,
+                           NULL,
+                           NULL,
+                           lanePlan->segmentIdByCell,
+                           definition->orientation,
+                           lanePlan->palette,
+                           definition->priority,
+                           definition->verticalFlip,
+                           definition->horizontalFlip);
+
+    if (layout->length == 0 || layout->segmentCount == 0)
+        return 0;
+
+    sync_base_allocations(layout, &baseFlags, capEndFlags);
+    sync_layout_context_slots_from_usage(layout,
+                                         LAYOUT_STYLE_CONTEXT_GAIN,
+                                         &gainFlags,
+                                         LAYOUT_TILESET_SLOT_MASK_ALL);
+    sync_layout_context_slots_from_usage(layout,
+                                         LAYOUT_STYLE_CONTEXT_BLINK,
+                                         &blinkFlags,
+                                         LAYOUT_TILESET_SLOT_MASK_ALL);
+    sync_layout_context_slots_from_usage(layout,
+                                         LAYOUT_STYLE_CONTEXT_GAIN_BLINK,
+                                         &gainBlinkFlags,
+                                         LAYOUT_TILESET_SLOT_MASK_ALL);
+
+    LayoutContextTargetView baseView;
+    LayoutContextTargetView gainView;
+    LayoutContextTargetView blinkView;
+    LayoutContextTargetView gainBlinkView;
+    build_layout_context_target_view(layout, LAYOUT_STYLE_CONTEXT_BASE, &baseView);
+    build_layout_context_target_view(layout, LAYOUT_STYLE_CONTEXT_GAIN, &gainView);
+    build_layout_context_target_view(layout, LAYOUT_STYLE_CONTEXT_BLINK, &blinkView);
+    build_layout_context_target_view(layout, LAYOUT_STYLE_CONTEXT_GAIN_BLINK, &gainBlinkView);
+
+    for (u8 segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++)
     {
-        outStyle->base.capEnd = outStyle->base.end ? outStyle->base.end : outStyle->base.body;
-        outStyle->gain.capEnd = outStyle->gain.end ? outStyle->gain.end : outStyle->gain.body;
-        outStyle->blinkOff.capEnd = outStyle->blinkOff.end ? outStyle->blinkOff.end : outStyle->blinkOff.body;
-        outStyle->gainBlinkOff.capEnd = outStyle->blinkOff.capEnd;
-        outStyle->capEndEnabled = 1;
+        const GaugeFillSkin *skin = &lanePlan->lane->segments[segmentIndex].skin->fill;
+
+        populate_layout_context_from_fill_assets(&baseView,
+                                                 segmentIndex,
+                                                 &skin->normal,
+                                                 definition->fixedStartCap,
+                                                 definition->fixedEndCap);
+        populate_layout_context_from_fill_assets(&gainView,
+                                                 segmentIndex,
+                                                 &skin->gain,
+                                                 definition->fixedStartCap,
+                                                 definition->fixedEndCap);
+        populate_layout_context_from_fill_assets(&blinkView,
+                                                 segmentIndex,
+                                                 &skin->blinkOff,
+                                                 definition->fixedStartCap,
+                                                 definition->fixedEndCap);
+        populate_layout_context_from_fill_assets(&gainBlinkView,
+                                                 segmentIndex,
+                                                 &skin->blinkOff,
+                                                 definition->fixedStartCap,
+                                                 definition->fixedEndCap);
+
+        if (layout->capEndBySegment != s_zeroSegmentFlags)
+            layout->capEndBySegment[segmentIndex] = definition->fixedEndCap ? 1 : 0;
     }
+
+    finalize_layout_derived_state(layout);
+    return 1;
+}
+
+static u8 build_pip_layout_direct(const GaugeDefinition *definition,
+                                  const GaugeBuildLanePlan *lanePlan,
+                                  GaugeLaneLayout *layout)
+{
+    const u8 segmentCount = lanePlan->segmentCount;
+    u8 hasPipStyles = 0;
+    u8 hasCustomWidths = 0;
+    u8 hasCustomHeights = 0;
+    u8 hasCustomCoverage = 0;
+    u8 hasCustomHalfAxis = 0;
+    u8 hasCustomSourceWidths = 0;
+    u8 hasCustomSourceHeights = 0;
+
+    GaugeLaneLayout_initEx(layout,
+                           lanePlan->length,
+                           definition->fillDirection,
+                           NULL,
+                           NULL,
+                           NULL,
+                           NULL,
+                           lanePlan->segmentIdByCell,
+                           definition->orientation,
+                           lanePlan->palette,
+                           definition->priority,
+                           definition->verticalFlip,
+                           definition->horizontalFlip);
+
+    if (layout->length == 0 || layout->segmentCount == 0)
+        return 0;
+
+    for (u8 segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++)
+    {
+        const GaugeSegment *segment = &lanePlan->lane->segments[segmentIndex];
+        if (!segment->skin)
+            return 0;
+
+        const GaugePipSkin *pip = &segment->skin->pip;
+        const u8 pipWidth = pip->pipWidth ? pip->pipWidth : 1;
+        const u8 pipHeight = pip->pipHeight ? pip->pipHeight : 1;
+        u8 pipStateCount = 0;
+        u8 sourceWidth = 1;
+        u8 sourceHeight = 1;
+        u8 halfAxis = PIP_HALF_AXIS_HORIZONTAL;
+
+        if (!resolve_pip_strip_geometry_from_skin(pip,
+                                                  &pipStateCount,
+                                                  &sourceWidth,
+                                                  &sourceHeight,
+                                                  &halfAxis))
+        {
+            return 0;
+        }
+
+        hasPipStyles = 1;
+        hasCustomWidths |= (pipWidth > 1);
+        hasCustomHeights |= (pipHeight > 1);
+        hasCustomCoverage |= (pip->coverage != GAUGE_STRIP_COVERAGE_FULL);
+        hasCustomHalfAxis |= (halfAxis != PIP_HALF_AXIS_HORIZONTAL);
+        hasCustomSourceWidths |= (sourceWidth > 1);
+        hasCustomSourceHeights |= (sourceHeight > 1);
+    }
+
+    layout_sync_optional_segment_tilesets_by_usage(
+        hasPipStyles,
+        &layout->pipTilesetBySegment,
+        layout->segmentCount);
+    layout_sync_optional_segment_flags_by_usage(
+        hasPipStyles && hasCustomWidths,
+        &layout->pipWidthBySegment,
+        layout->segmentCount,
+        s_oneSegmentFlags,
+        1);
+    layout_sync_optional_segment_flags_by_usage(
+        hasPipStyles && hasCustomHeights,
+        &layout->pipHeightBySegment,
+        layout->segmentCount,
+        s_oneSegmentFlags,
+        1);
+    layout_sync_optional_segment_flags_by_usage(
+        hasPipStyles,
+        &layout->pipStateCountBySegment,
+        layout->segmentCount,
+        s_zeroSegmentFlags,
+        0);
+    layout_sync_optional_segment_flags_by_usage(
+        hasPipStyles && hasCustomCoverage,
+        &layout->pipStripCoverageBySegment,
+        layout->segmentCount,
+        s_zeroSegmentFlags,
+        GAUGE_STRIP_COVERAGE_FULL);
+    layout_sync_optional_segment_flags_by_usage(
+        hasPipStyles && hasCustomHalfAxis,
+        &layout->pipHalfAxisBySegment,
+        layout->segmentCount,
+        s_zeroSegmentFlags,
+        PIP_HALF_AXIS_HORIZONTAL);
+    layout_sync_optional_segment_flags_by_usage(
+        hasPipStyles && hasCustomSourceWidths,
+        &layout->pipSourceWidthBySegment,
+        layout->segmentCount,
+        s_oneSegmentFlags,
+        1);
+    layout_sync_optional_segment_flags_by_usage(
+        hasPipStyles && hasCustomSourceHeights,
+        &layout->pipSourceHeightBySegment,
+        layout->segmentCount,
+        s_oneSegmentFlags,
+        1);
+
+    for (u8 segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++)
+    {
+        const GaugePipSkin *pip = &lanePlan->lane->segments[segmentIndex].skin->pip;
+        const u8 pipWidth = pip->pipWidth ? pip->pipWidth : 1;
+        const u8 pipHeight = pip->pipHeight ? pip->pipHeight : 1;
+        u8 pipStateCount = 0;
+        u8 sourceWidth = 1;
+        u8 sourceHeight = 1;
+        u8 halfAxis = PIP_HALF_AXIS_HORIZONTAL;
+        u8 coverage = pip->coverage;
+
+        if (!resolve_pip_strip_geometry_from_skin(pip,
+                                                  &pipStateCount,
+                                                  &sourceWidth,
+                                                  &sourceHeight,
+                                                  &halfAxis))
+        {
+            return 0;
+        }
+
+        if (coverage > GAUGE_STRIP_COVERAGE_QUARTER)
+            coverage = GAUGE_STRIP_COVERAGE_FULL;
+
+        if (layout->pipTilesetBySegment != s_nullSegmentTilesets)
+            layout->pipTilesetBySegment[segmentIndex] = pip->tileset->tiles;
+        if (layout->pipWidthBySegment != s_oneSegmentFlags)
+            layout->pipWidthBySegment[segmentIndex] = pipWidth;
+        if (layout->pipHeightBySegment != s_oneSegmentFlags)
+            layout->pipHeightBySegment[segmentIndex] = (pipHeight > 4) ? 4 : pipHeight;
+        if (layout->pipStateCountBySegment != s_zeroSegmentFlags)
+            layout->pipStateCountBySegment[segmentIndex] = pipStateCount;
+        if (layout->pipStripCoverageBySegment != s_zeroSegmentFlags)
+            layout->pipStripCoverageBySegment[segmentIndex] = coverage;
+        if (layout->pipHalfAxisBySegment != s_zeroSegmentFlags)
+            layout->pipHalfAxisBySegment[segmentIndex] = halfAxis;
+        if (layout->pipSourceWidthBySegment != s_oneSegmentFlags)
+            layout->pipSourceWidthBySegment[segmentIndex] = sourceWidth;
+        if (layout->pipSourceHeightBySegment != s_oneSegmentFlags)
+            layout->pipSourceHeightBySegment[segmentIndex] = sourceHeight;
+    }
+
+    finalize_layout_derived_state(layout);
+    return 1;
 }
 
 static u8 build_lane_plan(const GaugeDefinition *definition,
@@ -7287,75 +7097,15 @@ static u8 build_layout_from_lane_plan(const GaugeDefinition *definition,
     if (!definition || !lanePlan || !outLayout)
         return 0;
 
-    memset(&s_buildLayoutScratch, 0, sizeof(s_buildLayoutScratch));
-    GaugeBuildLayoutScratch *scratch = &s_buildLayoutScratch;
-
-    for (u8 segmentIndex = 0; segmentIndex < lanePlan->segmentCount; segmentIndex++)
-    {
-        const GaugeSegment *segment = &lanePlan->lane->segments[segmentIndex];
-        if (!segment->skin)
-            return 0;
-
-        if (definition->mode == GAUGE_MODE_FILL)
-        {
-            if (!segment->skin->fill.normal.body)
-                return 0;
-
-            build_segment_style_from_fill_skin(&segment->skin->fill,
-                                               definition->fixedStartCap,
-                                               definition->fixedEndCap,
-                                               &scratch->segmentStyles[segmentIndex]);
-        }
-        else
-        {
-            const GaugePipSkin *pip = &segment->skin->pip;
-            const u8 pipWidth = pip->pipWidth ? pip->pipWidth : 1;
-            const u8 pipHeight = pip->pipHeight ? pip->pipHeight : 1;
-            u8 pipStateCount = 0;
-            u8 sourceWidth = 1;
-            u8 sourceHeight = 1;
-            u8 halfAxis = PIP_HALF_AXIS_HORIZONTAL;
-
-            if (!resolve_pip_strip_geometry_from_skin(pip,
-                                                      &pipStateCount,
-                                                      &sourceWidth,
-                                                      &sourceHeight,
-                                                      &halfAxis))
-            {
-                return 0;
-            }
-
-            scratch->pipTilesets[segmentIndex] = pip->tileset->tiles;
-            scratch->pipWidths[segmentIndex] = pipWidth;
-            scratch->pipHeights[segmentIndex] = pipHeight;
-            scratch->pipOffsets[segmentIndex] = 0;
-            scratch->pipStateCounts[segmentIndex] = pipStateCount;
-            scratch->pipStripCoverages[segmentIndex] = pip->coverage;
-            scratch->pipHalfAxes[segmentIndex] = halfAxis;
-            scratch->pipSourceWidths[segmentIndex] = sourceWidth;
-            scratch->pipSourceHeights[segmentIndex] = sourceHeight;
-        }
-    }
-
     GaugeLaneLayout *layout = (GaugeLaneLayout *)gauge_alloc_bytes((u16)sizeof(GaugeLaneLayout));
     if (!layout)
         return 0;
 
-    GaugeLaneLayoutInit layoutInit;
-    layoutInit.length = lanePlan->length;
-    layoutInit.fillDirection = definition->fillDirection;
-    layoutInit.orientation = definition->orientation;
-    layoutInit.palette = lanePlan->palette;
-    layoutInit.priority = definition->priority;
-    layoutInit.verticalFlip = definition->verticalFlip;
-    layoutInit.horizontalFlip = definition->horizontalFlip;
-    layoutInit.segmentIdByCell = lanePlan->segmentIdByCell;
-    layoutInit.segmentStyles = (definition->mode == GAUGE_MODE_FILL)
-        ? scratch->segmentStyles
-        : NULL;
-    GaugeLaneLayout_build(layout, &layoutInit);
+    const u8 buildOk = (definition->mode == GAUGE_MODE_FILL)
+        ? build_fill_layout_direct(definition, lanePlan, layout)
+        : build_pip_layout_direct(definition, lanePlan, layout);
 
-    if (layout->length == 0 || layout->segmentCount == 0)
+    if (!buildOk)
     {
         release_built_layout(&layout);
         return 0;
@@ -7363,20 +7113,6 @@ static u8 build_layout_from_lane_plan(const GaugeDefinition *definition,
 
     if (lanePlan->fillOffset != 0)
         GaugeLaneLayout_setFillOffset(layout, lanePlan->fillOffset);
-
-    if (definition->mode == GAUGE_MODE_PIP)
-    {
-        GaugeLaneLayout_setPipStyles(layout,
-                                 scratch->pipTilesets,
-                                 scratch->pipWidths,
-                                 scratch->pipHeights,
-                                 scratch->pipOffsets,
-                                 scratch->pipStateCounts,
-                                 scratch->pipStripCoverages,
-                                 scratch->pipHalfAxes,
-                                 scratch->pipSourceWidths,
-                                 scratch->pipSourceHeights);
-    }
 
     *outLayout = layout;
     return 1;
