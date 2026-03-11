@@ -1416,8 +1416,6 @@ static void trace_emit_recorded_cells(const GaugeLaneLayout *layout,
 }
 #endif
 
-static Gauge *s_activeGaugeForRender = NULL;
-
 /**
  * Fill loop context -- loop-invariant state shared between fixed and dynamic.
  *
@@ -4957,7 +4955,7 @@ static void process_fixed_mode(GaugeLaneInstance *lane,
     (void)trailPixelsActual;
     (void)blinkOffActive;
     const GaugeLaneLayout *layout = lane->layout;
-    Gauge *gauge = s_activeGaugeForRender;
+    const Gauge *gauge = lane->gauge;
     if (!gauge)
         return;
     const u8 isLinkedLane = (lane != gauge_get_baseLane_instance(gauge)) ? 1 : 0;
@@ -5054,7 +5052,7 @@ static void process_dynamic_mode(GaugeLaneInstance *lane,
     (void)trailPixelsActual;
     GaugeDynamic *dyn = &lane->dyn;
     const GaugeLaneLayout *layout = lane->layout;
-    Gauge *gauge = s_activeGaugeForRender;
+    const Gauge *gauge = lane->gauge;
     if (!gauge)
         return;
     const u8 isLinkedLane = (lane != gauge_get_baseLane_instance(gauge)) ? 1 : 0;
@@ -5376,7 +5374,7 @@ static void process_pip_mode(GaugeLaneInstance *lane,
     (void)blinkOffActive;
     (void)trailMode;
     const GaugeLaneLayout *layout = lane->layout;
-    Gauge *gauge = s_activeGaugeForRender;
+    const Gauge *gauge = lane->gauge;
     if (!gauge)
         return;
 
@@ -5613,6 +5611,7 @@ static u8 GaugeLaneInstance_initInternal(GaugeLaneInstance *lane,
     lane->vramBase = vramBase;
     lane->vramMode = vramMode;
     lane->renderHandler = resolve_lane_render_handler(gauge->valueMode, vramMode);
+    lane->gauge = gauge;
     lane->layout = layout;
     lane->cells = NULL;
     lane->cellCount = 0;
@@ -6312,9 +6311,6 @@ void Gauge_release(Gauge *gauge)
 {
     if (!gauge)
         return;
-
-    if (s_activeGaugeForRender == gauge)
-        s_activeGaugeForRender = NULL;
 
     for (u8 i = 0; i < gauge->laneCount; i++)
     {
@@ -7445,7 +7441,6 @@ static void gauge_tick_and_render_fill(Gauge *gauge)
     gauge_build_baseLane_fill_decisions(gauge, valuePixels, trailPixelsRendered,
                                       trailPixelsActual, bs.blinkOffActive,
                                       bs.trailMode);
-    s_activeGaugeForRender = gauge;
 
 #if GAUGE_ENABLE_TRACE
     trace_begin_frame(gauge, valuePixels, trailPixelsRendered, trailPixelsActual,
@@ -7470,7 +7465,6 @@ static void gauge_tick_and_render_fill(Gauge *gauge)
 #if GAUGE_ENABLE_TRACE
     trace_end_frame();
 #endif
-    s_activeGaugeForRender = NULL;
 }
 
 /**
@@ -7555,7 +7549,6 @@ static void gauge_tick_and_render_pip(Gauge *gauge)
     gauge_build_baseLane_pip_states(gauge, valuePixels, trailPixelsRendered,
                                   trailPixelsActual, pipBlinkOffActive,
                                   bs.trailMode);
-    s_activeGaugeForRender = gauge;
 
 #if GAUGE_ENABLE_TRACE
     trace_begin_frame(gauge, valuePixels, trailPixelsRendered, trailPixelsActual,
@@ -7580,7 +7573,6 @@ static void gauge_tick_and_render_pip(Gauge *gauge)
 #if GAUGE_ENABLE_TRACE
     trace_end_frame();
 #endif
-    s_activeGaugeForRender = NULL;
 }
 
 /* First update call: lock runtime configuration then delegate to steady handler. */

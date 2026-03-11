@@ -1335,6 +1335,7 @@ typedef struct
    by the Gauge container and allocated during Gauge_build().
 
    WHAT'S INSIDE A LANE:
+   - A pointer to the parent Gauge that owns this lane
    - A retained GaugeLaneLayout reference (shared safely via refcount)
    - Screen position (originX, originY in tilemap coordinates)
    - VRAM allocation (vramBase + reserved tiles)
@@ -1371,6 +1372,7 @@ typedef struct GaugeLaneInstance
     GaugeVramMode vramMode;         /* Fixed or dynamic mode */
     u16 vramBase;                   /* Base VRAM tile index */
     GaugeLaneRenderHandler *renderHandler; /* Resolved renderer for this lane */
+    const Gauge *gauge;            /* Parent gauge owning this lane */
 
     /* --- Shared layout reference (retained) --- */
     const GaugeLaneLayout *layout;
