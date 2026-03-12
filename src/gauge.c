@@ -949,15 +949,23 @@ static inline u8 apply_blink_off_overrides(
     const u8 cellIsEnd = (breakInfoActual->endFillIndex != CACHE_INVALID_U8 &&
                           *endStrip && cellFillIndex == breakInfoActual->endFillIndex);
     const u8 cellIsTrailBreak =
-        (breakInfoActual->trailBreakActive && *trailStrip &&
+        (breakInfoActual->trailBreakActive &&
          cellFillIndex == breakInfoActual->trailBreakFillIndex);
     const u8 cellIsTrailBreak2 =
-        (breakInfoActual->trailBreakSecondActive && *trailStrip &&
+        (breakInfoActual->trailBreakSecondActive &&
          cellFillIndex == breakInfoActual->trailBreakFillIndex2);
-    const u8 cellIsTrailFull =
-        (breakInfoActual->trailBreakActive && *trailStrip &&
-         cellFillIndex > breakInfoActual->valueFillIndex &&
-         cellFillIndex < breakInfoActual->trailFillIndex);
+    const u8 cellIsTrailCovered =
+        cellFillIndex > breakInfoActual->valueFillIndex &&
+        cellFillIndex < breakInfoActual->trailFillIndex;
+    const u8 cellIsTrailEdge =
+        (!cellIsEnd &&
+         breakInfoActual->trailFillIndex != breakInfoActual->valueFillIndex &&
+         cellFillIndex == breakInfoActual->trailFillIndex);
+    const u8 cellHasMixedValueAndTrail =
+        (cellFillIndex == breakInfoActual->valueFillIndex &&
+         (breakInfoActual->trailFillIndex > breakInfoActual->valueFillIndex ||
+          (breakInfoActual->trailFillIndex == breakInfoActual->valueFillIndex &&
+           breakInfoActual->trailPxInBreakCell > breakInfoActual->valuePxInBreakCell)));
     const u8 cellIsValueBreak = (breakInfoActual->valueBreakFillIndex != CACHE_INVALID_U8 &&
                                  cellFillIndex == breakInfoActual->valueBreakFillIndex);
 
@@ -966,10 +974,21 @@ static inline u8 apply_blink_off_overrides(
         *endStrip = blinkOffEndStrip;
         return 1;
     }
-    if ((cellIsTrailBreak || cellIsTrailBreak2 || cellIsTrailFull) &&
+    if ((cellIsTrailBreak || cellIsTrailBreak2 || cellIsTrailCovered || cellIsTrailEdge) &&
         blinkOffTrailStrip)
     {
         *trailStrip = blinkOffTrailStrip;
+        return 1;
+    }
+    if ((cellIsTrailBreak || cellIsTrailBreak2 || cellIsTrailCovered || cellIsTrailEdge) &&
+        blinkOffBodyStrip)
+    {
+        *bodyStrip = blinkOffBodyStrip;
+        return 1;
+    }
+    if (cellHasMixedValueAndTrail && blinkOffBodyStrip)
+    {
+        *bodyStrip = blinkOffBodyStrip;
         return 1;
     }
     if (cellIsValueBreak && blinkOffBodyStrip)
@@ -4018,11 +4037,20 @@ static void reload_dynamic_full_trail_tiles(GaugeDynamic *dyn,
             layout->blinkOffTilesetTrailBySegment[segmentId],
             layout->gainBlinkOffTilesetTrailBySegment[segmentId],
             trailMode);
+        const u32 *blinkOffBodyStrip = select_blink_strip(
+            layout->blinkOffTilesetBySegment[segmentId],
+            layout->gainBlinkOffTilesetBySegment[segmentId],
+            trailMode);
 
         if (useBlinkOff && blinkOffTrailStrip)
         {
             upload_fill_tile(blinkOffTrailStrip,
                              fullTrailIndexTrail, vramTile, DMA);
+        }
+        else if (useBlinkOff && blinkOffBodyStrip)
+        {
+            upload_fill_tile(blinkOffBodyStrip,
+                             fullTrailIndexBody, vramTile, DMA);
         }
         else
         {

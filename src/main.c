@@ -507,7 +507,7 @@ static const GaugeDefinition g_screen1BlinkOffDefinition = {
     .behavior = {
         .damageMode = GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK,
         .criticalValue = 24,
-        .damageBlinkShift = 3
+        .damageBlinkShift = 2
     }
 };
 
