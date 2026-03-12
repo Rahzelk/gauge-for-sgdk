@@ -1284,10 +1284,7 @@ static void releaseActiveScreen(void)
     u8 gaugeIndex;
 
     for (gaugeIndex = 0; gaugeIndex < g_activeGaugeCount; gaugeIndex++)
-    {
         Gauge_release(&g_runtimeGaugePool[gaugeIndex]);
-        memset(&g_runtimeGaugePool[gaugeIndex], 0, sizeof(Gauge));
-    }
 
     memset(g_activeCases, 0, sizeof(g_activeCases));
     g_activeCaseCount = 0;
@@ -1340,7 +1337,6 @@ static u8 tryBuildCase(const DemoCaseSource *sourceCase,
         {
             (*gaugeCursor)--;
             Gauge_release(&g_runtimeGaugePool[*gaugeCursor]);
-            memset(&g_runtimeGaugePool[*gaugeCursor], 0, sizeof(Gauge));
         }
         memset(runtimeCase, 0, sizeof(*runtimeCase));
         return 0;

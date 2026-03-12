@@ -285,9 +285,10 @@ typedef struct
  *   3. call Gauge_build(&gauge, &definition, vramBase)
  *
  * Notes:
- * - `maxValue = 0` means "derive it automatically from the longest lane"
+ * - `maxValue = 0` means "derive it automatically from the built base lane"
  * - `originY` is the bottom tile for vertical gauges
  * - a lane is considered active only if its first segment has both cells and a skin
+ * - `behavior` is applied during build; it is not meant to be edited later
  */
 typedef struct
 {
@@ -312,12 +313,16 @@ typedef struct
    Public functions
    ----------------------------------------------------------------------------- */
 /*
- * Build or rebuild a gauge from a declarative definition.
+ * Build one fresh gauge from a declarative definition.
  *
  * `vramBase` is expressed in VRAM tile units, not in bytes.
  * On success, the gauge owns every internal layout and runtime buffer needed
- * for rendering. Rebuilding an existing Gauge is supported; previous resources
- * are released internally before the new build succeeds.
+ * for rendering.
+ *
+ * Important contract:
+ * - the target `Gauge` must be zeroed before the call
+ * - or it must have been released beforehand through `Gauge_release()`
+ * - `Gauge_build()` does not rebuild a live object in place
  *
  * Returns 1 on success, 0 on failure.
  */
@@ -325,20 +330,23 @@ u8 Gauge_build(Gauge *gauge,
                const GaugeDefinition *definition,
                u16 vramBase);
 
-/* Enable or disable smooth value animation. */
-void Gauge_setValueAnim(Gauge *gauge, u8 enabled, u8 shift);
-/* Configure damage-trail rendering and its blink timing. */
-void Gauge_setTrailMode(Gauge *gauge,
-                        GaugeTrailMode mode,
-                        u16 criticalValue,
-                        u8 shift,
-                        u8 blinkShift);
-/* Configure the gain trail shown when the value increases. */
-void Gauge_setGainMode(Gauge *gauge,
-                       GaugeGainMode mode,
-                       u8 shift,
-                       u8 blinkShift);
-/* Release every runtime resource owned by a previously built gauge. */
+/*
+ * Change the logical maximum without changing the built topology.
+ *
+ * This keeps the current logical value in absolute units, clamps it to the
+ * new max if needed, rebuilds the value-to-pixels LUT in place, then reprojects
+ * the rendered value/trail on the new ratio.
+ *
+ * `newMaxValue == 0` is ignored.
+ * Values above `GAUGE_LUT_CAPACITY` are clamped.
+ */
+void Gauge_setMaxValue(Gauge *gauge, u16 newMaxValue);
+/*
+ * Release every runtime resource owned by a previously built gauge.
+ *
+ * This function also zeroes the whole object, so the same `Gauge` can be
+ * safely reused later by calling `Gauge_build()` again.
+ */
 void Gauge_release(Gauge *gauge);
 /* Tick the state machine and render the gauge. Call once per frame. */
 void Gauge_update(Gauge *gauge);
@@ -593,7 +601,8 @@ u16 Gauge_getValue(const Gauge *gauge);
    Layouts are created internally by Gauge_build() (one layout per lane).
    Each lane instance retains its layout (refcounted), and Gauge_release() releases all
    retained references and gauge-owned layout allocations.
-   Direct layout rebuild/mutation is an internal concern of gauge.c.
+   Topology changes are not a runtime operation in this phase: release the gauge,
+   then build it again from a new GaugeDefinition.
 
 
    GaugeLogic -- "What is the gauge's current value?"
@@ -1111,10 +1120,12 @@ typedef struct
    - currentValue: the logical value (0..maxValue), e.g., 75 HP out of 100.
    - valuePixels:  the rendered pixel position (0..maxFillPixels), e.g., 48 px.
 
-   maxFillPixels is auto-derived from the layout (layout->length * 8).
+   maxFillPixels is auto-derived from the built base lane.
    When maxValue != maxFillPixels, a lookup table (valueToPixelsData)
-   maps between them. When they're equal, it's a direct 1:1 mapping.
-   The LUT buffer is allocated dynamically (maxValue+1 entries).
+   maps between them. When they're equal in FILL mode, the renderer can use
+   a direct 1:1 mapping.
+   The LUT buffer is allocated once at build time with fixed capacity
+   (`GAUGE_LUT_CAPACITY + 1` entries) and then reused in place.
 
    TRAIL MODE BEHAVIOR:
    --------------------
@@ -1138,8 +1149,8 @@ typedef struct
      - No trail.
      - At/below threshold: remaining value blinks.
 
-   GAIN MODE (configured separately via Gauge_setGainMode):
-   --------------------------------------------------------
+   GAIN MODE (declared in GaugeDefinition.behavior):
+   -------------------------------------------------
    FOLLOW:
      - Gauge_increase starts gain trail (hold -> blink -> value catch-up),
        independent from the damage trail mode.
@@ -1180,8 +1191,8 @@ struct GaugeLogic
     u16 maxValue;                   /* Maximum logical value (e.g., 100 for "100 HP") */
     u16 currentValue;               /* Current logical value (0..maxValue) */
     u16 maxFillPixels;              /* Total gauge pixel width (e.g., 80 = 10 tiles) */
-    const u16 *valueToPixelsLUT;    /* Points to valueToPixelsData when active, NULL for 1:1 */
-    u16 *valueToPixelsData;         /* Dynamically allocated LUT (maxValue+1 entries) */
+    const u16 *valueToPixelsLUT;    /* Points to valueToPixelsData when scaling is active, NULL for FILL 1:1 */
+    u16 *valueToPixelsData;         /* Heap LUT storage, allocated once with GAUGE_LUT_CAPACITY + 1 entries */
 
     u16 valueTargetPixels;          /* Where the value is heading (animation target) */
     u16 valuePixels;                /* Where the value is currently displayed (animated) */
@@ -1406,18 +1417,17 @@ typedef struct GaugeLaneInstance
    2. Build (initialization + lanes allocation):
         Gauge_build(&myGauge, &myGaugeDefinition, vramBase);
 
-   3. Configure runtime behavior (optional, before first Gauge_update):
-        Gauge_setValueAnim(&myGauge, 1, 4);   // enable smooth value changes
-        Gauge_setTrailMode(&myGauge, GAUGE_TRAIL_MODE_FOLLOW, 0, 4, 3); // damage mode
-        Gauge_setGainMode(&myGauge, GAUGE_GAIN_MODE_FOLLOW, 4, 3);       // gain mode
-
-   4. Game loop:
+   3. Game loop:
         Gauge_update(&myGauge);  // call once per frame (tick + render)
 
-   5. Change value:
+   4. Change value:
         Gauge_decrease(&myGauge, 10, 20, 60); // damage: -10, hold 20f, blink 60f
         Gauge_increase(&myGauge, 5, 20, 60);  // heal: +5, hold 20f, blink 60f
         Gauge_setValue(&myGauge, 50);          // instant set (no trail)
+        Gauge_setMaxValue(&myGauge, 120);      // keep value, change logical scale only
+
+   5. Release:
+        Gauge_release(&myGauge);               // also zeroes the object
 
    WHY MULTIPLE LANES?
    -------------------
@@ -1444,14 +1454,11 @@ struct Gauge
 
     /* --- Lanes (rendering units) --- */
     GaugeLaneInstance **lanes;          /* Dynamically allocated array of lane pointers */
-    GaugeTickAndRenderHandler *tickAndRenderHandler;       /* Active update path */
-    GaugeTickAndRenderHandler *steadyTickAndRenderHandler; /* Handler used after first update lock */
-    GaugeLogicTickHandler *logicTickHandler;               /* Active logic tick path (trail mode specific) */
+    GaugeTickAndRenderHandler *tickAndRenderHandler;       /* Update path selected at build time */
+    GaugeLogicTickHandler *logicTickHandler;               /* Logic tick path selected at build time */
     u8 laneCount;               /* Number of active lanes */
-    u8 laneCapacity;            /* Allocated lane pointer capacity */
     u8 baseLaneIndex;           /* baseLane used to compute shared decisions */
     u8 baseLaneHasBridge;       /* 1 when baseLane has bridge topology */
-    u8 runtimeLocked;           /* Runtime state: 0=open, 1=has lanes, 2=closed after first update */
     u8 debugMode;               /* Trace state for this gauge (0=off, 1=on). */
     u16 baseLaneSpanPixels;     /* baseLane logical span in pixels (length * 8) */
 
@@ -1468,9 +1475,7 @@ struct Gauge
     u8 ownedLayoutCount;
 
     /* --- VRAM allocation --- */
-    u16 vramBase;                   /* Base VRAM tile index */
     u16 vramNextOffset;             /* Offset for next lane allocation */
-    GaugeVramMode vramMode;         /* Default VRAM mode for lanes */
     GaugeValueMode valueMode;       /* Value quantization mode */
 };
 
