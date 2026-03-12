@@ -98,7 +98,9 @@ static void gauge_free_ptr(void **ptr)
 #define PIP_STATE_BLINK_OFF  4
 #define PIP_HALF_AXIS_HORIZONTAL 0
 #define PIP_HALF_AXIS_VERTICAL   1
+#define GAUGE_PIP_RUNTIME_STATE_COUNT (PIP_STATE_BLINK_OFF + 1)
 #define GAUGE_PIP_MAX_RENDER_TILES (GAUGE_MAX_LENGTH * 4)
+#define GAUGE_PIP_RENDER_STATE_LUT_SIZE (GAUGE_PIP_RUNTIME_STATE_COUNT * GAUGE_PIP_MAX_RENDER_TILES)
 
 /* Pre-computed strip indices for trivial cell states (avoid LUT indexing in hot path) */
 #define STRIP_INDEX_EMPTY       0   /* s_tileIndexByValueTrail[0][0] : value=0, trail=0 */
@@ -121,6 +123,7 @@ static const u8 s_invalidCellIndexes[GAUGE_MAX_LENGTH] = {
     CACHE_INVALID_U8, CACHE_INVALID_U8, CACHE_INVALID_U8, CACHE_INVALID_U8,
     CACHE_INVALID_U8, CACHE_INVALID_U8, CACHE_INVALID_U8, CACHE_INVALID_U8
 };
+static const u8 s_zeroPipRenderStateLut[GAUGE_PIP_RENDER_STATE_LUT_SIZE] = {0};
 
 /**
  * Trail mode (internal state machine state).
@@ -2063,10 +2066,15 @@ static u8 layout_ensure_cell_flag_storage(u8 **cellFlags,
                                           u8 cellCount,
                                           const u8 *defaultView,
                                           u8 defaultValue);
+static u8 layout_ensure_byte_lut_storage(u8 **lut,
+                                         u16 byteCount,
+                                         const u8 *defaultView,
+                                         u8 defaultValue);
 static void layout_free_optional_ptr(void **ptr,
                                      const void *defaultViewA,
                                      const void *defaultViewB,
                                      const void *defaultViewC);
+static inline u16 compute_pip_render_state_lut_index(u8 pipState, u8 renderIndex);
 static u8 layout_sync_optional_segment_tilesets_by_usage(u8 hasAny,
                                                           const u32 ***segmentTilesetsBySegment,
                                                           u8 segmentCount);
@@ -2341,19 +2349,19 @@ static void build_pip_luts(GaugeLaneLayout *layout)
         layout_free_optional_ptr((void **)&layout->pipWidthByPipIndex, s_oneCellFlags, NULL, NULL);
         layout_free_optional_ptr((void **)&layout->pipRenderFillIndexByRenderIndex, s_invalidCellIndexes, NULL, NULL);
         layout_free_optional_ptr((void **)&layout->pipRenderRowByRenderIndex, s_zeroCellFlags, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipRenderSourceColByRenderIndex, s_zeroCellFlags, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipRenderSourceRowByRenderIndex, s_zeroCellFlags, NULL, NULL);
         layout_free_optional_ptr((void **)&layout->pipRenderExtraHFlipByRenderIndex, s_zeroCellFlags, NULL, NULL);
         layout_free_optional_ptr((void **)&layout->pipRenderExtraVFlipByRenderIndex, s_zeroCellFlags, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipRenderStripIndexByState, s_zeroPipRenderStateLut, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipRenderTileOffsetByState, s_zeroPipRenderStateLut, NULL, NULL);
         layout->pipIndexByFillIndex = (u8 *)s_invalidCellIndexes;
         layout->pipLocalTileByFillIndex = (u8 *)s_zeroCellFlags;
         layout->pipWidthByPipIndex = (u8 *)s_oneCellFlags;
         layout->pipRenderFillIndexByRenderIndex = (u8 *)s_invalidCellIndexes;
         layout->pipRenderRowByRenderIndex = (u8 *)s_zeroCellFlags;
-        layout->pipRenderSourceColByRenderIndex = (u8 *)s_zeroCellFlags;
-        layout->pipRenderSourceRowByRenderIndex = (u8 *)s_zeroCellFlags;
         layout->pipRenderExtraHFlipByRenderIndex = (u8 *)s_zeroCellFlags;
         layout->pipRenderExtraVFlipByRenderIndex = (u8 *)s_zeroCellFlags;
+        layout->pipRenderStripIndexByState = (u8 *)s_zeroPipRenderStateLut;
+        layout->pipRenderTileOffsetByState = (u8 *)s_zeroPipRenderStateLut;
         return;
     }
 
@@ -2377,14 +2385,6 @@ static void build_pip_luts(GaugeLaneLayout *layout)
                                          maxRenderCount,
                                          s_zeroCellFlags,
                                          0) ||
-        !layout_ensure_cell_flag_storage(&layout->pipRenderSourceColByRenderIndex,
-                                         maxRenderCount,
-                                         s_zeroCellFlags,
-                                         0) ||
-        !layout_ensure_cell_flag_storage(&layout->pipRenderSourceRowByRenderIndex,
-                                         maxRenderCount,
-                                         s_zeroCellFlags,
-                                         0) ||
         !layout_ensure_cell_flag_storage(&layout->pipRenderExtraHFlipByRenderIndex,
                                          maxRenderCount,
                                          s_zeroCellFlags,
@@ -2392,7 +2392,15 @@ static void build_pip_luts(GaugeLaneLayout *layout)
         !layout_ensure_cell_flag_storage(&layout->pipRenderExtraVFlipByRenderIndex,
                                          maxRenderCount,
                                          s_zeroCellFlags,
-                                         0))
+                                         0) ||
+        !layout_ensure_byte_lut_storage(&layout->pipRenderStripIndexByState,
+                                        GAUGE_PIP_RENDER_STATE_LUT_SIZE,
+                                        s_zeroPipRenderStateLut,
+                                        0) ||
+        !layout_ensure_byte_lut_storage(&layout->pipRenderTileOffsetByState,
+                                        GAUGE_PIP_RENDER_STATE_LUT_SIZE,
+                                        s_zeroPipRenderStateLut,
+                                        0))
     {
         layout->pipCount = 0;
         layout->pipRenderCount = 0;
@@ -2401,19 +2409,19 @@ static void build_pip_luts(GaugeLaneLayout *layout)
         layout_free_optional_ptr((void **)&layout->pipWidthByPipIndex, s_oneCellFlags, NULL, NULL);
         layout_free_optional_ptr((void **)&layout->pipRenderFillIndexByRenderIndex, s_invalidCellIndexes, NULL, NULL);
         layout_free_optional_ptr((void **)&layout->pipRenderRowByRenderIndex, s_zeroCellFlags, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipRenderSourceColByRenderIndex, s_zeroCellFlags, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipRenderSourceRowByRenderIndex, s_zeroCellFlags, NULL, NULL);
         layout_free_optional_ptr((void **)&layout->pipRenderExtraHFlipByRenderIndex, s_zeroCellFlags, NULL, NULL);
         layout_free_optional_ptr((void **)&layout->pipRenderExtraVFlipByRenderIndex, s_zeroCellFlags, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipRenderStripIndexByState, s_zeroPipRenderStateLut, NULL, NULL);
+        layout_free_optional_ptr((void **)&layout->pipRenderTileOffsetByState, s_zeroPipRenderStateLut, NULL, NULL);
         layout->pipIndexByFillIndex = (u8 *)s_invalidCellIndexes;
         layout->pipLocalTileByFillIndex = (u8 *)s_zeroCellFlags;
         layout->pipWidthByPipIndex = (u8 *)s_oneCellFlags;
         layout->pipRenderFillIndexByRenderIndex = (u8 *)s_invalidCellIndexes;
         layout->pipRenderRowByRenderIndex = (u8 *)s_zeroCellFlags;
-        layout->pipRenderSourceColByRenderIndex = (u8 *)s_zeroCellFlags;
-        layout->pipRenderSourceRowByRenderIndex = (u8 *)s_zeroCellFlags;
         layout->pipRenderExtraHFlipByRenderIndex = (u8 *)s_zeroCellFlags;
         layout->pipRenderExtraVFlipByRenderIndex = (u8 *)s_zeroCellFlags;
+        layout->pipRenderStripIndexByState = (u8 *)s_zeroPipRenderStateLut;
+        layout->pipRenderTileOffsetByState = (u8 *)s_zeroPipRenderStateLut;
         return;
     }
 
@@ -2430,11 +2438,11 @@ static void build_pip_luts(GaugeLaneLayout *layout)
     {
         layout->pipRenderFillIndexByRenderIndex[i] = CACHE_INVALID_U8;
         layout->pipRenderRowByRenderIndex[i] = 0;
-        layout->pipRenderSourceColByRenderIndex[i] = 0;
-        layout->pipRenderSourceRowByRenderIndex[i] = 0;
         layout->pipRenderExtraHFlipByRenderIndex[i] = 0;
         layout->pipRenderExtraVFlipByRenderIndex[i] = 0;
     }
+    memset(layout->pipRenderStripIndexByState, 0, GAUGE_PIP_RENDER_STATE_LUT_SIZE);
+    memset(layout->pipRenderTileOffsetByState, 0, GAUGE_PIP_RENDER_STATE_LUT_SIZE);
 
     u8 fillIndex = 0;
     while (fillIndex < layout->length && layout->pipCount < layout->length)
@@ -2476,7 +2484,10 @@ static void build_pip_luts(GaugeLaneLayout *layout)
         }
     }
 
-    /* Build physical render LUT: each fillIndex is duplicated by segment height. */
+    /* Build physical render LUT: each fillIndex is duplicated by segment height.
+     * At the same time, precompute state-major strip/tile address LUTs used by
+     * the fixed and dynamic PIP hot paths.
+     */
     for (u8 i = 0; i < layout->length && layout->pipRenderCount < maxRenderCount; i++)
     {
         const u8 fillCellIndex = layout->cellIndexByFillIndex[i];
@@ -2527,12 +2538,23 @@ static void build_pip_luts(GaugeLaneLayout *layout)
                                        &extraVFlip);
 
             const u8 renderIndex = layout->pipRenderCount;
+            const u8 stripStateStride = sourceWidth;
+            const u8 tileStateStride = (u8)(sourceWidth * sourceHeight);
+            const u8 stripBaseIndex = (u8)((u16)sourceRow * (u16)(sourceWidth * layout->pipStateCountBySegment[segmentId]) + sourceCol);
+            const u8 tileBaseOffset = (u8)((u16)sourceRow * sourceWidth + sourceCol);
             layout->pipRenderFillIndexByRenderIndex[renderIndex] = i;
             layout->pipRenderRowByRenderIndex[renderIndex] = row;
-            layout->pipRenderSourceColByRenderIndex[renderIndex] = sourceCol;
-            layout->pipRenderSourceRowByRenderIndex[renderIndex] = sourceRow;
             layout->pipRenderExtraHFlipByRenderIndex[renderIndex] = extraHFlip;
             layout->pipRenderExtraVFlipByRenderIndex[renderIndex] = extraVFlip;
+
+            for (u8 pipState = PIP_STATE_EMPTY; pipState < GAUGE_PIP_RUNTIME_STATE_COUNT; pipState++)
+            {
+                const u16 renderStateIndex = compute_pip_render_state_lut_index(pipState, renderIndex);
+                layout->pipRenderStripIndexByState[renderStateIndex] =
+                    (u8)(stripBaseIndex + ((u16)pipState * stripStateStride));
+                layout->pipRenderTileOffsetByState[renderStateIndex] =
+                    (u8)(tileBaseOffset + ((u16)pipState * tileStateStride));
+            }
             layout->pipRenderCount++;
         }
     }
@@ -2608,10 +2630,10 @@ static void layout_set_optional_views_to_defaults(GaugeLaneLayout *layout)
     layout->pipRenderCount = 0;
     layout->pipRenderFillIndexByRenderIndex = (u8 *)s_invalidCellIndexes;
     layout->pipRenderRowByRenderIndex = (u8 *)s_zeroCellFlags;
-    layout->pipRenderSourceColByRenderIndex = (u8 *)s_zeroCellFlags;
-    layout->pipRenderSourceRowByRenderIndex = (u8 *)s_zeroCellFlags;
     layout->pipRenderExtraHFlipByRenderIndex = (u8 *)s_zeroCellFlags;
     layout->pipRenderExtraVFlipByRenderIndex = (u8 *)s_zeroCellFlags;
+    layout->pipRenderStripIndexByState = (u8 *)s_zeroPipRenderStateLut;
+    layout->pipRenderTileOffsetByState = (u8 *)s_zeroPipRenderStateLut;
 
     layout->bridgeEndByFillIndex = (u8 *)s_zeroCellFlags;
     layout->bridgeBreakByFillIndex = (u8 *)s_zeroCellFlags;
@@ -2943,10 +2965,10 @@ static void layout_free_buffers(GaugeLaneLayout *layout)
     layout_free_optional_ptr((void **)&layout->pipWidthByPipIndex, s_oneCellFlags, NULL, NULL);
     layout_free_optional_ptr((void **)&layout->pipRenderFillIndexByRenderIndex, s_invalidCellIndexes, NULL, NULL);
     layout_free_optional_ptr((void **)&layout->pipRenderRowByRenderIndex, s_zeroCellFlags, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->pipRenderSourceColByRenderIndex, s_zeroCellFlags, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->pipRenderSourceRowByRenderIndex, s_zeroCellFlags, NULL, NULL);
     layout_free_optional_ptr((void **)&layout->pipRenderExtraHFlipByRenderIndex, s_zeroCellFlags, NULL, NULL);
     layout_free_optional_ptr((void **)&layout->pipRenderExtraVFlipByRenderIndex, s_zeroCellFlags, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->pipRenderStripIndexByState, s_zeroPipRenderStateLut, NULL, NULL);
+    layout_free_optional_ptr((void **)&layout->pipRenderTileOffsetByState, s_zeroPipRenderStateLut, NULL, NULL);
 
     layout_free_optional_ptr((void **)&layout->bridgeEndByFillIndex, s_zeroCellFlags, NULL, NULL);
     layout_free_optional_ptr((void **)&layout->bridgeBreakByFillIndex, s_zeroCellFlags, NULL, NULL);
@@ -4136,6 +4158,22 @@ static inline void compute_pip_render_xy(const GaugeLaneLayout *layout,
         *outX = (u16)(*outX + transverseShift);
 }
 
+/*
+ * State-major PIP render LUT indexing.
+ *
+ * The first dimension is the resolved PIP state (EMPTY / VALUE / LOSS / GAIN /
+ * BLINK_OFF). The second dimension is the physical render tile index.
+ *
+ * Example:
+ *   lut[PIP_STATE_GAIN, renderIndex]
+ * becomes
+ *   lut[compute_pip_render_state_lut_index(PIP_STATE_GAIN, renderIndex)]
+ */
+static inline u16 compute_pip_render_state_lut_index(u8 pipState, u8 renderIndex)
+{
+    return (u16)(((u16)pipState * GAUGE_PIP_MAX_RENDER_TILES) + renderIndex);
+}
+
 /**
  * Compute compact PIP strip index for SGDK row-major tilesets.
  *
@@ -4160,7 +4198,9 @@ static inline u8 compute_pip_strip_index(u8 sourceWidth,
  *   base + state * (sourceWidth * sourceHeight) + sourceRow * sourceWidth + sourceCol
  * where state is derived from the compact PIP strip state order.
  *
- * Runtime then updates only tilemap indices (no per-cell tile streaming).
+ * Runtime then updates only tilemap indices. The local tile offset for each
+ * renderIndex/state pair is precomputed at build time, so the hot path only
+ * does state resolution + LUT lookup.
  */
 static u8 init_dynamic_pip_vram(GaugeLaneInstance *lane)
 {
@@ -4255,8 +4295,6 @@ static u8 init_dynamic_pip_vram(GaugeLaneInstance *lane)
             continue;
 
         const u8 renderRow = layout->pipRenderRowByRenderIndex[renderIndex];
-        const u8 sourceCol = layout->pipRenderSourceColByRenderIndex[renderIndex];
-        const u8 sourceRow = layout->pipRenderSourceRowByRenderIndex[renderIndex];
         const u8 extraHFlip = layout->pipRenderExtraHFlipByRenderIndex[renderIndex];
         const u8 extraVFlip = layout->pipRenderExtraVFlipByRenderIndex[renderIndex];
         const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
@@ -4266,11 +4304,8 @@ static u8 init_dynamic_pip_vram(GaugeLaneInstance *lane)
             continue;
 
         const u16 pipBaseTile = dyn->vramTilePipBase[segmentId];
-        u8 sourceWidth = layout->pipSourceWidthBySegment[segmentId];
-        if (sourceWidth == 0)
-            sourceWidth = 1;
-
-        const u16 vramTile = (u16)(pipBaseTile + sourceRow * sourceWidth + sourceCol);
+        const u16 renderStateIndex = compute_pip_render_state_lut_index(PIP_STATE_EMPTY, renderIndex);
+        const u16 vramTile = (u16)(pipBaseTile + layout->pipRenderTileOffsetByState[renderStateIndex]);
         const u16 attr = TILE_ATTR_FULL(layout->palette, layout->priority,
                                         (u8)(layout->verticalFlip ^ extraVFlip),
                                         (u8)(layout->horizontalFlip ^ extraHFlip),
@@ -4308,8 +4343,6 @@ static void write_tilemap_pip_init(GaugeLaneInstance *lane)
         if (fillIndex == CACHE_INVALID_U8)
             continue;
         const u8 renderRow = layout->pipRenderRowByRenderIndex[renderIndex];
-        const u8 sourceCol = layout->pipRenderSourceColByRenderIndex[renderIndex];
-        const u8 sourceRow = layout->pipRenderSourceRowByRenderIndex[renderIndex];
         const u8 extraHFlip = layout->pipRenderExtraHFlipByRenderIndex[renderIndex];
         const u8 extraVFlip = layout->pipRenderExtraVFlipByRenderIndex[renderIndex];
         const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
@@ -4335,14 +4368,8 @@ static void write_tilemap_pip_init(GaugeLaneInstance *lane)
         compute_pip_render_xy(layout, lane->originX, lane->originY, fillIndex, renderRow, &x, &y);
         VDP_setTileMapXY(WINDOW, attr, x, y);
 
-        u8 sourceWidth = layout->pipSourceWidthBySegment[segmentId];
-        if (sourceWidth == 0)
-            sourceWidth = 1;
-        const u8 stripIndex = compute_pip_strip_index(sourceWidth,
-                                                       pipStateCount,
-                                                       PIP_STATE_EMPTY,
-                                                       sourceRow,
-                                                       sourceCol);
+        const u16 renderStateIndex = compute_pip_render_state_lut_index(PIP_STATE_EMPTY, renderIndex);
+        const u8 stripIndex = layout->pipRenderStripIndexByState[renderStateIndex];
 
         /* Preload EMPTY tile for this local position. */
         upload_fill_tile(pipStrip, stripIndex, vramTile, DMA_QUEUE);
@@ -5344,7 +5371,7 @@ static inline u8 resolve_available_pip_state(u8 requestedState,
  * PIP-mode renderer: update each cell's tile from compact strip based on pip state.
  *
  * For each cell, computes its PIP state (VALUE/EMPTY/LOSS/GAIN/BLINK_OFF),
- * then selects the corresponding tile from the compact strip.
+ * then selects the corresponding tile from precomputed render LUTs.
  *
  * - Fixed mode: per-cell streaming (upload on demand).
  * - Dynamic mode: preloaded shared slots per segment/state/local tile;
@@ -5361,7 +5388,6 @@ static void process_pip_mode(GaugeLaneInstance *lane,
     (void)trailPixelsRendered;
     (void)trailPixelsActual;
     (void)blinkOffActive;
-    (void)trailMode;
     const GaugeLaneLayout *layout = lane->layout;
     const Gauge *gauge = lane->gauge;
     if (!gauge)
@@ -5380,8 +5406,6 @@ static void process_pip_mode(GaugeLaneInstance *lane,
             if (fillIndex == CACHE_INVALID_U8)
                 continue;
             const u8 renderRow = layout->pipRenderRowByRenderIndex[renderIndex];
-            const u8 sourceCol = layout->pipRenderSourceColByRenderIndex[renderIndex];
-            const u8 sourceRow = layout->pipRenderSourceRowByRenderIndex[renderIndex];
             const u8 extraHFlip = layout->pipRenderExtraHFlipByRenderIndex[renderIndex];
             const u8 extraVFlip = layout->pipRenderExtraVFlipByRenderIndex[renderIndex];
             const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
@@ -5391,27 +5415,14 @@ static void process_pip_mode(GaugeLaneInstance *lane,
             if (pipStateCount < 2)
                 continue;
 
-            u8 sourceWidth = layout->pipSourceWidthBySegment[segmentId];
-            if (sourceWidth == 0)
-                sourceWidth = 1;
-            u8 sourceHeight = layout->pipSourceHeightBySegment[segmentId];
-            if (sourceHeight == 0)
-                sourceHeight = 1;
-
             const u8 mappedBaseLaneFillIndex = lane->baseLaneFillIndexByCell[cellIndex];
             const u8 requestedState = gauge->baseLanePipStateByFillIndex[mappedBaseLaneFillIndex];
             const u8 resolvedState = resolve_available_pip_state(requestedState,
                                                                  pipStateCount,
                                                                  trailMode);
-            const u8 stripIndex = compute_pip_strip_index(sourceWidth,
-                                                          pipStateCount,
-                                                          resolvedState,
-                                                          sourceRow,
-                                                          sourceCol);
-            const u16 desiredTile = (u16)(pipBaseTile +
-                                          ((u16)resolvedState * (sourceWidth * sourceHeight)) +
-                                          (sourceRow * sourceWidth) +
-                                          sourceCol);
+            const u16 renderStateIndex = compute_pip_render_state_lut_index(resolvedState, renderIndex);
+            const u8 stripIndex = layout->pipRenderStripIndexByState[renderStateIndex];
+            const u16 desiredTile = (u16)(pipBaseTile + layout->pipRenderTileOffsetByState[renderStateIndex]);
             const u8 changed = (dyn->cellCurrentTileIndex[renderIndex] != desiredTile);
 
             if (changed)
@@ -5456,18 +5467,11 @@ static void process_pip_mode(GaugeLaneInstance *lane,
         if (!pipStrip)
             continue;
 
-        const u8 fillIndex = cell->pipFillIndex;
-        if (fillIndex == CACHE_INVALID_U8)
+        if (cell->pipFillIndex == CACHE_INVALID_U8)
             continue;
         const u8 renderIndex = cell->pipRenderIndex;
         if (renderIndex == CACHE_INVALID_U8)
             continue;
-
-        const u8 sourceCol = layout->pipRenderSourceColByRenderIndex[renderIndex];
-        const u8 sourceRow = layout->pipRenderSourceRowByRenderIndex[renderIndex];
-        u8 sourceWidth = layout->pipSourceWidthBySegment[segmentId];
-        if (sourceWidth == 0)
-            sourceWidth = 1;
 
         const u8 mappedBaseLaneFillIndex = lane->baseLaneFillIndexByCell[cellIndex];
         const u8 requestedState = gauge->baseLanePipStateByFillIndex[mappedBaseLaneFillIndex];
@@ -5475,11 +5479,8 @@ static void process_pip_mode(GaugeLaneInstance *lane,
         const u8 pipState = resolve_available_pip_state(requestedState,
                                                         stateCount,
                                                         trailMode);
-        const u8 stripIndex = compute_pip_strip_index(sourceWidth,
-                                                       stateCount,
-                                                       pipState,
-                                                       sourceRow,
-                                                       sourceCol);
+        const u16 renderStateIndex = compute_pip_render_state_lut_index(pipState, renderIndex);
+        const u8 stripIndex = layout->pipRenderStripIndexByState[renderStateIndex];
         const u8 changed =
             (cell->cachedFillIndex != stripIndex) ||
             (cell->cachedStrip != pipStrip);
@@ -5942,6 +5943,42 @@ static u8 gauge_is_zeroed(const Gauge *gauge)
     {
         if (bytes[byteIndex] != 0)
             return 0;
+    }
+    return 1;
+}
+
+static u8 layout_ensure_byte_lut_storage(u8 **lut,
+                                         u16 byteCount,
+                                         const u8 *defaultView,
+                                         u8 defaultValue)
+{
+    if (!lut)
+        return 0;
+
+    if (*lut != NULL && *lut != defaultView)
+        return 1;
+
+    u8 *allocatedBytes = (u8 *)gauge_alloc_bytes(byteCount);
+    if (!allocatedBytes)
+    {
+        *lut = (u8 *)defaultView;
+        return 0;
+    }
+
+    *lut = allocatedBytes;
+
+    if (defaultValue == 0)
+    {
+        memset(*lut, 0, byteCount);
+    }
+    else if (defaultValue == CACHE_INVALID_U8)
+    {
+        memset(*lut, CACHE_INVALID_U8, byteCount);
+    }
+    else
+    {
+        for (u16 i = 0; i < byteCount; i++)
+            (*lut)[i] = defaultValue;
     }
     return 1;
 }

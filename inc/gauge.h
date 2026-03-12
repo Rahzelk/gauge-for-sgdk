@@ -1054,7 +1054,11 @@ typedef struct
     u8 *pipSourceWidthBySegment;                  /* [segmentCount] source surface width in tiles per state */
     u8 *pipSourceHeightBySegment;                 /* [segmentCount] source surface height in tiles per state */
 
-    /* --- PIP metadata (auto-built from fill order + per-segment PIP styles) --- */
+    /* --- PIP metadata (auto-built from fill order + per-segment PIP styles) ---
+     * The build also precalculates state-major address LUTs so runtime PIP
+     * rendering no longer recomputes strip/tile indices from sourceWidth,
+     * sourceHeight or rowStride for each cell.
+     */
     u8 pipCount;                                   /* number of logical pips in this layout */
     u8 *pipIndexByFillIndex;                       /* [length] fillIndex -> pip index */
     u8 *pipLocalTileByFillIndex;                   /* [length] fillIndex -> local tile inside pip */
@@ -1062,10 +1066,10 @@ typedef struct
     u8 pipRenderCount;                             /* number of physical PIP tiles to render (height-expanded) */
     u8 *pipRenderFillIndexByRenderIndex;           /* [pipRenderCount] render index -> fillIndex */
     u8 *pipRenderRowByRenderIndex;                 /* [pipRenderCount] render index -> row inside segment (0..height-1) */
-    u8 *pipRenderSourceColByRenderIndex;           /* [pipRenderCount] render index -> source col in strip */
-    u8 *pipRenderSourceRowByRenderIndex;           /* [pipRenderCount] render index -> source row in strip */
     u8 *pipRenderExtraHFlipByRenderIndex;          /* [pipRenderCount] render index -> extra HFLIP from coverage */
     u8 *pipRenderExtraVFlipByRenderIndex;          /* [pipRenderCount] render index -> extra VFLIP from coverage */
+    u8 *pipRenderStripIndexByState;                /* [5 * max physical render tiles] state-major render LUT -> fixed-mode strip index */
+    u8 *pipRenderTileOffsetByState;                /* [5 * max physical render tiles] state-major render LUT -> dynamic-mode tile offset */
 
     /* --- Segment boundary LUTs (by fillIndex) ---
      *
