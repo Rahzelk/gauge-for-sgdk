@@ -23,6 +23,8 @@
 #=============================================================================
 
 TILESET gauge_h_straight_yellow_strip "tilesets/gauge_h_straight_yellow_strip.png" NONE NONE
+TILESET gauge_h_straight_yellow_strip_gain "tilesets/gauge_h_straight_yellow_strip_gain.png" NONE NONE
+TILESET gauge_h_straight_yellow_strip_blinkoff "tilesets/gauge_h_straight_yellow_strip_blinkoff.png" NONE NONE
 TILESET gauge_h_pip_basic_strip "tilesets/gauge_h_pip_basic_strip.png" NONE NONE
 TILESET gauge_h_pip_strip "tilesets/gauge_h_pip_strip.png" NONE NONE
 TILESET gauge_h_pip_double_strip "tilesets/gauge_h_pip_double_strip.png" NONE NONE

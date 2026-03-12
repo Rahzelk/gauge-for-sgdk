@@ -129,6 +129,28 @@ static const GaugeSkin g_skinYellowStraight = {
     }
 };
 
+static const GaugeSkin g_skinYellowStraightGain = {
+    .fill = {
+        .normal = {
+            .body = &gauge_h_straight_yellow_strip
+        },
+        .gain = {
+            .body = &gauge_h_straight_yellow_strip_gain
+        }
+    }
+};
+
+static const GaugeSkin g_skinYellowStraightBlinkOff = {
+    .fill = {
+        .normal = {
+            .body = &gauge_h_straight_yellow_strip
+        },
+        .blinkOff = {
+            .body = &gauge_h_straight_yellow_strip_blinkoff
+        }
+    }
+};
+
 static const GaugeSkin g_skinBlueStraight = {
     .fill = {
         .normal = {
@@ -450,9 +472,7 @@ static const GaugeDefinition g_screen1GainDefinition = {
     .lanes = {
         {
             .segments = {
-                { .cells = 4, .skin = &g_skinBevelLightBlue },
-                { .cells = 4, .skin = &g_skinBevelBlue },
-                { .cells = 4, .skin = &g_skinBevelYellow }
+                { .cells = 12, .skin = &g_skinYellowStraightGain }
             }
         }
     },
@@ -480,15 +500,14 @@ static const GaugeDefinition g_screen1BlinkOffDefinition = {
     .lanes = {
         {
             .segments = {
-                { .cells = 4, .skin = &g_skinBorderBlue },
-                { .cells = 4, .skin = &g_skinBorderYellow }
+                { .cells = 8, .skin = &g_skinYellowStraightBlinkOff }
             }
         }
     },
     .behavior = {
         .damageMode = GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK,
         .criticalValue = 24,
-        .damageBlinkShift = 2
+        .damageBlinkShift = 3
     }
 };
 
