@@ -3321,6 +3321,7 @@ static void GaugeLogic_initWithAnim(GaugeLogic *logic,
 
     logic->maxFillPixels = maxFillPixels;
     logic->valueToPixelsLUT = valueToPixelsLUT;
+    logic->pixelsToQuantizedPixelsLUT = NULL;
 
     /* Compute initial pixel values */
     const u16 initialPixels = value_to_pixels(logic, logic->currentValue);
@@ -5758,6 +5759,50 @@ static void fill_pip_value_lut(u16 *dest, u16 maxValue, const GaugeLaneLayout *l
     }
 }
 
+/*
+ * Build the inverse PIP quantization LUT used by quantize_pixels_to_pip_step().
+ *
+ * dest[pixels] = largest quantized pip boundary <= pixels
+ *
+ * The build cost is paid once at Gauge_build() time, then again only when
+ * Gauge_setMaxValue() changes the direct PIP LUT.
+ */
+static void fill_pip_pixels_to_quantized_pixels_lut(u16 *dest,
+                                                    u16 maxFillPixels,
+                                                    const u16 *valueToPixelsLUT,
+                                                    u16 maxValue)
+{
+    if (!dest)
+        return;
+
+    if (!valueToPixelsLUT || maxValue == 0)
+    {
+        for (u16 pixels = 0; pixels <= maxFillPixels; pixels++)
+            dest[pixels] = (u16)((pixels >> TILE_TO_PIXEL_SHIFT) << TILE_TO_PIXEL_SHIFT);
+        return;
+    }
+
+    u16 previousBoundary = valueToPixelsLUT[0];
+    u16 fillPixels = 0;
+
+    for (u16 value = 0; value < maxValue; value++)
+    {
+        const u16 nextBoundary = valueToPixelsLUT[value + 1];
+        while (fillPixels < nextBoundary && fillPixels <= maxFillPixels)
+        {
+            dest[fillPixels] = previousBoundary;
+            fillPixels++;
+        }
+        previousBoundary = nextBoundary;
+    }
+
+    while (fillPixels <= maxFillPixels)
+    {
+        dest[fillPixels] = previousBoundary;
+        fillPixels++;
+    }
+}
+
 static inline u8 gauge_layout_has_bridge(const GaugeLaneLayout *layout)
 {
     if (!layout || layout->segmentCount == 0)
@@ -5822,6 +5867,26 @@ static void gauge_rebuild_value_to_pixels_lut(Gauge *gauge)
     logic->valueToPixelsLUT = (logic->maxValue == logic->maxFillPixels)
         ? NULL
         : logic->valueToPixelsData;
+}
+
+static void gauge_rebuild_pip_quantize_lut(Gauge *gauge)
+{
+    if (!gauge || gauge->valueMode != GAUGE_VALUE_MODE_PIP)
+        return;
+
+    GaugeLogic *logic = &gauge->logic;
+    if (!logic->pixelsToQuantizedPixelsLUT)
+    {
+        logic->pixelsToQuantizedPixelsLUT = (u16 *)gauge_alloc_bytes(
+            (u16)((logic->maxFillPixels + 1) * (u8)sizeof(u16)));
+        if (!logic->pixelsToQuantizedPixelsLUT)
+            return;
+    }
+
+    fill_pip_pixels_to_quantized_pixels_lut(logic->pixelsToQuantizedPixelsLUT,
+                                            logic->maxFillPixels,
+                                            logic->valueToPixelsLUT,
+                                            logic->maxValue);
 }
 
 static void gauge_apply_behavior_from_definition(Gauge *gauge,
@@ -5912,6 +5977,7 @@ void Gauge_setMaxValue(Gauge *gauge, u16 newMaxValue)
         logic->criticalValue = newMaxValue;
 
     gauge_rebuild_value_to_pixels_lut(gauge);
+    gauge_rebuild_pip_quantize_lut(gauge);
 
     logic->valueTargetPixels = value_to_pixels(logic, logic->currentValue);
     if (logic->valueTargetPixels > logic->maxFillPixels)
@@ -5948,6 +6014,7 @@ void Gauge_release(Gauge *gauge)
 
     gauge_free_ptr((void **)&gauge->lanes);
     gauge_free_ptr((void **)&gauge->logic.valueToPixelsData);
+    gauge_free_ptr((void **)&gauge->logic.pixelsToQuantizedPixelsLUT);
 
     for (u8 layoutIndex = 0; layoutIndex < gauge->ownedLayoutCount; layoutIndex++)
     {
@@ -6905,6 +6972,7 @@ u8 Gauge_build(Gauge *gauge,
                     valueToPixelsLUT,
                     resolvedMaxValue);
     gauge->logic.valueToPixelsData = valueToPixelsData;
+    gauge_rebuild_pip_quantize_lut(gauge);
     gauge_apply_behavior_from_definition(gauge, &sanitized->behavior);
 
     u16 nextVram = vramBase;
@@ -7167,8 +7235,11 @@ static void gauge_tick_and_render_fill(Gauge *gauge)
 /**
  * Quantize a pixel position to the nearest PIP step boundary.
  *
- * Scans the valueToPixelsLUT to find the largest pip boundary <= pixels.
- * Example: LUT = [0, 16, 32, 48, 64], pixels=20 -> returns 16.
+ * Fast path:
+ *   direct lookup in the inverse PIP LUT built at Gauge_build() time
+ *
+ * Fallback:
+ *   scan the direct valueToPixelsLUT if the inverse LUT could not be allocated
  *
  * @param logic   Logic with valueToPixelsLUT and maxValue
  * @param pixels  Raw pixel value to quantize
@@ -7178,6 +7249,9 @@ static inline u16 quantize_pixels_to_pip_step(const GaugeLogic *logic, u16 pixel
 {
     if (pixels >= logic->maxFillPixels)
         return logic->maxFillPixels;
+
+    if (logic->pixelsToQuantizedPixelsLUT)
+        return logic->pixelsToQuantizedPixelsLUT[pixels];
 
     const u16 *lut = logic->valueToPixelsLUT;
     if (!lut)
@@ -7198,7 +7272,8 @@ static inline u16 quantize_pixels_to_pip_step(const GaugeLogic *logic, u16 pixel
  *
  * Same flow as fill mode, but pixel values are quantized to pip boundaries
  * before rendering. This ensures each pip snaps to full/empty states rather
- * than showing partial fills. Uses valueToPixelsLUT for quantization.
+ * than showing partial fills. Uses the inverse PIP LUT when available, with a
+ * fallback scan on the direct LUT if allocation failed.
  */
 static void gauge_tick_and_render_pip(Gauge *gauge)
 {

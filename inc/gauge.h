@@ -1127,6 +1127,11 @@ typedef struct
    The LUT buffer is allocated once at build time with fixed capacity
    (`GAUGE_LUT_CAPACITY + 1` entries) and then reused in place.
 
+   PIP mode also keeps an inverse quantization LUT:
+   - pixelsToQuantizedPixelsLUT[p] = largest pip boundary <= p
+   This removes the per-frame linear scan previously needed to quantize
+   value / trail / target pixels onto pip steps.
+
    TRAIL MODE BEHAVIOR:
    --------------------
    FOLLOW:
@@ -1193,6 +1198,7 @@ struct GaugeLogic
     u16 maxFillPixels;              /* Total gauge pixel width (e.g., 80 = 10 tiles) */
     const u16 *valueToPixelsLUT;    /* Points to valueToPixelsData when scaling is active, NULL for FILL 1:1 */
     u16 *valueToPixelsData;         /* Heap LUT storage, allocated once with GAUGE_LUT_CAPACITY + 1 entries */
+    u16 *pixelsToQuantizedPixelsLUT;/* PIP-only inverse LUT [0..maxFillPixels] -> pip boundary */
 
     u16 valueTargetPixels;          /* Where the value is heading (animation target) */
     u16 valuePixels;                /* Where the value is currently displayed (animated) */
