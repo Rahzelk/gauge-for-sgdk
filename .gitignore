@@ -4,3 +4,5 @@ AGENTS.md
 tools/
 references/
 .vscode/
+.claude/
+.kilocode/

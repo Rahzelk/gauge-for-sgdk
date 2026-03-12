@@ -2565,81 +2565,6 @@ static void build_pip_luts(GaugeLaneLayout *layout)
 /* =============================================================================
    GaugeLaneLayout implementation
    ============================================================================= */
-
-static void layout_zero_optional_flags(GaugeLaneLayout *layout)
-{
-    layout->hasBlinkOff = 0;
-    layout->hasGainBlinkOff = 0;
-    layout->capStartEnabled = 0;
-    layout->capEndEnabled = 0;
-}
-
-static void layout_set_optional_views_to_defaults(GaugeLaneLayout *layout)
-{
-    /* Optional fields point to shared sentinel views until explicitly enabled.
-     * This keeps zero-feature layouts RAM-light while preserving branch-free reads. */
-    layout->tilesetEndBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->tilesetTrailBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->tilesetBridgeBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->tilesetCapStartBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->tilesetCapEndBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->tilesetCapStartBreakBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->tilesetCapStartTrailBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->capEndBySegment = (u8 *)s_zeroSegmentFlags;
-
-    layout->gainTilesetBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->gainTilesetEndBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->gainTilesetTrailBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->gainTilesetBridgeBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->gainTilesetCapStartBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->gainTilesetCapEndBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->gainTilesetCapStartBreakBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->gainTilesetCapStartTrailBySegment = (const u32 **)s_nullSegmentTilesets;
-
-    layout->blinkOffTilesetBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->blinkOffTilesetEndBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->blinkOffTilesetTrailBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->blinkOffTilesetBridgeBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->blinkOffTilesetCapStartBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->blinkOffTilesetCapEndBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->blinkOffTilesetCapStartBreakBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->blinkOffTilesetCapStartTrailBySegment = (const u32 **)s_nullSegmentTilesets;
-
-    layout->gainBlinkOffTilesetBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->gainBlinkOffTilesetEndBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->gainBlinkOffTilesetTrailBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->gainBlinkOffTilesetBridgeBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->gainBlinkOffTilesetCapStartBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->gainBlinkOffTilesetCapEndBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->gainBlinkOffTilesetCapStartBreakBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->gainBlinkOffTilesetCapStartTrailBySegment = (const u32 **)s_nullSegmentTilesets;
-
-    layout->pipTilesetBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->pipWidthBySegment = (u8 *)s_oneSegmentFlags;
-    layout->pipHeightBySegment = (u8 *)s_oneSegmentFlags;
-    layout->pipOffsetBySegment = (u8 *)s_zeroSegmentFlags;
-    layout->pipStateCountBySegment = (u8 *)s_zeroSegmentFlags;
-    layout->pipStripCoverageBySegment = (u8 *)s_zeroSegmentFlags;
-    layout->pipHalfAxisBySegment = (u8 *)s_zeroSegmentFlags;
-    layout->pipSourceWidthBySegment = (u8 *)s_oneSegmentFlags;
-    layout->pipSourceHeightBySegment = (u8 *)s_oneSegmentFlags;
-
-    layout->pipIndexByFillIndex = (u8 *)s_invalidCellIndexes;
-    layout->pipLocalTileByFillIndex = (u8 *)s_zeroCellFlags;
-    layout->pipWidthByPipIndex = (u8 *)s_oneCellFlags;
-    layout->pipRenderCount = 0;
-    layout->pipRenderFillIndexByRenderIndex = (u8 *)s_invalidCellIndexes;
-    layout->pipRenderRowByRenderIndex = (u8 *)s_zeroCellFlags;
-    layout->pipRenderExtraHFlipByRenderIndex = (u8 *)s_zeroCellFlags;
-    layout->pipRenderExtraVFlipByRenderIndex = (u8 *)s_zeroCellFlags;
-    layout->pipRenderStripIndexByState = (u8 *)s_zeroPipRenderStateLut;
-    layout->pipRenderTileOffsetByState = (u8 *)s_zeroPipRenderStateLut;
-
-    layout->bridgeEndByFillIndex = (u8 *)s_zeroCellFlags;
-    layout->bridgeBreakByFillIndex = (u8 *)s_zeroCellFlags;
-    layout->bridgeBreakBoundaryByFillIndex = (u8 *)s_zeroCellFlags;
-}
-
 static void layout_free_optional_ptr(void **ptr,
                                      const void *defaultViewA,
                                      const void *defaultViewB,
@@ -2829,77 +2754,153 @@ typedef enum
 
 typedef enum
 {
-    LAYOUT_STYLE_CONTEXT_BASE = 0,
-    LAYOUT_STYLE_CONTEXT_GAIN,
-    LAYOUT_STYLE_CONTEXT_BLINK,
-    LAYOUT_STYLE_CONTEXT_GAIN_BLINK
-} LayoutStyleContext;
+    LAYOUT_TILESET_GROUP_BASE = 0,
+    LAYOUT_TILESET_GROUP_GAIN,
+    LAYOUT_TILESET_GROUP_BLINK,
+    LAYOUT_TILESET_GROUP_GAIN_BLINK,
+    LAYOUT_TILESET_GROUP_COUNT
+} LayoutTilesetGroupId;
 
 typedef u16 LayoutTilesetSlotMask;
 
 #define LAYOUT_TILESET_SLOT_MASK(slot) ((LayoutTilesetSlotMask)(1u << (slot)))
 #define LAYOUT_TILESET_SLOT_MASK_ALL ((LayoutTilesetSlotMask)((1u << LAYOUT_TILESET_SLOT_COUNT) - 1u))
+#define GAUGE_MEMBER_OFFSET(type, memberName) ((u16)((u32)&(((type *)0)->memberName)))
 
 typedef struct
 {
-    const u32 ***targetBySlot[LAYOUT_TILESET_SLOT_COUNT];
-} LayoutContextTargetView;
+    u16 memberOffset;
+    const void *defaultView;
+    u8 isOptional;
+} LayoutBinding;
 
-static void build_layout_context_target_view(GaugeLaneLayout *layout,
-                                             LayoutStyleContext context,
-                                             LayoutContextTargetView *outView)
-{
-    if (!layout || !outView)
-        return;
+#define LAYOUT_BINDING_REQUIRED(memberName) { GAUGE_MEMBER_OFFSET(GaugeLaneLayout, memberName), NULL, 0 }
+#define LAYOUT_BINDING_OPTIONAL(memberName, sentinelView) { GAUGE_MEMBER_OFFSET(GaugeLaneLayout, memberName), (sentinelView), 1 }
 
-    memset(outView, 0, sizeof(*outView));
-
-    switch (context)
-    {
-    case LAYOUT_STYLE_CONTEXT_BASE:
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_BODY] = &layout->tilesetBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_END] = &layout->tilesetEndBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_TRAIL] = &layout->tilesetTrailBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_BRIDGE] = &layout->tilesetBridgeBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_CAP_START] = &layout->tilesetCapStartBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_CAP_END] = &layout->tilesetCapEndBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_CAP_START_BREAK] = &layout->tilesetCapStartBreakBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_CAP_START_TRAIL] = &layout->tilesetCapStartTrailBySegment;
-        break;
-
-    case LAYOUT_STYLE_CONTEXT_GAIN:
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_BODY] = &layout->gainTilesetBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_END] = &layout->gainTilesetEndBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_TRAIL] = &layout->gainTilesetTrailBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_BRIDGE] = &layout->gainTilesetBridgeBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_CAP_START] = &layout->gainTilesetCapStartBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_CAP_END] = &layout->gainTilesetCapEndBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_CAP_START_BREAK] = &layout->gainTilesetCapStartBreakBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_CAP_START_TRAIL] = &layout->gainTilesetCapStartTrailBySegment;
-        break;
-
-    case LAYOUT_STYLE_CONTEXT_BLINK:
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_BODY] = &layout->blinkOffTilesetBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_END] = &layout->blinkOffTilesetEndBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_TRAIL] = &layout->blinkOffTilesetTrailBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_BRIDGE] = &layout->blinkOffTilesetBridgeBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_CAP_START] = &layout->blinkOffTilesetCapStartBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_CAP_END] = &layout->blinkOffTilesetCapEndBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_CAP_START_BREAK] = &layout->blinkOffTilesetCapStartBreakBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_CAP_START_TRAIL] = &layout->blinkOffTilesetCapStartTrailBySegment;
-        break;
-
-    case LAYOUT_STYLE_CONTEXT_GAIN_BLINK:
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_BODY] = &layout->gainBlinkOffTilesetBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_END] = &layout->gainBlinkOffTilesetEndBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_TRAIL] = &layout->gainBlinkOffTilesetTrailBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_BRIDGE] = &layout->gainBlinkOffTilesetBridgeBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_CAP_START] = &layout->gainBlinkOffTilesetCapStartBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_CAP_END] = &layout->gainBlinkOffTilesetCapEndBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_CAP_START_BREAK] = &layout->gainBlinkOffTilesetCapStartBreakBySegment;
-        outView->targetBySlot[LAYOUT_TILESET_SLOT_CAP_START_TRAIL] = &layout->gainBlinkOffTilesetCapStartTrailBySegment;
-        break;
+/* Table-driven mapping:
+ *   group + slot -> GaugeLaneLayout member + default sentinel view.
+ * This removes the old 4-way switch duplicated across defaults/free/build code.
+ */
+static const LayoutBinding s_layoutBindings[LAYOUT_TILESET_GROUP_COUNT][LAYOUT_TILESET_SLOT_COUNT] = {
+    [LAYOUT_TILESET_GROUP_BASE] = {
+        LAYOUT_BINDING_REQUIRED(tilesetBySegment),
+        LAYOUT_BINDING_OPTIONAL(tilesetEndBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(tilesetTrailBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(tilesetBridgeBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(tilesetCapStartBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(tilesetCapEndBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(tilesetCapStartBreakBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(tilesetCapStartTrailBySegment, s_nullSegmentTilesets)
+    },
+    [LAYOUT_TILESET_GROUP_GAIN] = {
+        LAYOUT_BINDING_OPTIONAL(gainTilesetBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(gainTilesetEndBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(gainTilesetTrailBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(gainTilesetBridgeBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(gainTilesetCapStartBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(gainTilesetCapEndBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(gainTilesetCapStartBreakBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(gainTilesetCapStartTrailBySegment, s_nullSegmentTilesets)
+    },
+    [LAYOUT_TILESET_GROUP_BLINK] = {
+        LAYOUT_BINDING_OPTIONAL(blinkOffTilesetBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(blinkOffTilesetEndBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(blinkOffTilesetTrailBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(blinkOffTilesetBridgeBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(blinkOffTilesetCapStartBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(blinkOffTilesetCapEndBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(blinkOffTilesetCapStartBreakBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(blinkOffTilesetCapStartTrailBySegment, s_nullSegmentTilesets)
+    },
+    [LAYOUT_TILESET_GROUP_GAIN_BLINK] = {
+        LAYOUT_BINDING_OPTIONAL(gainBlinkOffTilesetBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(gainBlinkOffTilesetEndBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(gainBlinkOffTilesetTrailBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(gainBlinkOffTilesetBridgeBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(gainBlinkOffTilesetCapStartBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(gainBlinkOffTilesetCapEndBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(gainBlinkOffTilesetCapStartBreakBySegment, s_nullSegmentTilesets),
+        LAYOUT_BINDING_OPTIONAL(gainBlinkOffTilesetCapStartTrailBySegment, s_nullSegmentTilesets)
     }
+};
+
+static inline const LayoutBinding *layout_get_binding(LayoutTilesetGroupId group,
+                                                      LayoutTilesetSlot slot)
+{
+    if (group >= LAYOUT_TILESET_GROUP_COUNT || slot >= LAYOUT_TILESET_SLOT_COUNT)
+        return NULL;
+
+    return &s_layoutBindings[group][slot];
+}
+
+static inline const u32 ***layout_get_group_slot_target(GaugeLaneLayout *layout,
+                                                        LayoutTilesetGroupId group,
+                                                        LayoutTilesetSlot slot)
+{
+    const LayoutBinding *binding = layout_get_binding(group, slot);
+    if (!layout || !binding)
+        return NULL;
+
+    return (const u32 ***)((u8 *)layout + binding->memberOffset);
+}
+
+static void layout_zero_optional_flags(GaugeLaneLayout *layout)
+{
+    layout->hasBlinkOff = 0;
+    layout->hasGainBlinkOff = 0;
+    layout->capStartEnabled = 0;
+    layout->capEndEnabled = 0;
+}
+
+static void layout_set_optional_views_to_defaults(GaugeLaneLayout *layout)
+{
+    /* Optional fields point to shared sentinel views until explicitly enabled.
+     * This keeps zero-feature layouts RAM-light while preserving branch-free reads. */
+    for (u8 group = 0; group < LAYOUT_TILESET_GROUP_COUNT; group++)
+    {
+        for (u8 slot = 0; slot < LAYOUT_TILESET_SLOT_COUNT; slot++)
+        {
+            const LayoutBinding *binding = layout_get_binding((LayoutTilesetGroupId)group,
+                                                              (LayoutTilesetSlot)slot);
+            if (!binding || !binding->isOptional)
+                continue;
+
+            const u32 ***target = layout_get_group_slot_target(layout,
+                                                               (LayoutTilesetGroupId)group,
+                                                               (LayoutTilesetSlot)slot);
+            if (!target)
+                continue;
+
+            *target = (const u32 **)binding->defaultView;
+        }
+    }
+
+    layout->capEndBySegment = (u8 *)s_zeroSegmentFlags;
+
+    layout->pipTilesetBySegment = (const u32 **)s_nullSegmentTilesets;
+    layout->pipWidthBySegment = (u8 *)s_oneSegmentFlags;
+    layout->pipHeightBySegment = (u8 *)s_oneSegmentFlags;
+    layout->pipOffsetBySegment = (u8 *)s_zeroSegmentFlags;
+    layout->pipStateCountBySegment = (u8 *)s_zeroSegmentFlags;
+    layout->pipStripCoverageBySegment = (u8 *)s_zeroSegmentFlags;
+    layout->pipHalfAxisBySegment = (u8 *)s_zeroSegmentFlags;
+    layout->pipSourceWidthBySegment = (u8 *)s_oneSegmentFlags;
+    layout->pipSourceHeightBySegment = (u8 *)s_oneSegmentFlags;
+
+    layout->pipIndexByFillIndex = (u8 *)s_invalidCellIndexes;
+    layout->pipLocalTileByFillIndex = (u8 *)s_zeroCellFlags;
+    layout->pipWidthByPipIndex = (u8 *)s_oneCellFlags;
+    layout->pipRenderCount = 0;
+    layout->pipRenderFillIndexByRenderIndex = (u8 *)s_invalidCellIndexes;
+    layout->pipRenderRowByRenderIndex = (u8 *)s_zeroCellFlags;
+    layout->pipRenderExtraHFlipByRenderIndex = (u8 *)s_zeroCellFlags;
+    layout->pipRenderExtraVFlipByRenderIndex = (u8 *)s_zeroCellFlags;
+    layout->pipRenderStripIndexByState = (u8 *)s_zeroPipRenderStateLut;
+    layout->pipRenderTileOffsetByState = (u8 *)s_zeroPipRenderStateLut;
+
+    layout->bridgeEndByFillIndex = (u8 *)s_zeroCellFlags;
+    layout->bridgeBreakByFillIndex = (u8 *)s_zeroCellFlags;
+    layout->bridgeBreakBoundaryByFillIndex = (u8 *)s_zeroCellFlags;
 }
 
 static void layout_free_buffers(GaugeLaneLayout *layout)
@@ -2914,41 +2915,26 @@ static void layout_free_buffers(GaugeLaneLayout *layout)
 
     gauge_free_ptr((void **)&layout->tilesetBySegment);
 
-    layout_free_optional_ptr((void **)&layout->tilesetEndBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->tilesetTrailBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->tilesetBridgeBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->tilesetCapStartBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->tilesetCapEndBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->tilesetCapStartBreakBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->tilesetCapStartTrailBySegment, s_nullSegmentTilesets, NULL, NULL);
+    for (u8 group = 0; group < LAYOUT_TILESET_GROUP_COUNT; group++)
+    {
+        for (u8 slot = 0; slot < LAYOUT_TILESET_SLOT_COUNT; slot++)
+        {
+            const LayoutBinding *binding = layout_get_binding((LayoutTilesetGroupId)group,
+                                                              (LayoutTilesetSlot)slot);
+            if (!binding || !binding->isOptional)
+                continue;
+
+            void **target = (void **)layout_get_group_slot_target(layout,
+                                                                  (LayoutTilesetGroupId)group,
+                                                                  (LayoutTilesetSlot)slot);
+            if (!target)
+                continue;
+
+            layout_free_optional_ptr(target, binding->defaultView, NULL, NULL);
+        }
+    }
+
     layout_free_optional_ptr((void **)&layout->capEndBySegment, s_zeroSegmentFlags, NULL, NULL);
-
-    layout_free_optional_ptr((void **)&layout->gainTilesetBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->gainTilesetEndBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->gainTilesetTrailBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->gainTilesetBridgeBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->gainTilesetCapStartBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->gainTilesetCapEndBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->gainTilesetCapStartBreakBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->gainTilesetCapStartTrailBySegment, s_nullSegmentTilesets, NULL, NULL);
-
-    layout_free_optional_ptr((void **)&layout->blinkOffTilesetBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->blinkOffTilesetEndBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->blinkOffTilesetTrailBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->blinkOffTilesetBridgeBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->blinkOffTilesetCapStartBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->blinkOffTilesetCapEndBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->blinkOffTilesetCapStartBreakBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->blinkOffTilesetCapStartTrailBySegment, s_nullSegmentTilesets, NULL, NULL);
-
-    layout_free_optional_ptr((void **)&layout->gainBlinkOffTilesetBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->gainBlinkOffTilesetEndBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->gainBlinkOffTilesetTrailBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->gainBlinkOffTilesetBridgeBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->gainBlinkOffTilesetCapStartBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->gainBlinkOffTilesetCapEndBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->gainBlinkOffTilesetCapStartBreakBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->gainBlinkOffTilesetCapStartTrailBySegment, s_nullSegmentTilesets, NULL, NULL);
 
     layout_free_optional_ptr((void **)&layout->pipTilesetBySegment, s_nullSegmentTilesets, NULL, NULL);
     layout_free_optional_ptr((void **)&layout->pipWidthBySegment, s_oneSegmentFlags, NULL, NULL);
@@ -3174,7 +3160,7 @@ void GaugeLaneLayout_release(GaugeLaneLayout *layout)
    ============================================================================= */
 
 /**
- * Usage flags for one tileset context (base/gain/blinkOff/gainBlinkOff).
+ * Usage flags for one tileset group (base/gain/blinkOff/gainBlinkOff).
  * Each flag is 1 if any segment provides that tileset, 0 otherwise.
  */
 typedef struct
@@ -3218,16 +3204,13 @@ static inline u8 usage_flag_for_slot(const SkinSetUsageFlags *usageFlags,
     }
 }
 
-static void sync_layout_context_slots_from_usage(GaugeLaneLayout *layout,
-                                                 LayoutStyleContext context,
-                                                 const SkinSetUsageFlags *usageFlags,
-                                                 LayoutTilesetSlotMask slotMask)
+static void sync_layout_tileset_group_slots_from_usage(GaugeLaneLayout *layout,
+                                                       LayoutTilesetGroupId group,
+                                                       const SkinSetUsageFlags *usageFlags,
+                                                       LayoutTilesetSlotMask slotMask)
 {
     if (!layout || !usageFlags)
         return;
-
-    LayoutContextTargetView targetView;
-    build_layout_context_target_view(layout, context, &targetView);
 
     for (u8 slot = 0; slot < LAYOUT_TILESET_SLOT_COUNT; slot++)
     {
@@ -3235,10 +3218,10 @@ static void sync_layout_context_slots_from_usage(GaugeLaneLayout *layout,
         if ((slotMask & LAYOUT_TILESET_SLOT_MASK(slotId)) == 0)
             continue;
 
-        if (context == LAYOUT_STYLE_CONTEXT_BASE && slotId == LAYOUT_TILESET_SLOT_BODY)
+        if (group == LAYOUT_TILESET_GROUP_BASE && slotId == LAYOUT_TILESET_SLOT_BODY)
             continue;
 
-        const u32 ***targetField = targetView.targetBySlot[slotId];
+        const u32 ***targetField = layout_get_group_slot_target(layout, group, slotId);
         if (!targetField)
             continue;
 
@@ -3264,10 +3247,10 @@ static void sync_base_allocations(GaugeLaneLayout *layout,
 {
     const u8 sc = layout->segmentCount;
 
-    sync_layout_context_slots_from_usage(layout,
-                                         LAYOUT_STYLE_CONTEXT_BASE,
-                                         f,
-                                         LAYOUT_TILESET_SLOT_MASK_ALL);
+    sync_layout_tileset_group_slots_from_usage(layout,
+                                               LAYOUT_TILESET_GROUP_BASE,
+                                               f,
+                                               LAYOUT_TILESET_SLOT_MASK_ALL);
 
     layout_sync_optional_segment_flags_by_usage(hasCapEndFlags,
         &layout->capEndBySegment, sc, s_zeroSegmentFlags, 0);
@@ -3980,7 +3963,7 @@ static void preload_dynamic_standard_tiles(GaugeDynamic *dyn, const GaugeLaneLay
  * Reset all dynamic VRAM caches to force re-upload on next render.
  *
  * Called when blink state or trail mode changes, since the cached tiles
- * may now be from the wrong tileset context (e.g., base vs blink-off).
+ * may now be from the wrong tileset group (e.g., base vs blink-off).
  *
  * @param dyn  Dynamic VRAM data to reset
  */
@@ -6462,15 +6445,16 @@ static void scan_fill_assets_usage(const GaugeFillAssets *assets,
     usageFlags->capStartTrail |= (capStartTrail != NULL);
 }
 
-static void assign_layout_context_slot(const LayoutContextTargetView *targetView,
-                                       LayoutTilesetSlot slot,
-                                       u8 segmentId,
-                                       const u32 *tileset)
+static void assign_layout_tileset_group_slot(GaugeLaneLayout *layout,
+                                             LayoutTilesetGroupId group,
+                                             LayoutTilesetSlot slot,
+                                             u8 segmentId,
+                                             const u32 *tileset)
 {
-    if (!targetView)
+    if (!layout)
         return;
 
-    const u32 ***targetField = targetView->targetBySlot[slot];
+    const u32 ***targetField = layout_get_group_slot_target(layout, group, slot);
     if (!targetField || !*targetField)
         return;
 
@@ -6480,11 +6464,12 @@ static void assign_layout_context_slot(const LayoutContextTargetView *targetView
     (*targetField)[segmentId] = tileset;
 }
 
-static void populate_layout_context_from_fill_assets(const LayoutContextTargetView *targetView,
-                                                     u8 segmentId,
-                                                     const GaugeFillAssets *assets,
-                                                     u8 fixedStartCap,
-                                                     u8 fixedEndCap)
+static void populate_layout_tileset_group_from_fill_assets(GaugeLaneLayout *layout,
+                                                           LayoutTilesetGroupId group,
+                                                           u8 segmentId,
+                                                           const GaugeFillAssets *assets,
+                                                           u8 fixedStartCap,
+                                                           u8 fixedEndCap)
 {
     const u32 *body = assets ? tileset_asset_to_rom(assets->body) : NULL;
     const u32 *end = assets ? tileset_asset_to_rom(assets->end) : NULL;
@@ -6495,14 +6480,14 @@ static void populate_layout_context_from_fill_assets(const LayoutContextTargetVi
     const u32 *capStartTrail = fixedStartCap ? trail : NULL;
     const u32 *capEnd = fixedEndCap ? (end ? end : body) : NULL;
 
-    assign_layout_context_slot(targetView, LAYOUT_TILESET_SLOT_BODY, segmentId, body);
-    assign_layout_context_slot(targetView, LAYOUT_TILESET_SLOT_END, segmentId, end);
-    assign_layout_context_slot(targetView, LAYOUT_TILESET_SLOT_TRAIL, segmentId, trail);
-    assign_layout_context_slot(targetView, LAYOUT_TILESET_SLOT_BRIDGE, segmentId, bridge);
-    assign_layout_context_slot(targetView, LAYOUT_TILESET_SLOT_CAP_START, segmentId, capStart);
-    assign_layout_context_slot(targetView, LAYOUT_TILESET_SLOT_CAP_END, segmentId, capEnd);
-    assign_layout_context_slot(targetView, LAYOUT_TILESET_SLOT_CAP_START_BREAK, segmentId, capStartBreak);
-    assign_layout_context_slot(targetView, LAYOUT_TILESET_SLOT_CAP_START_TRAIL, segmentId, capStartTrail);
+    assign_layout_tileset_group_slot(layout, group, LAYOUT_TILESET_SLOT_BODY, segmentId, body);
+    assign_layout_tileset_group_slot(layout, group, LAYOUT_TILESET_SLOT_END, segmentId, end);
+    assign_layout_tileset_group_slot(layout, group, LAYOUT_TILESET_SLOT_TRAIL, segmentId, trail);
+    assign_layout_tileset_group_slot(layout, group, LAYOUT_TILESET_SLOT_BRIDGE, segmentId, bridge);
+    assign_layout_tileset_group_slot(layout, group, LAYOUT_TILESET_SLOT_CAP_START, segmentId, capStart);
+    assign_layout_tileset_group_slot(layout, group, LAYOUT_TILESET_SLOT_CAP_END, segmentId, capEnd);
+    assign_layout_tileset_group_slot(layout, group, LAYOUT_TILESET_SLOT_CAP_START_BREAK, segmentId, capStartBreak);
+    assign_layout_tileset_group_slot(layout, group, LAYOUT_TILESET_SLOT_CAP_START_TRAIL, segmentId, capStartTrail);
 }
 
 static u8 build_fill_layout_direct(const GaugeDefinition *definition,
@@ -6516,6 +6501,23 @@ static u8 build_fill_layout_direct(const GaugeDefinition *definition,
     SkinSetUsageFlags blinkFlags;
     SkinSetUsageFlags gainBlinkFlags;
     const u8 capEndFlags = definition->fixedEndCap ? 1 : 0;
+    typedef struct
+    {
+        LayoutTilesetGroupId group;
+        SkinSetUsageFlags *usageFlags;
+    } FillTilesetGroupUsage;
+    static const LayoutTilesetGroupId s_fillTilesetGroups[4] = {
+        LAYOUT_TILESET_GROUP_BASE,
+        LAYOUT_TILESET_GROUP_GAIN,
+        LAYOUT_TILESET_GROUP_BLINK,
+        LAYOUT_TILESET_GROUP_GAIN_BLINK
+    };
+    const FillTilesetGroupUsage fillTilesetGroups[4] = {
+        { LAYOUT_TILESET_GROUP_BASE, &baseFlags },
+        { LAYOUT_TILESET_GROUP_GAIN, &gainFlags },
+        { LAYOUT_TILESET_GROUP_BLINK, &blinkFlags },
+        { LAYOUT_TILESET_GROUP_GAIN_BLINK, &gainBlinkFlags }
+    };
 
     memset(&baseFlags, 0, sizeof(baseFlags));
     memset(&gainFlags, 0, sizeof(gainFlags));
@@ -6528,23 +6530,21 @@ static u8 build_fill_layout_direct(const GaugeDefinition *definition,
         if (!segment->skin || !segment->skin->fill.normal.body)
             return 0;
 
+        const GaugeFillAssets *fillAssetsByGroup[4] = {
+            &segment->skin->fill.normal,
+            &segment->skin->fill.gain,
+            &segment->skin->fill.blinkOff,
+            &segment->skin->fill.blinkOff
+        };
+
         baseBodyTilesets[segmentIndex] = segment->skin->fill.normal.body->tiles;
-        scan_fill_assets_usage(&segment->skin->fill.normal,
-                               definition->fixedStartCap,
-                               definition->fixedEndCap,
-                               &baseFlags);
-        scan_fill_assets_usage(&segment->skin->fill.gain,
-                               definition->fixedStartCap,
-                               definition->fixedEndCap,
-                               &gainFlags);
-        scan_fill_assets_usage(&segment->skin->fill.blinkOff,
-                               definition->fixedStartCap,
-                               definition->fixedEndCap,
-                               &blinkFlags);
-        scan_fill_assets_usage(&segment->skin->fill.blinkOff,
-                               definition->fixedStartCap,
-                               definition->fixedEndCap,
-                               &gainBlinkFlags);
+        for (u8 groupIndex = 0; groupIndex < 4; groupIndex++)
+        {
+            scan_fill_assets_usage(fillAssetsByGroup[groupIndex],
+                                   definition->fixedStartCap,
+                                   definition->fixedEndCap,
+                                   fillTilesetGroups[groupIndex].usageFlags);
+        }
     }
 
     GaugeLaneLayout_initEx(layout,
@@ -6565,52 +6565,33 @@ static u8 build_fill_layout_direct(const GaugeDefinition *definition,
         return 0;
 
     sync_base_allocations(layout, &baseFlags, capEndFlags);
-    sync_layout_context_slots_from_usage(layout,
-                                         LAYOUT_STYLE_CONTEXT_GAIN,
-                                         &gainFlags,
-                                         LAYOUT_TILESET_SLOT_MASK_ALL);
-    sync_layout_context_slots_from_usage(layout,
-                                         LAYOUT_STYLE_CONTEXT_BLINK,
-                                         &blinkFlags,
-                                         LAYOUT_TILESET_SLOT_MASK_ALL);
-    sync_layout_context_slots_from_usage(layout,
-                                         LAYOUT_STYLE_CONTEXT_GAIN_BLINK,
-                                         &gainBlinkFlags,
-                                         LAYOUT_TILESET_SLOT_MASK_ALL);
-
-    LayoutContextTargetView baseView;
-    LayoutContextTargetView gainView;
-    LayoutContextTargetView blinkView;
-    LayoutContextTargetView gainBlinkView;
-    build_layout_context_target_view(layout, LAYOUT_STYLE_CONTEXT_BASE, &baseView);
-    build_layout_context_target_view(layout, LAYOUT_STYLE_CONTEXT_GAIN, &gainView);
-    build_layout_context_target_view(layout, LAYOUT_STYLE_CONTEXT_BLINK, &blinkView);
-    build_layout_context_target_view(layout, LAYOUT_STYLE_CONTEXT_GAIN_BLINK, &gainBlinkView);
+    for (u8 groupIndex = 1; groupIndex < 4; groupIndex++)
+    {
+        sync_layout_tileset_group_slots_from_usage(layout,
+                                                   fillTilesetGroups[groupIndex].group,
+                                                   fillTilesetGroups[groupIndex].usageFlags,
+                                                   LAYOUT_TILESET_SLOT_MASK_ALL);
+    }
 
     for (u8 segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++)
     {
         const GaugeFillSkin *skin = &lanePlan->lane->segments[segmentIndex].skin->fill;
+        const GaugeFillAssets *fillAssetsByGroup[4] = {
+            &skin->normal,
+            &skin->gain,
+            &skin->blinkOff,
+            &skin->blinkOff
+        };
 
-        populate_layout_context_from_fill_assets(&baseView,
-                                                 segmentIndex,
-                                                 &skin->normal,
-                                                 definition->fixedStartCap,
-                                                 definition->fixedEndCap);
-        populate_layout_context_from_fill_assets(&gainView,
-                                                 segmentIndex,
-                                                 &skin->gain,
-                                                 definition->fixedStartCap,
-                                                 definition->fixedEndCap);
-        populate_layout_context_from_fill_assets(&blinkView,
-                                                 segmentIndex,
-                                                 &skin->blinkOff,
-                                                 definition->fixedStartCap,
-                                                 definition->fixedEndCap);
-        populate_layout_context_from_fill_assets(&gainBlinkView,
-                                                 segmentIndex,
-                                                 &skin->blinkOff,
-                                                 definition->fixedStartCap,
-                                                 definition->fixedEndCap);
+        for (u8 groupIndex = 0; groupIndex < 4; groupIndex++)
+        {
+            populate_layout_tileset_group_from_fill_assets(layout,
+                                                           s_fillTilesetGroups[groupIndex],
+                                                           segmentIndex,
+                                                           fillAssetsByGroup[groupIndex],
+                                                           definition->fixedStartCap,
+                                                           definition->fixedEndCap);
+        }
 
         if (layout->capEndBySegment != s_zeroSegmentFlags)
             layout->capEndBySegment[segmentIndex] = definition->fixedEndCap ? 1 : 0;
