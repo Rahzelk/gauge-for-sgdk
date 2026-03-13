@@ -2750,24 +2750,24 @@ static void layout_copy_segment_tilesets(const u32 **destinationTilesets,
                                          u8 segmentCount);
 
 /* GaugeLaneLayout helpers used only by the module build/runtime plumbing. */
-void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
-                        u8 length,
-                        GaugeFillDirection fillDirection,
-                        const u32 * const *bodyTilesets,
-                        const u32 * const *endTilesets,
-                        const u32 * const *trailTilesets,
-                        const u32 * const *bridgeTilesets,
-                        const u8 *segmentIdByCell,
-                        GaugeOrientation orientation,
-                        u8 palette,
-                        u8 priority,
-                        u8 verticalFlip,
-                        u8 horizontalFlip);
-void GaugeLaneLayout_setFillOffset(GaugeLaneLayout *layout, u16 fillOffsetPixels);
-void GaugeLaneLayout_setFillForward(GaugeLaneLayout *layout);
-void GaugeLaneLayout_setFillReverse(GaugeLaneLayout *layout);
-void GaugeLaneLayout_retain(GaugeLaneLayout *layout);
-void GaugeLaneLayout_release(GaugeLaneLayout *layout);
+static void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
+                                   u8 length,
+                                   GaugeFillDirection fillDirection,
+                                   const u32 * const *bodyTilesets,
+                                   const u32 * const *endTilesets,
+                                   const u32 * const *trailTilesets,
+                                   const u32 * const *bridgeTilesets,
+                                   const u8 *segmentIdByCell,
+                                   GaugeOrientation orientation,
+                                   u8 palette,
+                                   u8 priority,
+                                   u8 verticalFlip,
+                                   u8 horizontalFlip);
+static void GaugeLaneLayout_setFillOffset(GaugeLaneLayout *layout, u16 fillOffsetPixels);
+static void GaugeLaneLayout_setFillForward(GaugeLaneLayout *layout);
+static void GaugeLaneLayout_setFillReverse(GaugeLaneLayout *layout);
+static void GaugeLaneLayout_retain(GaugeLaneLayout *layout);
+static void GaugeLaneLayout_release(GaugeLaneLayout *layout);
 
 /**
  * Build bridge/break lookup tables (by fillIndex).
@@ -3682,19 +3682,19 @@ static u8 layout_alloc_buffers(GaugeLaneLayout *layout, u8 length, u8 segmentCou
     return 1;
 }
 
-void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
-                        u8 length,
-                        GaugeFillDirection fillDirection,
-                        const u32 * const *bodyTilesets,
-                        const u32 * const *endTilesets,
-                        const u32 * const *trailTilesets,
-                        const u32 * const *bridgeTilesets,
-                        const u8 *segmentIdByCell,
-                        GaugeOrientation orientation,
-                        u8 palette,
-                        u8 priority,
-                        u8 verticalFlip,
-                        u8 horizontalFlip)
+static void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
+                                   u8 length,
+                                   GaugeFillDirection fillDirection,
+                                   const u32 * const *bodyTilesets,
+                                   const u32 * const *endTilesets,
+                                   const u32 * const *trailTilesets,
+                                   const u32 * const *bridgeTilesets,
+                                   const u8 *segmentIdByCell,
+                                   GaugeOrientation orientation,
+                                   u8 palette,
+                                   u8 priority,
+                                   u8 verticalFlip,
+                                   u8 horizontalFlip)
 {
     if (!layout)
         return;
@@ -3779,7 +3779,7 @@ void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
 }
 
 /** Set fill direction to forward: cell 0 fills first (left-to-right / bottom-to-top). */
-void GaugeLaneLayout_setFillForward(GaugeLaneLayout *layout)
+static void GaugeLaneLayout_setFillForward(GaugeLaneLayout *layout)
 {
     if (!layout)
         return;
@@ -3795,7 +3795,7 @@ void GaugeLaneLayout_setFillForward(GaugeLaneLayout *layout)
 }
 
 /** Set pixel offset for fill computation (used for multi-lane gauge windows). */
-void GaugeLaneLayout_setFillOffset(GaugeLaneLayout *layout, u16 fillOffsetPixels)
+static void GaugeLaneLayout_setFillOffset(GaugeLaneLayout *layout, u16 fillOffsetPixels)
 {
     if (!layout)
         return;
@@ -3804,7 +3804,7 @@ void GaugeLaneLayout_setFillOffset(GaugeLaneLayout *layout, u16 fillOffsetPixels
 }
 
 /** Set fill direction to reverse: last cell fills first (right-to-left / top-to-bottom). */
-void GaugeLaneLayout_setFillReverse(GaugeLaneLayout *layout)
+static void GaugeLaneLayout_setFillReverse(GaugeLaneLayout *layout)
 {
     if (!layout)
         return;
@@ -3820,14 +3820,14 @@ void GaugeLaneLayout_setFillReverse(GaugeLaneLayout *layout)
     build_pip_luts(layout);
 }
 
-void GaugeLaneLayout_retain(GaugeLaneLayout *layout)
+static void GaugeLaneLayout_retain(GaugeLaneLayout *layout)
 {
     if (!layout)
         return;
     layout->refCount++;
 }
 
-void GaugeLaneLayout_release(GaugeLaneLayout *layout)
+static void GaugeLaneLayout_release(GaugeLaneLayout *layout)
 {
     if (!layout)
         return;
