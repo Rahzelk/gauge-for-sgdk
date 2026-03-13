@@ -613,6 +613,8 @@ u8 Gauge_build(Gauge *gauge,
     u16 *pixelsToQuantizedPixelsLUT = NULL;
     if (valueMode == GAUGE_VALUE_MODE_PIP)
     {
+        /* PIP quantization LUT is preallocated once in the runtime arena.
+         * Subsequent rebuilds must stay allocation-free. */
         pixelsToQuantizedPixelsLUT = (u16 *)gauge_runtime_arena_alloc(
             &runtimeArena,
             (u16)((maxFillPixels + 1) * (u8)sizeof(u16)),
@@ -6765,12 +6767,7 @@ static void gauge_rebuild_pip_quantize_lut(Gauge *gauge)
 
     GaugeLogic *logic = &gauge->logic;
     if (!logic->pixelsToQuantizedPixelsLUT)
-    {
-        logic->pixelsToQuantizedPixelsLUT = (u16 *)gauge_alloc_bytes(
-            (u16)((logic->maxFillPixels + 1) * (u8)sizeof(u16)));
-        if (!logic->pixelsToQuantizedPixelsLUT)
-            return;
-    }
+        return;
 
     fill_pip_pixels_to_quantized_pixels_lut(logic->pixelsToQuantizedPixelsLUT,
                                             logic->maxFillPixels,
