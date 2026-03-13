@@ -91,6 +91,45 @@ static void gauge_free_ptr(void **ptr)
     }
 }
 
+typedef struct
+{
+    u8 *base;
+    u16 size;
+    u16 offset;
+} GaugeRuntimeArena;
+
+static u16 gauge_runtime_arena_align(u16 offset, u16 alignment)
+{
+    if (alignment <= 1)
+        return offset;
+
+    return (u16)((offset + alignment - 1) & (u16)~(alignment - 1));
+}
+
+static void gauge_runtime_arena_init(GaugeRuntimeArena *arena, void *memory, u16 size)
+{
+    if (!arena)
+        return;
+
+    arena->base = (u8 *)memory;
+    arena->size = size;
+    arena->offset = 0;
+}
+
+static void *gauge_runtime_arena_alloc(GaugeRuntimeArena *arena, u16 bytes, u16 alignment)
+{
+    if (!arena || !arena->base || bytes == 0)
+        return NULL;
+
+    const u16 alignedOffset = gauge_runtime_arena_align(arena->offset, alignment);
+    if ((u32)alignedOffset + bytes > arena->size)
+        return NULL;
+
+    void *ptr = arena->base + alignedOffset;
+    arena->offset = (u16)(alignedOffset + bytes);
+    return ptr;
+}
+
 /* PIP compact strip state ordering */
 #define PIP_STATE_EMPTY      0
 #define PIP_STATE_VALUE      1
@@ -173,12 +212,17 @@ struct GaugeLaneLayout
     u8 length;
     u8 segmentCount;
 
+    u8 segmentIdByCellStorage[GAUGE_MAX_LENGTH];
+    u8 fillIndexByCellStorage[GAUGE_MAX_LENGTH];
+    u8 cellIndexByFillIndexStorage[GAUGE_MAX_LENGTH];
     u8 *segmentIdByCell;
     u8 *fillIndexByCell;
     u8 *cellIndexByFillIndex;
 
+    Vect2D_u16 tilemapPosByCellStorage[GAUGE_MAX_LENGTH];
     Vect2D_u16 *tilemapPosByCell;
 
+    const u32 *tilesetBySegmentStorage[GAUGE_MAX_SEGMENTS];
     const u32 **tilesetBySegment;
     const u32 **tilesetEndBySegment;
     const u32 **tilesetTrailBySegment;
@@ -370,13 +414,26 @@ static u16 compute_vram_size_for_layout(const GaugeLaneLayout *layout,
                                         u8 trailEnabled,
                                         GaugeValueMode valueMode);
 static GaugeTickAndRenderHandler *resolve_tick_and_render_handler(GaugeValueMode valueMode);
+static u8 gauge_compute_stream_cell_capacity(GaugeValueMode valueMode,
+                                             const GaugeLaneLayout *layout);
+static u16 gauge_compute_runtime_arena_size(GaugeLaneLayout * const *builtLayouts,
+                                            u8 laneCount,
+                                            GaugeVramMode vramMode,
+                                            GaugeValueMode valueMode,
+                                            u16 maxFillPixels);
+static void GaugeLaneLayout_setFillOffset(GaugeLaneLayout *layout, u16 fillOffsetPixels);
+static void GaugeLaneLayout_setFillForward(GaugeLaneLayout *layout);
+static void GaugeLaneLayout_setFillReverse(GaugeLaneLayout *layout);
+static void GaugeLaneLayout_retain(GaugeLaneLayout *layout);
+static void GaugeLaneLayout_release(GaugeLaneLayout *layout);
 static u8 GaugeLaneInstance_initInternal(GaugeLaneInstance *lane,
                                          const Gauge *gauge,
                                          GaugeLaneLayout *layout,
                                          u16 originX,
                                          u16 originY,
                                          u16 vramBase,
-                                         GaugeVramMode vramMode);
+                                         GaugeVramMode vramMode,
+                                         GaugeRuntimeArena *runtimeArena);
 static void GaugeLaneInstance_releaseInternal(GaugeLaneInstance *lane);
 static void GaugeLogic_init(GaugeLogic *logic,
                             u16 maxValue,
@@ -525,24 +582,51 @@ u8 Gauge_build(Gauge *gauge,
         return 0;
     }
 
-    GaugeLaneInstance **lanes = (GaugeLaneInstance **)gauge_alloc_bytes(
-        (u16)(laneCount * (u8)sizeof(GaugeLaneInstance *)));
-    if (!lanes)
-    {
-        release_built_layouts(builtLayouts);
-        return 0;
-    }
-
-    u16 *valueToPixelsData = (u16 *)gauge_alloc_bytes(
-        (u16)((GAUGE_LUT_CAPACITY + 1) * (u8)sizeof(u16)));
-    if (!valueToPixelsData)
-    {
-        gauge_free_ptr((void **)&lanes);
-        release_built_layouts(builtLayouts);
-        return 0;
-    }
-
     const GaugeValueMode valueMode = (GaugeValueMode)sanitized->mode;
+    const u16 runtimeArenaBytes = gauge_compute_runtime_arena_size(builtLayouts,
+                                                                   laneCount,
+                                                                   sanitized->vramMode,
+                                                                   valueMode,
+                                                                   maxFillPixels);
+    void *runtimeArenaMemory = gauge_alloc_bytes(runtimeArenaBytes);
+    if (!runtimeArenaMemory)
+    {
+        release_built_layouts(builtLayouts);
+        return 0;
+    }
+
+    GaugeRuntimeArena runtimeArena;
+    gauge_runtime_arena_init(&runtimeArena, runtimeArenaMemory, runtimeArenaBytes);
+
+    GaugeLaneInstance **lanes = (GaugeLaneInstance **)gauge_runtime_arena_alloc(
+        &runtimeArena,
+        (u16)(laneCount * (u8)sizeof(GaugeLaneInstance *)),
+        4);
+    GaugeLaneInstance *laneStorage = (GaugeLaneInstance *)gauge_runtime_arena_alloc(
+        &runtimeArena,
+        (u16)(laneCount * (u16)sizeof(GaugeLaneInstance)),
+        4);
+    u16 *valueToPixelsData = (u16 *)gauge_runtime_arena_alloc(
+        &runtimeArena,
+        (u16)((GAUGE_LUT_CAPACITY + 1) * (u8)sizeof(u16)),
+        2);
+    u16 *pixelsToQuantizedPixelsLUT = NULL;
+    if (valueMode == GAUGE_VALUE_MODE_PIP)
+    {
+        pixelsToQuantizedPixelsLUT = (u16 *)gauge_runtime_arena_alloc(
+            &runtimeArena,
+            (u16)((maxFillPixels + 1) * (u8)sizeof(u16)),
+            2);
+    }
+
+    if (!lanes || !laneStorage || !valueToPixelsData ||
+        (valueMode == GAUGE_VALUE_MODE_PIP && !pixelsToQuantizedPixelsLUT))
+    {
+        gauge_free_ptr(&runtimeArenaMemory);
+        release_built_layouts(builtLayouts);
+        return 0;
+    }
+
     const u16 *valueToPixelsLUT = NULL;
     if (valueMode == GAUGE_VALUE_MODE_PIP)
     {
@@ -565,6 +649,7 @@ u8 Gauge_build(Gauge *gauge,
     gauge->tickAndRenderHandler = resolve_tick_and_render_handler(valueMode);
     gauge->valueMode = valueMode;
     gauge->vramNextOffset = 0;
+    gauge->runtimeArena = runtimeArenaMemory;
     gauge->logic.valueToPixelsData = valueToPixelsData;
     for (u8 laneIndex = 0; laneIndex < laneCount; laneIndex++)
         gauge->ownedLayouts[laneIndex] = builtLayouts[laneIndex];
@@ -575,6 +660,7 @@ u8 Gauge_build(Gauge *gauge,
                     valueToPixelsLUT,
                     resolvedMaxValue);
     gauge->logic.valueToPixelsData = valueToPixelsData;
+    gauge->logic.pixelsToQuantizedPixelsLUT = pixelsToQuantizedPixelsLUT;
     gauge_rebuild_pip_quantize_lut(gauge);
     gauge_apply_behavior_from_definition(gauge, &sanitized->behavior);
 
@@ -585,12 +671,7 @@ u8 Gauge_build(Gauge *gauge,
                                                           sanitized->vramMode,
                                                           gauge->logic.trailEnabled,
                                                           valueMode);
-        GaugeLaneInstance *lane = (GaugeLaneInstance *)gauge_alloc_bytes((u16)sizeof(GaugeLaneInstance));
-        if (!lane)
-        {
-            Gauge_release(gauge);
-            return 0;
-        }
+        GaugeLaneInstance *lane = &laneStorage[laneIndex];
 
         if (!GaugeLaneInstance_initInternal(lane,
                                             gauge,
@@ -598,9 +679,9 @@ u8 Gauge_build(Gauge *gauge,
                                             lanePlans[laneIndex].originX,
                                             lanePlans[laneIndex].originY,
                                             nextVram,
-                                            sanitized->vramMode))
+                                            sanitized->vramMode,
+                                            &runtimeArena))
         {
-            gauge_free_ptr((void **)&lane);
             Gauge_release(gauge);
             return 0;
         }
@@ -758,13 +839,8 @@ void Gauge_release(Gauge *gauge)
             continue;
 
         GaugeLaneInstance_releaseInternal(lane);
-        gauge_free_ptr((void **)&lane);
         gauge->lanes[i] = NULL;
     }
-
-    gauge_free_ptr((void **)&gauge->lanes);
-    gauge_free_ptr((void **)&gauge->logic.valueToPixelsData);
-    gauge_free_ptr((void **)&gauge->logic.pixelsToQuantizedPixelsLUT);
 
     for (u8 layoutIndex = 0; layoutIndex < gauge->ownedLayoutCount; layoutIndex++)
     {
@@ -778,6 +854,8 @@ void Gauge_release(Gauge *gauge)
         gauge->ownedLayouts[layoutIndex] = NULL;
     }
     gauge->ownedLayoutCount = 0;
+
+    gauge_free_ptr(&gauge->runtimeArena);
 
     memset(gauge, 0, sizeof(*gauge));
 }
@@ -2750,25 +2828,6 @@ static void layout_copy_segment_tilesets(const u32 **destinationTilesets,
                                          u8 segmentCount);
 
 /* GaugeLaneLayout helpers used only by the module build/runtime plumbing. */
-static void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
-                                   u8 length,
-                                   GaugeFillDirection fillDirection,
-                                   const u32 * const *bodyTilesets,
-                                   const u32 * const *endTilesets,
-                                   const u32 * const *trailTilesets,
-                                   const u32 * const *bridgeTilesets,
-                                   const u8 *segmentIdByCell,
-                                   GaugeOrientation orientation,
-                                   u8 palette,
-                                   u8 priority,
-                                   u8 verticalFlip,
-                                   u8 horizontalFlip);
-static void GaugeLaneLayout_setFillOffset(GaugeLaneLayout *layout, u16 fillOffsetPixels);
-static void GaugeLaneLayout_setFillForward(GaugeLaneLayout *layout);
-static void GaugeLaneLayout_setFillReverse(GaugeLaneLayout *layout);
-static void GaugeLaneLayout_retain(GaugeLaneLayout *layout);
-static void GaugeLaneLayout_release(GaugeLaneLayout *layout);
-
 /**
  * Build bridge/break lookup tables (by fillIndex).
  *
@@ -3614,13 +3673,6 @@ static void layout_free_buffers(GaugeLaneLayout *layout)
     if (!layout)
         return;
 
-    gauge_free_ptr((void **)&layout->segmentIdByCell);
-    gauge_free_ptr((void **)&layout->fillIndexByCell);
-    gauge_free_ptr((void **)&layout->cellIndexByFillIndex);
-    gauge_free_ptr((void **)&layout->tilemapPosByCell);
-
-    gauge_free_ptr((void **)&layout->tilesetBySegment);
-
     for (u8 group = 0; group < LAYOUT_TILESET_GROUP_COUNT; group++)
     {
         for (u8 slot = 0; slot < LAYOUT_TILESET_SLOT_COUNT; slot++)
@@ -3648,35 +3700,34 @@ static void layout_free_buffers(GaugeLaneLayout *layout)
     layout->segmentCount = 0;
     layout->pipCount = 0;
     layout->pipRenderCount = 0;
+    layout->segmentIdByCell = layout->segmentIdByCellStorage;
+    layout->fillIndexByCell = layout->fillIndexByCellStorage;
+    layout->cellIndexByFillIndex = layout->cellIndexByFillIndexStorage;
+    layout->tilemapPosByCell = layout->tilemapPosByCellStorage;
+    layout->tilesetBySegment = layout->tilesetBySegmentStorage;
     layout_set_optional_views_to_defaults(layout);
     layout_zero_optional_flags(layout);
 }
 
 static u8 layout_alloc_buffers(GaugeLaneLayout *layout, u8 length, u8 segmentCount)
 {
-    const u16 cellBytes = (u16)length;
-    const u16 segPtrBytes = (u16)(segmentCount * (u8)sizeof(const u32 *));
-
-    /* Mandatory geometry and BODY tileset bindings only.
-     * Optional features are allocated lazily by the layout build path. */
-    layout->segmentIdByCell = (u8 *)gauge_alloc_bytes(cellBytes);
-    layout->fillIndexByCell = (u8 *)gauge_alloc_bytes(cellBytes);
-    layout->cellIndexByFillIndex = (u8 *)gauge_alloc_bytes(cellBytes);
-    layout->tilemapPosByCell = (Vect2D_u16 *)gauge_alloc_bytes((u16)(length * (u8)sizeof(Vect2D_u16)));
-
-    layout->tilesetBySegment = (const u32 **)gauge_alloc_bytes(segPtrBytes);
-
-    if (!layout->segmentIdByCell || !layout->fillIndexByCell || !layout->cellIndexByFillIndex ||
-        !layout->tilemapPosByCell || !layout->tilesetBySegment)
-    {
-        layout_free_buffers(layout);
+    if (!layout || length > GAUGE_MAX_LENGTH || segmentCount > GAUGE_MAX_SEGMENTS)
         return 0;
-    }
 
     layout->length = length;
     layout->segmentCount = segmentCount;
     layout->pipCount = 0;
     layout->pipRenderCount = 0;
+    layout->segmentIdByCell = layout->segmentIdByCellStorage;
+    layout->fillIndexByCell = layout->fillIndexByCellStorage;
+    layout->cellIndexByFillIndex = layout->cellIndexByFillIndexStorage;
+    layout->tilemapPosByCell = layout->tilemapPosByCellStorage;
+    layout->tilesetBySegment = layout->tilesetBySegmentStorage;
+    memset(layout->segmentIdByCellStorage, 0, sizeof(layout->segmentIdByCellStorage));
+    memset(layout->fillIndexByCellStorage, 0, sizeof(layout->fillIndexByCellStorage));
+    memset(layout->cellIndexByFillIndexStorage, 0, sizeof(layout->cellIndexByFillIndexStorage));
+    memset(layout->tilemapPosByCellStorage, 0, sizeof(layout->tilemapPosByCellStorage));
+    memset(layout->tilesetBySegmentStorage, 0, sizeof(layout->tilesetBySegmentStorage));
     layout_set_optional_views_to_defaults(layout);
 
     return 1;
@@ -3717,7 +3768,7 @@ static void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
         maxSegmentId = (u8)(GAUGE_MAX_SEGMENTS - 1);
     const u8 segmentCount = (u8)(maxSegmentId + 1);
 
-    /* Rebuild dynamic buffers (layout must not be retained while rebuilt). */
+    /* Rebuild layout state from scratch (layout must not be retained while rebuilt). */
     if (layout->refCount != 0)
         return;
     layout_free_buffers(layout);
@@ -4345,38 +4396,58 @@ static inline void invalidate_render_cache(GaugeLogic *logic)
    Dynamic VRAM mode implementation
    ============================================================================= */
 
-static void free_dynamic_buffers(GaugeDynamic *dyn)
+static void reset_dynamic_buffer_views(GaugeDynamic *dyn)
 {
     if (!dyn)
         return;
-    gauge_free_ptr((void **)&dyn->vramTileEmpty);
-    gauge_free_ptr((void **)&dyn->vramTileFullValue);
-    gauge_free_ptr((void **)&dyn->vramTileFullTrail);
-    gauge_free_ptr((void **)&dyn->vramTileBridge);
-    gauge_free_ptr((void **)&dyn->vramTilePipBase);
-    gauge_free_ptr((void **)&dyn->cachedFillIndexBridge);
-    gauge_free_ptr((void **)&dyn->cellCurrentTileIndex);
-    gauge_free_ptr((void **)&dyn->cellValid);
+
+    dyn->vramTileEmpty = NULL;
+    dyn->vramTileFullValue = NULL;
+    dyn->vramTileFullTrail = NULL;
+    dyn->vramTileBridge = NULL;
+    dyn->vramTilePipBase = NULL;
+    dyn->cachedFillIndexBridge = NULL;
+    dyn->cellCurrentTileIndex = NULL;
+    dyn->cellValid = NULL;
     dyn->segmentCount = 0;
     dyn->cellCount = 0;
 }
 
-static u8 alloc_dynamic_buffers(GaugeDynamic *dyn, u8 segmentCount, u8 cellCount)
+static u8 alloc_dynamic_buffers_from_arena(GaugeDynamic *dyn,
+                                           u8 segmentCount,
+                                           u8 cellCount,
+                                           GaugeRuntimeArena *runtimeArena)
 {
-    free_dynamic_buffers(dyn);
-    dyn->vramTileEmpty = (u16 *)gauge_alloc_bytes((u16)(segmentCount * (u8)sizeof(u16)));
-    dyn->vramTileFullValue = (u16 *)gauge_alloc_bytes((u16)(segmentCount * (u8)sizeof(u16)));
-    dyn->vramTileFullTrail = (u16 *)gauge_alloc_bytes((u16)(segmentCount * (u8)sizeof(u16)));
-    dyn->vramTileBridge = (u16 *)gauge_alloc_bytes((u16)(segmentCount * (u8)sizeof(u16)));
-    dyn->vramTilePipBase = (u16 *)gauge_alloc_bytes((u16)(segmentCount * (u8)sizeof(u16)));
-    dyn->cachedFillIndexBridge = (u8 *)gauge_alloc_bytes(segmentCount);
-    dyn->cellCurrentTileIndex = (u16 *)gauge_alloc_bytes((u16)(cellCount * (u8)sizeof(u16)));
-    dyn->cellValid = (u8 *)gauge_alloc_bytes(cellCount);
+    reset_dynamic_buffer_views(dyn);
+    dyn->vramTileEmpty = (u16 *)gauge_runtime_arena_alloc(runtimeArena,
+                                                          (u16)(segmentCount * (u8)sizeof(u16)),
+                                                          2);
+    dyn->vramTileFullValue = (u16 *)gauge_runtime_arena_alloc(runtimeArena,
+                                                              (u16)(segmentCount * (u8)sizeof(u16)),
+                                                              2);
+    dyn->vramTileFullTrail = (u16 *)gauge_runtime_arena_alloc(runtimeArena,
+                                                              (u16)(segmentCount * (u8)sizeof(u16)),
+                                                              2);
+    dyn->vramTileBridge = (u16 *)gauge_runtime_arena_alloc(runtimeArena,
+                                                           (u16)(segmentCount * (u8)sizeof(u16)),
+                                                           2);
+    dyn->vramTilePipBase = (u16 *)gauge_runtime_arena_alloc(runtimeArena,
+                                                            (u16)(segmentCount * (u8)sizeof(u16)),
+                                                            2);
+    dyn->cachedFillIndexBridge = (u8 *)gauge_runtime_arena_alloc(runtimeArena,
+                                                                 segmentCount,
+                                                                 1);
+    dyn->cellCurrentTileIndex = (u16 *)gauge_runtime_arena_alloc(runtimeArena,
+                                                                 (u16)(cellCount * (u8)sizeof(u16)),
+                                                                 2);
+    dyn->cellValid = (u8 *)gauge_runtime_arena_alloc(runtimeArena,
+                                                     cellCount,
+                                                     1);
     if (!dyn->vramTileEmpty || !dyn->vramTileFullValue || !dyn->vramTileFullTrail ||
         !dyn->vramTileBridge || !dyn->vramTilePipBase || !dyn->cachedFillIndexBridge ||
         !dyn->cellCurrentTileIndex || !dyn->cellValid)
     {
-        free_dynamic_buffers(dyn);
+        reset_dynamic_buffer_views(dyn);
         return 0;
     }
     dyn->segmentCount = segmentCount;
@@ -4417,14 +4488,18 @@ static u8 alloc_dynamic_buffers(GaugeDynamic *dyn, u8 segmentCount, u8 cellCount
  * @param vramBase     Base VRAM tile index
  * @param trailEnabled Whether trail rendering is active
  */
-static u8 init_dynamic_vram(GaugeDynamic *dyn, const GaugeLaneLayout *layout, u16 vramBase, u8 trailEnabled)
+static u8 init_dynamic_vram(GaugeDynamic *dyn,
+                            const GaugeLaneLayout *layout,
+                            u16 vramBase,
+                            u8 trailEnabled,
+                            GaugeRuntimeArena *runtimeArena)
 {
     u16 nextVram = vramBase;
     u8 hasEndTileset = 0;
     u8 capStartEnabled = 0;
     u8 capEndEnabled = 0;
 
-    if (!alloc_dynamic_buffers(dyn, layout->segmentCount, layout->length))
+    if (!alloc_dynamic_buffers_from_arena(dyn, layout->segmentCount, layout->length, runtimeArena))
         return 0;
 
     /* Initialize cache to invalid */
@@ -4857,14 +4932,14 @@ static inline u8 compute_pip_strip_index(u8 sourceWidth,
  * renderIndex/state pair is precomputed at build time, so the hot path only
  * does state resolution + LUT lookup.
  */
-static u8 init_dynamic_pip_vram(GaugeLaneInstance *lane)
+static u8 init_dynamic_pip_vram(GaugeLaneInstance *lane, GaugeRuntimeArena *runtimeArena)
 {
     const GaugeLaneLayout *layout = lane->layout;
     GaugeDynamic *dyn = &lane->dyn;
     u16 nextVram = lane->vramBase;
     const u8 renderCount = layout->pipRenderCount;
 
-    if (!alloc_dynamic_buffers(dyn, layout->segmentCount, renderCount))
+    if (!alloc_dynamic_buffers_from_arena(dyn, layout->segmentCount, renderCount, runtimeArena))
         return 0;
 
     for (u8 segmentId = 0; segmentId < dyn->segmentCount; segmentId++)
@@ -6329,9 +6404,10 @@ static u8 GaugeLaneInstance_initInternal(GaugeLaneInstance *lane,
                                  GaugeLaneLayout *layout,
                                  u16 originX, u16 originY,
                                  u16 vramBase,
-                                 GaugeVramMode vramMode)
+                                 GaugeVramMode vramMode,
+                                 GaugeRuntimeArena *runtimeArena)
 {
-    if (!lane || !gauge || !layout || layout->length == 0)
+    if (!lane || !gauge || !layout || !runtimeArena || layout->length == 0)
         return 0;
 
     lane->originX = originX;
@@ -6350,12 +6426,12 @@ static u8 GaugeLaneInstance_initInternal(GaugeLaneInstance *lane,
 
     if (vramMode == GAUGE_VRAM_FIXED)
     {
-        u8 streamCellCapacity = layout->length;
-        if (gauge->valueMode == GAUGE_VALUE_MODE_PIP && layout->pipRenderCount > streamCellCapacity)
-            streamCellCapacity = layout->pipRenderCount;
+        const u8 streamCellCapacity = gauge_compute_stream_cell_capacity(gauge->valueMode, layout);
 
-        lane->cells = (GaugeStreamCell *)gauge_alloc_bytes(
-            (u16)(streamCellCapacity * (u8)sizeof(GaugeStreamCell)));
+        lane->cells = (GaugeStreamCell *)gauge_runtime_arena_alloc(
+            runtimeArena,
+            (u16)(streamCellCapacity * (u8)sizeof(GaugeStreamCell)),
+            2);
         if (!lane->cells)
         {
             GaugeLaneLayout_release(layout);
@@ -6367,9 +6443,8 @@ static u8 GaugeLaneInstance_initInternal(GaugeLaneInstance *lane,
     {
         if (lane->vramMode == GAUGE_VRAM_DYNAMIC)
         {
-            if (!init_dynamic_pip_vram(lane))
+            if (!init_dynamic_pip_vram(lane, runtimeArena))
             {
-                gauge_free_ptr((void **)&lane->cells);
                 GaugeLaneLayout_release(layout);
                 return 0;
             }
@@ -6385,9 +6460,12 @@ static u8 GaugeLaneInstance_initInternal(GaugeLaneInstance *lane,
     if (lane->vramMode == GAUGE_VRAM_DYNAMIC)
     {
         /* Dynamic mode initialization */
-        if (!init_dynamic_vram(&lane->dyn, lane->layout, lane->vramBase, gauge->logic.trailEnabled))
+        if (!init_dynamic_vram(&lane->dyn,
+                               lane->layout,
+                               lane->vramBase,
+                               gauge->logic.trailEnabled,
+                               runtimeArena))
         {
-            gauge_free_ptr((void **)&lane->cells);
             GaugeLaneLayout_release(layout);
             return 0;
         }
@@ -6414,8 +6492,8 @@ static void GaugeLaneInstance_releaseInternal(GaugeLaneInstance *lane)
         lane->layout = NULL;
     }
 
-    gauge_free_ptr((void **)&lane->cells);
-    free_dynamic_buffers(&lane->dyn);
+    lane->cells = NULL;
+    reset_dynamic_buffer_views(&lane->dyn);
     lane->cellCount = 0;
 }
 
@@ -6424,6 +6502,77 @@ static void GaugeLaneInstance_releaseInternal(GaugeLaneInstance *lane)
 /* =============================================================================
    Gauge runtime support
    ============================================================================= */
+
+static u8 gauge_compute_stream_cell_capacity(GaugeValueMode valueMode,
+                                             const GaugeLaneLayout *layout)
+{
+    if (!layout)
+        return 0;
+
+    if (valueMode == GAUGE_VALUE_MODE_PIP && layout->pipRenderCount > layout->length)
+        return layout->pipRenderCount;
+
+    return layout->length;
+}
+
+static u16 gauge_compute_runtime_arena_size(GaugeLaneLayout * const *builtLayouts,
+                                            u8 laneCount,
+                                            GaugeVramMode vramMode,
+                                            GaugeValueMode valueMode,
+                                            u16 maxFillPixels)
+{
+    u16 totalBytes = 0;
+
+    totalBytes = gauge_runtime_arena_align(totalBytes, 4);
+    totalBytes = (u16)(totalBytes + (u16)(laneCount * (u8)sizeof(GaugeLaneInstance *)));
+
+    totalBytes = gauge_runtime_arena_align(totalBytes, 4);
+    totalBytes = (u16)(totalBytes + (u16)(laneCount * (u16)sizeof(GaugeLaneInstance)));
+
+    totalBytes = gauge_runtime_arena_align(totalBytes, 2);
+    totalBytes = (u16)(totalBytes + (u16)((GAUGE_LUT_CAPACITY + 1) * (u8)sizeof(u16)));
+
+    if (valueMode == GAUGE_VALUE_MODE_PIP)
+    {
+        totalBytes = gauge_runtime_arena_align(totalBytes, 2);
+        totalBytes = (u16)(totalBytes + (u16)((maxFillPixels + 1) * (u8)sizeof(u16)));
+    }
+
+    for (u8 laneIndex = 0; laneIndex < laneCount; laneIndex++)
+    {
+        const GaugeLaneLayout *layout = builtLayouts[laneIndex];
+        if (!layout)
+            continue;
+
+        if (vramMode == GAUGE_VRAM_FIXED)
+        {
+            const u8 streamCellCapacity = gauge_compute_stream_cell_capacity(valueMode, layout);
+            totalBytes = gauge_runtime_arena_align(totalBytes, 2);
+            totalBytes = (u16)(totalBytes + (u16)(streamCellCapacity * (u8)sizeof(GaugeStreamCell)));
+            continue;
+        }
+
+        const u8 segmentCount = layout->segmentCount;
+        const u16 cellCount = gauge_compute_stream_cell_capacity(valueMode, layout);
+
+        for (u8 segmentArray = 0; segmentArray < 5; segmentArray++)
+        {
+            totalBytes = gauge_runtime_arena_align(totalBytes, 2);
+            totalBytes = (u16)(totalBytes + (u16)(segmentCount * (u8)sizeof(u16)));
+        }
+
+        totalBytes = gauge_runtime_arena_align(totalBytes, 1);
+        totalBytes = (u16)(totalBytes + segmentCount);
+
+        totalBytes = gauge_runtime_arena_align(totalBytes, 2);
+        totalBytes = (u16)(totalBytes + (u16)(cellCount * (u8)sizeof(u16)));
+
+        totalBytes = gauge_runtime_arena_align(totalBytes, 1);
+        totalBytes = (u16)(totalBytes + cellCount);
+    }
+
+    return totalBytes;
+}
 
 /**
  * Populate a value-to-pixels LUT for FILL mode scaling.

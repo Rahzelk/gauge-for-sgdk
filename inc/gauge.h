@@ -374,6 +374,7 @@ struct Gauge
 
     u16 vramNextOffset;
     GaugeValueMode valueMode;
+    void *runtimeArena;
 };
 
 #endif /* GAUGE_H */
