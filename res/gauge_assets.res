@@ -32,6 +32,8 @@ TILESET gauge_h_pip_double_half_strip "tilesets/gauge_h_pip_double_half_strip.pn
 TILESET gauge_h_pip_double_quarter_strip "tilesets/gauge_h_pip_double_quarter_strip.png" NONE NONE
 TILESET gauge_h_pip_mini_bar_strip "tilesets/gauge_h_pip_mini_bar_strip.png" NONE NONE
 TILESET gauge_v_straight_yellow_strip "tilesets/gauge_v_straight_yellow_strip.png"   NONE NONE
+TILESET gauge_v_straight_yellow_strip_gain "tilesets/gauge_v_straight_yellow_strip_gain.png" NONE NONE
+TILESET gauge_v_straight_yellow_strip_blinkoff "tilesets/gauge_v_straight_yellow_strip_blinkoff.png" NONE NONE
 TILESET gauge_h_straight_small_blue_strip "tilesets/gauge_h_straight_small_blue_strip.png" NONE NONE
 SPRITE menu_cursor_sprite "tilesets/menu-cursor.png" 1 1 NONE
 

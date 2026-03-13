@@ -302,6 +302,20 @@ static const GaugeSkin g_skinVerticalYellow = {
     }
 };
 
+static const GaugeSkin g_skinVerticalYellowGainBlinkOff = {
+    .fill = {
+        .normal = {
+            .body = &gauge_v_straight_yellow_strip
+        },
+        .gain = {
+            .body = &gauge_v_straight_yellow_strip_gain
+        },
+        .blinkOff = {
+            .body = &gauge_v_straight_yellow_strip_blinkoff
+        }
+    }
+};
+
 static const GaugeSkin g_skinPipBasic = {
     .pip = {
         .tileset = &gauge_h_pip_basic_strip,
@@ -368,22 +382,21 @@ static const GaugeDefinition g_screen1BasicTwoLanesDefinition = {
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
     .vramMode = DEMO_GAUGE_VRAM_MODE,
-    .originX = 24,
-    .originY = 8,
-    .maxValue = 80,
+    .originX = 4,
+    .originY = 21,
+    .maxValue = 96,
     .palette = PAL0,
     .priority = 1,
     .lanes = {
         {
             .segments = {
-                { .cells = 10, .skin = &g_skinBlueStraight }
+                { .cells = 12, .skin = &g_skinBlueStraight }
             }
         },
         {
             .offsetY = 1,
-            .firstValueCell = 2,
             .segments = {
-                { .cells = 6, .skin = &g_skinLightBlueStraight }
+                { .cells = 12, .skin = &g_skinBlueStraight }
             }
         }
     },
@@ -397,16 +410,16 @@ static const GaugeDefinition g_screen1BasicMirrorDefinition = {
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_REVERSE,
     .vramMode = DEMO_GAUGE_VRAM_MODE,
-    .originX = 4,
-    .originY = 14,
-    .maxValue = 80,
+    .originX = 24,
+    .originY = 8,
+    .maxValue = 96,
     .palette = PAL0,
     .priority = 1,
     .horizontalFlip = 1,
     .lanes = {
         {
             .segments = {
-                { .cells = 10, .skin = &g_skinYellowStraight }
+                { .cells = 12, .skin = &g_skinYellowStraight }
             }
         }
     },
@@ -423,14 +436,14 @@ static const GaugeDefinition g_screen1PaletteLanesDefinition = {
     .fillDirection = GAUGE_FILL_FORWARD,
     .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 24,
-    .originY = 14,
-    .maxValue = 80,
+    .originY = 21,
+    .maxValue = 96,
     .palette = PAL0,
     .priority = 1,
     .lanes = {
         {
             .segments = {
-                { .cells = 10, .skin = &g_skinYellowStraight }
+                { .cells = 12, .skin = &g_skinYellowStraight }
             }
         },
         {
@@ -439,7 +452,7 @@ static const GaugeDefinition g_screen1PaletteLanesDefinition = {
             .overridePalette = 1,
             .palette = PAL1,
             .segments = {
-                { .cells = 8, .skin = &g_skinBlueStraight }
+                { .cells = 10, .skin = &g_skinBlueStraight }
             }
         },
         {
@@ -448,13 +461,13 @@ static const GaugeDefinition g_screen1PaletteLanesDefinition = {
             .overridePalette = 1,
             .palette = PAL2,
             .segments = {
-                { .cells = 6, .skin = &g_skinLightBlueStraight }
+                { .cells = 8, .skin = &g_skinLightBlueStraight }
             }
         }
     },
     .behavior = {
         .damageMode = GAUGE_TRAIL_MODE_CRITICAL_TRAIL_BLINK,
-        .criticalValue = 24,
+        .criticalValue = 32,
         .damageBlinkShift = 3
     }
 };
@@ -465,7 +478,7 @@ static const GaugeDefinition g_screen1GainDefinition = {
     .fillDirection = GAUGE_FILL_FORWARD,
     .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 4,
-    .originY = 21,
+    .originY = 14,
     .maxValue = 96,
     .palette = PAL0,
     .priority = 1,
@@ -493,20 +506,20 @@ static const GaugeDefinition g_screen1BlinkOffDefinition = {
     .fillDirection = GAUGE_FILL_FORWARD,
     .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 24,
-    .originY = 21,
-    .maxValue = 64,
+    .originY = 14,
+    .maxValue = 96,
     .palette = PAL0,
     .priority = 1,
     .lanes = {
         {
             .segments = {
-                { .cells = 8, .skin = &g_skinYellowStraightBlinkOff }
+                { .cells = 12, .skin = &g_skinYellowStraightBlinkOff }
             }
         }
     },
     .behavior = {
         .damageMode = GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK,
-        .criticalValue = 24,
+        .criticalValue = 36,
         .damageBlinkShift = 2
     }
 };
@@ -523,19 +536,9 @@ static const DemoCaseSource g_screen1Cases[] = {
         }
     },
     {
-        .label = "Basic 2 lanes",
+        .label = "Mirror fill",
         .cursorTileX = 22,
         .cursorTileY = 8,
-        .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen1BasicTwoLanesDefinition }
-        }
-    },
-    {
-        .label = "Mirror fill",
-        .cursorTileX = 2,
-        .cursorTileY = 14,
         .stepAmount = DEMO_FILL_STEP,
         .gaugeCount = 1,
         .gauges = {
@@ -543,19 +546,9 @@ static const DemoCaseSource g_screen1Cases[] = {
         }
     },
     {
-        .label = "3 lanes + palettes",
-        .cursorTileX = 22,
-        .cursorTileY = 15,
-        .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen1PaletteLanesDefinition }
-        }
-    },
-    {
         .label = "Gain follow",
         .cursorTileX = 2,
-        .cursorTileY = 21,
+        .cursorTileY = 14,
         .stepAmount = DEMO_FILL_STEP,
         .gaugeCount = 1,
         .gauges = {
@@ -565,11 +558,31 @@ static const DemoCaseSource g_screen1Cases[] = {
     {
         .label = "Blink off",
         .cursorTileX = 22,
-        .cursorTileY = 21,
+        .cursorTileY = 14,
         .stepAmount = DEMO_FILL_STEP,
         .gaugeCount = 1,
         .gauges = {
             { .definition = &g_screen1BlinkOffDefinition }
+        }
+    },
+    {
+        .label = "Basic 2 lanes",
+        .cursorTileX = 2,
+        .cursorTileY = 21,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen1BasicTwoLanesDefinition }
+        }
+    },
+    {
+        .label = "3 lanes + palettes",
+        .cursorTileX = 22,
+        .cursorTileY = 21,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen1PaletteLanesDefinition }
         }
     }
 };
@@ -638,7 +651,7 @@ static const GaugeDefinition g_screen2CapsLeftDefinition = {
     .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 3,
     .originY = 14,
-    .maxValue = 112,
+    .maxValue = 96,
     .fixedStartCap = 1,
     .fixedEndCap = 1,
     .palette = PAL0,
@@ -647,14 +660,16 @@ static const GaugeDefinition g_screen2CapsLeftDefinition = {
         {
             .segments = {
                 { .cells = 1, .skin = &g_skinBorderBlueCapStart },
-                { .cells = 6, .skin = &g_skinBorderBlue },
-                { .cells = 6, .skin = &g_skinBorderYellow },
+                { .cells = 5, .skin = &g_skinBorderBlue },
+                { .cells = 5, .skin = &g_skinBorderYellow },
                 { .cells = 1, .skin = &g_skinBorderYellowCapEnd }
             }
         }
     },
     .behavior = {
-        .damageMode = GAUGE_TRAIL_MODE_STATIC_TRAIL
+        .damageMode = GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK,
+        .criticalValue = 32,
+        .damageBlinkShift = 2
     }
 };
 
@@ -665,7 +680,7 @@ static const GaugeDefinition g_screen2CapsRightDefinition = {
     .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 23,
     .originY = 14,
-    .maxValue = 112,
+    .maxValue = 96,
     .fixedStartCap = 1,
     .fixedEndCap = 1,
     .palette = PAL0,
@@ -675,47 +690,16 @@ static const GaugeDefinition g_screen2CapsRightDefinition = {
         {
             .segments = {
                 { .cells = 1, .skin = &g_skinBorderBlueCapStart },
-                { .cells = 6, .skin = &g_skinBorderBlue },
-                { .cells = 6, .skin = &g_skinBorderYellow },
+                { .cells = 5, .skin = &g_skinBorderBlue },
+                { .cells = 5, .skin = &g_skinBorderYellow },
                 { .cells = 1, .skin = &g_skinBorderYellowCapEnd }
             }
         }
     },
     .behavior = {
-        .damageMode = GAUGE_TRAIL_MODE_STATIC_TRAIL
-    }
-};
-
-static const GaugeDefinition g_screen2Sample7Definition = {
-    .mode = GAUGE_MODE_FILL,
-    .orientation = GAUGE_ORIENT_HORIZONTAL,
-    .fillDirection = GAUGE_FILL_FORWARD,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
-    .originX = 3,
-    .originY = 20,
-    .maxValue = 96,
-    .palette = PAL0,
-    .priority = 1,
-    .lanes = {
-        {
-            .segments = {
-                { .cells = 4, .skin = &g_skinBevelLightBlue },
-                { .cells = 4, .skin = &g_skinBevelBlue },
-                { .cells = 4, .skin = &g_skinBevelYellow }
-            }
-        },
-        {
-            .offsetY = 1,
-            .firstValueCell = 1,
-            .segments = {
-                { .cells = 3, .skin = &g_skinBevelLightBlue }
-            }
-        }
-    },
-    .behavior = {
-        .damageMode = GAUGE_TRAIL_MODE_CRITICAL_TRAIL_BLINK,
-        .criticalValue = 40,
-        .damageBlinkShift = 3
+        .damageMode = GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK,
+        .criticalValue = 32,
+        .damageBlinkShift = 2
     }
 };
 
@@ -759,7 +743,7 @@ static const GaugeDefinition g_screen2ThreeLanesDefinition = {
     .fillDirection = GAUGE_FILL_FORWARD,
     .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 3,
-    .originY = 25,
+    .originY = 20,
     .maxValue = 96,
     .palette = PAL0,
     .priority = 1,
@@ -787,7 +771,9 @@ static const GaugeDefinition g_screen2ThreeLanesDefinition = {
     .behavior = {
         .valueAnimEnabled = 1,
         .valueAnimShift = 2,
-        .damageMode = GAUGE_TRAIL_MODE_DISABLED
+        .damageMode = GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK,
+        .criticalValue = 32,
+        .damageBlinkShift = 2
     }
 };
 
@@ -813,7 +799,7 @@ static const DemoCaseSource g_screen2Cases[] = {
         }
     },
     {
-        .label = "Caps + mirror",
+        .label = "Caps + mirror blink",
         .cursorTileX = 1,
         .cursorTileY = 14,
         .stepAmount = DEMO_FILL_STEP,
@@ -824,13 +810,13 @@ static const DemoCaseSource g_screen2Cases[] = {
         }
     },
     {
-        .label = "2 lanes",
+        .label = "3 stylized lanes",
         .cursorTileX = 1,
-        .cursorTileY = 20,
+        .cursorTileY = 21,
         .stepAmount = DEMO_FILL_STEP,
         .gaugeCount = 1,
         .gauges = {
-            { .definition = &g_screen2Sample7Definition }
+            { .definition = &g_screen2ThreeLanesDefinition }
         }
     },
     {
@@ -841,16 +827,6 @@ static const DemoCaseSource g_screen2Cases[] = {
         .gaugeCount = 1,
         .gauges = {
             { .definition = &g_screen2LowerBridgeDefinition }
-        }
-    },
-    {
-        .label = "3 stylized lanes",
-        .cursorTileX = 1,
-        .cursorTileY = 26,
-        .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen2ThreeLanesDefinition }
         }
     }
 };
@@ -871,14 +847,18 @@ static const GaugeDefinition g_screen3VerticalSingleDefinition = {
     .lanes = {
         {
             .segments = {
-                { .cells = 3, .skin = &g_skinVerticalBlue },
-                { .cells = 5, .skin = &g_skinVerticalLightBlue },
-                { .cells = 4, .skin = &g_skinVerticalYellow }
+                { .cells = 12, .skin = &g_skinVerticalYellowGainBlinkOff }
             }
         }
     },
     .behavior = {
-        .damageMode = GAUGE_TRAIL_MODE_FOLLOW
+        .valueAnimEnabled = 1,
+        .valueAnimShift = 2,
+        .damageMode = GAUGE_TRAIL_MODE_FOLLOW,
+        .damageAnimShift = 3,
+        .gainMode = GAUGE_GAIN_MODE_FOLLOW,
+        .gainAnimShift = 3,
+        .gainBlinkShift = 2
     }
 };
 
@@ -889,20 +869,19 @@ static const GaugeDefinition g_screen3VerticalTwoLanesDefinition = {
     .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 14,
     .originY = 24,
-    .maxValue = 80,
+    .maxValue = 96,
     .palette = PAL0,
     .priority = 1,
     .lanes = {
         {
             .segments = {
-                { .cells = 10, .skin = &g_skinVerticalBlue }
+                { .cells = 12, .skin = &g_skinVerticalBlue }
             }
         },
         {
             .offsetX = 1,
-            .firstValueCell = 1,
             .segments = {
-                { .cells = 8, .skin = &g_skinVerticalLightBlue }
+                { .cells = 12, .skin = &g_skinVerticalBlue }
             }
         }
     },
@@ -918,13 +897,13 @@ static const GaugeDefinition g_screen3VerticalThreeLanesDefinition = {
     .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 22,
     .originY = 24,
-    .maxValue = 80,
+    .maxValue = 96,
     .palette = PAL0,
     .priority = 1,
     .lanes = {
         {
             .segments = {
-                { .cells = 10, .skin = &g_skinVerticalYellow }
+                { .cells = 12, .skin = &g_skinVerticalYellow }
             }
         },
         {
@@ -933,7 +912,7 @@ static const GaugeDefinition g_screen3VerticalThreeLanesDefinition = {
             .overridePalette = 1,
             .palette = PAL1,
             .segments = {
-                { .cells = 8, .skin = &g_skinVerticalBlue }
+                { .cells = 10, .skin = &g_skinVerticalBlue }
             }
         },
         {
@@ -942,13 +921,13 @@ static const GaugeDefinition g_screen3VerticalThreeLanesDefinition = {
             .overridePalette = 1,
             .palette = PAL2,
             .segments = {
-                { .cells = 6, .skin = &g_skinVerticalLightBlue }
+                { .cells = 8, .skin = &g_skinVerticalLightBlue }
             }
         }
     },
     .behavior = {
         .damageMode = GAUGE_TRAIL_MODE_CRITICAL_TRAIL_BLINK,
-        .criticalValue = 24,
+        .criticalValue = 32,
         .damageBlinkShift = 3
     }
 };
@@ -967,20 +946,22 @@ static const GaugeDefinition g_screen3VerticalMirrorDefinition = {
     .lanes = {
         {
             .segments = {
-                { .cells = 12, .skin = &g_skinVerticalYellow }
+                { .cells = 12, .skin = &g_skinVerticalYellowGainBlinkOff }
             }
         }
     },
     .behavior = {
         .valueAnimEnabled = 1,
         .valueAnimShift = 2,
-        .damageMode = GAUGE_TRAIL_MODE_DISABLED
+        .damageMode = GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK,
+        .criticalValue = 32,
+        .damageBlinkShift = 2
     }
 };
 
 static const DemoCaseSource g_screen3Cases[] = {
     {
-        .label = "Vertical 1 lane",
+        .label = "Vertical gain",
         .cursorTileX = 4,
         .cursorTileY = 18,
         .stepAmount = DEMO_FILL_STEP,
@@ -1010,7 +991,7 @@ static const DemoCaseSource g_screen3Cases[] = {
         }
     },
     {
-        .label = "Vertical mirror",
+        .label = "Vertical critical mirror",
         .cursorTileX = 30,
         .cursorTileY = 18,
         .stepAmount = DEMO_FILL_STEP,
@@ -1030,14 +1011,14 @@ static const GaugeDefinition g_screen4PipBasicDefinition = {
     .fillDirection = GAUGE_FILL_FORWARD,
     .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 4,
-    .originY = 8,
-    .maxValue = 7,
+    .originY = 14,
+    .maxValue = 6,
     .palette = PAL0,
     .priority = 1,
     .lanes = {
         {
             .segments = {
-                { .cells = 7, .skin = &g_skinPipBasic }
+                { .cells = 6, .skin = &g_skinPipBasic }
             }
         }
     },
@@ -1054,15 +1035,15 @@ static const GaugeDefinition g_screen4PipQuarterDefinition = {
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
     .vramMode = DEMO_GAUGE_VRAM_MODE,
-    .originX = 22,
-    .originY = 8,
-    .maxValue = 4,
+    .originX = 4,
+    .originY = 17,
+    .maxValue = 6,
     .palette = PAL0,
     .priority = 1,
     .lanes = {
         {
             .segments = {
-                { .cells = 4, .skin = &g_skinPipDoubleQuarter }
+                { .cells = 6, .skin = &g_skinPipDoubleQuarter }
             }
         }
     },
@@ -1080,27 +1061,27 @@ static const GaugeDefinition g_screen4MiniPipTwoLanesDefinition = {
     .fillDirection = GAUGE_FILL_FORWARD,
     .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 4,
-    .originY = 14,
-    .maxValue = 4,
+    .originY = 21,
+    .maxValue = 6,
     .palette = PAL0,
     .priority = 1,
     .lanes = {
         {
             .segments = {
-                { .cells = 4, .skin = &g_skinPipMiniBar }
+                { .cells = 6, .skin = &g_skinPipMiniBar }
             }
         },
         {
             .offsetY = 1,
             .firstValueCell = 1,
             .segments = {
-                { .cells = 3, .skin = &g_skinPipMiniBar }
+                { .cells = 5, .skin = &g_skinPipMiniBar }
             }
         }
     },
     .behavior = {
         .damageMode = GAUGE_TRAIL_MODE_CRITICAL_VALUE_BLINK,
-        .criticalValue = 2,
+        .criticalValue = 3,
         .damageBlinkShift = 2
     }
 };
@@ -1110,15 +1091,15 @@ static const GaugeDefinition g_screen4PipSingleTileDefinition = {
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
     .vramMode = DEMO_GAUGE_VRAM_MODE,
-    .originX = 22,
-    .originY = 14,
-    .maxValue = 6,
+    .originX = 4,
+    .originY = 11,
+    .maxValue = 12,
     .palette = PAL0,
     .priority = 1,
     .lanes = {
         {
             .segments = {
-                { .cells = 6, .skin = &g_skinPipSingle }
+                { .cells = 12, .skin = &g_skinPipSingle }
             }
         }
     },
@@ -1132,44 +1113,54 @@ static const GaugeDefinition g_screen4VerticalPipDefinition = {
     .orientation = GAUGE_ORIENT_VERTICAL,
     .fillDirection = GAUGE_FILL_FORWARD,
     .vramMode = DEMO_GAUGE_VRAM_MODE,
-    .originX = 31,
-    .originY = 24,
-    .maxValue = 5,
+    .originX = 29,
+    .originY = 19,
+    .maxValue = 8,
     .palette = PAL0,
     .priority = 1,
     .lanes = {
         {
             .segments = {
-                { .cells = 5, .skin = &g_skinPipSingle }
+                { .cells = 8, .skin = &g_skinPipSingle }
             }
         },
         {
             .offsetX = 1,
             .firstValueCell = 1,
             .segments = {
-                { .cells = 4, .skin = &g_skinPipSingle }
+                { .cells = 7, .skin = &g_skinPipSingle }
             }
         },
         {
             .offsetX = 2,
             .firstValueCell = 2,
             .segments = {
-                { .cells = 3, .skin = &g_skinPipSingle }
+                { .cells = 6, .skin = &g_skinPipSingle }
             }
         }
     },
     .behavior = {
         .damageMode = GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK,
-        .criticalValue = 2,
+        .criticalValue = 3,
         .damageBlinkShift = 2
     }
 };
 
 static const DemoCaseSource g_screen4Cases[] = {
     {
+        .label = "PIP 1 cell = 1 tile",
+        .cursorTileX = 2,
+        .cursorTileY = 11,
+        .stepAmount = DEMO_PIP_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen4PipSingleTileDefinition }
+        }
+    },
+    {
         .label = "PIP basic",
         .cursorTileX = 2,
-        .cursorTileY = 8,
+        .cursorTileY = 14,
         .stepAmount = DEMO_PIP_STEP,
         .gaugeCount = 1,
         .gauges = {
@@ -1178,8 +1169,8 @@ static const DemoCaseSource g_screen4Cases[] = {
     },
     {
         .label = "PIP quarter 2x2",
-        .cursorTileX = 20,
-        .cursorTileY = 9,
+        .cursorTileX = 2,
+        .cursorTileY = 18,
         .stepAmount = DEMO_PIP_STEP,
         .gaugeCount = 1,
         .gauges = {
@@ -1189,7 +1180,7 @@ static const DemoCaseSource g_screen4Cases[] = {
     {
         .label = "Mini PIP 2 lanes",
         .cursorTileX = 2,
-        .cursorTileY = 14,
+        .cursorTileY = 21,
         .stepAmount = DEMO_PIP_STEP,
         .gaugeCount = 1,
         .gauges = {
@@ -1197,19 +1188,9 @@ static const DemoCaseSource g_screen4Cases[] = {
         }
     },
     {
-        .label = "PIP 1 cell = 1 tile",
-        .cursorTileX = 20,
-        .cursorTileY = 14,
-        .stepAmount = DEMO_PIP_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen4PipSingleTileDefinition }
-        }
-    },
-    {
         .label = "Vertical PIP 3 lanes",
-        .cursorTileX = 28,
-        .cursorTileY = 18,
+        .cursorTileX = 27,
+        .cursorTileY = 15,
         .stepAmount = DEMO_PIP_STEP,
         .gaugeCount = 1,
         .gauges = {

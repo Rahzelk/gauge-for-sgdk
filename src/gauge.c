@@ -67,6 +67,7 @@
 #define GAUGE_DEFAULT_BLINK_SHIFT       3  /* Blink toggles every 8 frames (7.5 toggles/sec @ 60fps) */
 
 /* Helper macros */
+#define GAUGE_ARRAY_LEN(array)      ((u16)(sizeof(array) / sizeof((array)[0])))
 #define CALC_ANIM_STEP(diff, shift)   ((u16)(((diff) >> (shift)) + 1))  /* Animation step: distance/2^shift + 1 (always >= 1) */
 #define FILL_IDX_TO_OFFSET(idx)       (((u16)(idx)) << 3)              /* fillIndex * 8 = pixel offset (each cell = 8 px) */
 
@@ -145,6 +146,646 @@ typedef enum
     GAUGE_TRAIL_STATE_DAMAGE = 1,
     GAUGE_TRAIL_STATE_GAIN   = 2
 } GaugeActiveTrailState;
+
+typedef void GaugeTickAndRenderHandler(Gauge *gauge);
+typedef void GaugeLogicTickHandler(GaugeLogic *logic);
+typedef void GaugeLaneRenderHandler(GaugeLaneInstance *laneInstance,
+                                    u16 valuePixels,
+                                    u16 trailPixelsRendered,
+                                    u16 trailPixelsActual,
+                                    u8 blinkOffActive,
+                                    u8 blinkOnChanged,
+                                    u8 trailMode,
+                                    u8 trailModeChanged);
+
+/* =============================================================================
+   Internal Runtime Types
+   =============================================================================
+
+   These structures are intentionally private to gauge.c.
+   gauge.h only keeps the public build contract plus the minimum runtime layout
+   required for source compatibility (`Gauge`, `GaugeLogic`, a few direct fields).
+   ============================================================================= */
+
+struct GaugeLaneLayout
+{
+    u16 fillOffset;
+    u8 length;
+    u8 segmentCount;
+
+    u8 *segmentIdByCell;
+    u8 *fillIndexByCell;
+    u8 *cellIndexByFillIndex;
+
+    Vect2D_u16 *tilemapPosByCell;
+
+    const u32 **tilesetBySegment;
+    const u32 **tilesetEndBySegment;
+    const u32 **tilesetTrailBySegment;
+    const u32 **tilesetBridgeBySegment;
+    const u32 **tilesetCapStartBySegment;
+    const u32 **tilesetCapEndBySegment;
+    const u32 **tilesetCapStartBreakBySegment;
+    const u32 **tilesetCapStartTrailBySegment;
+    u8 *capEndBySegment;
+
+    const u32 **gainTilesetBySegment;
+    const u32 **gainTilesetEndBySegment;
+    const u32 **gainTilesetTrailBySegment;
+    const u32 **gainTilesetBridgeBySegment;
+    const u32 **gainTilesetCapStartBySegment;
+    const u32 **gainTilesetCapEndBySegment;
+    const u32 **gainTilesetCapStartBreakBySegment;
+    const u32 **gainTilesetCapStartTrailBySegment;
+
+    const u32 **blinkOffTilesetBySegment;
+    const u32 **blinkOffTilesetEndBySegment;
+    const u32 **blinkOffTilesetTrailBySegment;
+    const u32 **blinkOffTilesetBridgeBySegment;
+    const u32 **blinkOffTilesetCapStartBySegment;
+    const u32 **blinkOffTilesetCapEndBySegment;
+    const u32 **blinkOffTilesetCapStartBreakBySegment;
+    const u32 **blinkOffTilesetCapStartTrailBySegment;
+
+    const u32 **gainBlinkOffTilesetBySegment;
+    const u32 **gainBlinkOffTilesetEndBySegment;
+    const u32 **gainBlinkOffTilesetTrailBySegment;
+    const u32 **gainBlinkOffTilesetBridgeBySegment;
+    const u32 **gainBlinkOffTilesetCapStartBySegment;
+    const u32 **gainBlinkOffTilesetCapEndBySegment;
+    const u32 **gainBlinkOffTilesetCapStartBreakBySegment;
+    const u32 **gainBlinkOffTilesetCapStartTrailBySegment;
+
+    const u32 **pipTilesetBySegment;
+    u8 *pipWidthBySegment;
+    u8 *pipHeightBySegment;
+    u8 *pipOffsetBySegment;
+    u8 *pipStateCountBySegment;
+    u8 *pipStripCoverageBySegment;
+    u8 *pipHalfAxisBySegment;
+    u8 *pipSourceWidthBySegment;
+    u8 *pipSourceHeightBySegment;
+
+    u8 pipCount;
+    u8 *pipIndexByFillIndex;
+    u8 *pipLocalTileByFillIndex;
+    u8 *pipWidthByPipIndex;
+    u8 pipRenderCount;
+    u8 *pipRenderFillIndexByRenderIndex;
+    u8 *pipRenderRowByRenderIndex;
+    u8 *pipRenderExtraHFlipByRenderIndex;
+    u8 *pipRenderExtraVFlipByRenderIndex;
+    u8 *pipRenderStripIndexByState;
+    u8 *pipRenderTileOffsetByState;
+
+    u8 *bridgeEndByFillIndex;
+    u8 *bridgeBreakByFillIndex;
+    u8 *bridgeBreakBoundaryByFillIndex;
+
+    u8 orientation;
+    u8 palette;
+    u8 priority;
+    u8 verticalFlip;
+    u8 horizontalFlip;
+    u8 endOverrideEnabled;
+
+    u8 hasBlinkOff;
+    u8 hasGainBlinkOff;
+    u8 capStartEnabled;
+    u8 capEndEnabled;
+    u16 refCount;
+};
+
+typedef struct
+{
+    const u32 *cachedStrip;
+    u16 vramTileIndex;
+    u8 cachedFillIndex;
+    u8 cellIndex;
+    u8 pipFillIndex;
+    u8 pipRow;
+    u8 pipRenderIndex;
+} GaugeStreamCell;
+
+typedef struct
+{
+    u16 *vramTileEmpty;
+    u16 *vramTileFullValue;
+    u16 *vramTileFullTrail;
+    u16 *vramTileBridge;
+    u16 *vramTilePipBase;
+    u16 vramTileCapStart;
+    u16 vramTileCapEnd;
+
+    u16 vramTilePartialValue;
+    u16 vramTilePartialTrail;
+    u16 vramTilePartialEnd;
+    u16 vramTilePartialTrailSecond;
+
+    u8 loadedSegmentPartialValue;
+    u8 cachedFillIndexPartialValue;
+    u8 loadedSegmentPartialTrail;
+    u8 cachedFillIndexPartialTrail;
+    u8 loadedSegmentPartialEnd;
+    u8 cachedFillIndexPartialEnd;
+    u8 loadedSegmentPartialTrailSecond;
+    u8 cachedFillIndexPartialTrailSecond;
+    u8 *cachedFillIndexBridge;
+    u8 cachedFillIndexCapStart;
+    u8 cachedFillIndexCapEnd;
+    u8 loadedCapStartUsesBreak;
+    u8 loadedCapStartUsesTrail;
+
+    u16 *cellCurrentTileIndex;
+    u8 *cellValid;
+    u8 segmentCount;
+    u8 cellCount;
+} GaugeDynamic;
+
+struct GaugeLaneInstance
+{
+    u16 originX;
+    u16 originY;
+
+    GaugeVramMode vramMode;
+    u16 vramBase;
+    GaugeLaneRenderHandler *renderHandler;
+    const Gauge *gauge;
+
+    const GaugeLaneLayout *layout;
+    u8 baseLaneFillIndexByCell[GAUGE_MAX_LENGTH];
+
+    GaugeStreamCell *cells;
+    u8 cellCount;
+
+    GaugeDynamic dyn;
+};
+
+typedef struct
+{
+    const GaugeLane *lane;
+    u8 laneIndex;
+    u16 originX;
+    u16 originY;
+    u16 fillOffset;
+    u8 palette;
+    u8 length;
+    u8 segmentCount;
+    u8 segmentIdByCell[GAUGE_MAX_LENGTH];
+} GaugeBuildLanePlan;
+
+typedef struct
+{
+    GaugeDefinition sanitizedDefinition;
+    GaugeBuildLanePlan lanePlans[GAUGE_MAX_LANES];
+    GaugeLaneLayout *builtLayouts[GAUGE_MAX_LANES];
+} GaugeBuildScratch;
+
+static GaugeBuildScratch s_buildScratch;
+
+/* Public API uses internal helpers implemented later in the file. */
+static u8 gauge_is_zeroed(const Gauge *gauge);
+static inline u8 sanitize_value_mode(u8 mode);
+static inline u8 sanitize_orientation(u8 orientation);
+static inline u8 sanitize_fill_direction(u8 fillDirection);
+static inline u8 sanitize_palette_index(u8 palette);
+static inline u8 sanitize_vram_mode(u8 vramMode);
+static u8 definition_lane_is_empty(const GaugeLane *lane);
+static u8 find_baseLane_index(const GaugeDefinition *definition,
+                              u8 *outLaneIndex);
+static u8 build_lane_plan(const GaugeDefinition *definition,
+                          u8 laneIndex,
+                          const GaugeLane *lane,
+                          const GaugeLane *baseLane,
+                          GaugeBuildLanePlan *outPlan);
+static u8 build_layout_from_lane_plan(const GaugeDefinition *definition,
+                                      const GaugeBuildLanePlan *lanePlan,
+                                      GaugeLaneLayout **outLayout);
+static void release_built_layouts(GaugeLaneLayout **builtLayouts);
+static inline u8 gauge_layout_has_bridge(const GaugeLaneLayout *layout);
+static u16 compute_pip_total_pixels(const GaugeLaneLayout *layout);
+static u16 clamp_max_value_to_capacity(u16 maxValue);
+static u16 compute_vram_size_for_layout(const GaugeLaneLayout *layout,
+                                        GaugeVramMode vramMode,
+                                        u8 trailEnabled,
+                                        GaugeValueMode valueMode);
+static GaugeTickAndRenderHandler *resolve_tick_and_render_handler(GaugeValueMode valueMode);
+static u8 GaugeLaneInstance_initInternal(GaugeLaneInstance *lane,
+                                         const Gauge *gauge,
+                                         GaugeLaneLayout *layout,
+                                         u16 originX,
+                                         u16 originY,
+                                         u16 vramBase,
+                                         GaugeVramMode vramMode);
+static void GaugeLaneInstance_releaseInternal(GaugeLaneInstance *lane);
+static void GaugeLogic_init(GaugeLogic *logic,
+                            u16 maxValue,
+                            u16 maxFillPixels,
+                            const u16 *valueToPixelsLUT,
+                            u16 initialValue);
+static void GaugeLogic_tick_follow_mode(GaugeLogic *logic);
+static inline void apply_non_follow_trail_mode_state(GaugeLogic *logic,
+                                                     u8 advanceBlinkTimer);
+static inline void apply_configured_trail_mode_state(GaugeLogic *logic,
+                                                     u8 advanceBlinkTimer);
+static inline void invalidate_render_cache(GaugeLogic *logic);
+static u16 reproject_trail_pixels_by_ratio(u16 oldTrailPixels,
+                                           u16 oldMaxFillPixels,
+                                           u16 newMaxFillPixels);
+static inline void gauge_set_current_value_and_target(GaugeLogic *logic,
+                                                      u16 newValue,
+                                                      u8 syncDisplayedValue);
+static void build_base_lane_projection_maps(Gauge *gauge);
+static void fill_value_to_pixels_lut(u16 *outValueToPixelsLUT,
+                                     u16 maxValue,
+                                     u16 maxFillPixels);
+static void fill_pip_value_lut(u16 *outValueToPixelsLUT,
+                               u16 maxValue,
+                               const GaugeLaneLayout *layout);
+static void gauge_rebuild_value_to_pixels_lut(Gauge *gauge);
+static void gauge_rebuild_pip_quantize_lut(Gauge *gauge);
+static void gauge_apply_behavior_from_definition(Gauge *gauge,
+                                                 const GaugeBehavior *behavior);
+
+
+/* =============================================================================
+   Public API
+   ============================================================================= */
+
+u8 Gauge_build(Gauge *gauge,
+               const GaugeDefinition *definition,
+               u16 vramBase)
+{
+    if (!gauge || !definition)
+        return 0;
+    if (!gauge_is_zeroed(gauge))
+        return 0;
+
+    memset(&s_buildScratch, 0, sizeof(s_buildScratch));
+    GaugeDefinition *sanitized = &s_buildScratch.sanitizedDefinition;
+    *sanitized = *definition;
+    sanitized->mode = (GaugeMode)sanitize_value_mode((u8)sanitized->mode);
+    sanitized->orientation = (GaugeOrientation)sanitize_orientation((u8)sanitized->orientation);
+    sanitized->fillDirection = (GaugeFillDirection)sanitize_fill_direction((u8)sanitized->fillDirection);
+    sanitized->vramMode = (GaugeVramMode)sanitize_vram_mode((u8)sanitized->vramMode);
+    sanitized->palette = sanitize_palette_index(sanitized->palette);
+    sanitized->priority = sanitized->priority ? 1 : 0;
+    sanitized->verticalFlip = sanitized->verticalFlip ? 1 : 0;
+    sanitized->horizontalFlip = sanitized->horizontalFlip ? 1 : 0;
+    sanitized->fixedStartCap = sanitized->fixedStartCap ? 1 : 0;
+    sanitized->fixedEndCap = sanitized->fixedEndCap ? 1 : 0;
+    if (sanitized->maxValue > GAUGE_LUT_CAPACITY)
+        sanitized->maxValue = GAUGE_LUT_CAPACITY;
+
+    u8 baseLaneIndex = 0;
+    if (!find_baseLane_index(sanitized, &baseLaneIndex))
+        return 0;
+
+    const GaugeLane *baseLane = &sanitized->lanes[baseLaneIndex];
+    GaugeBuildLanePlan *lanePlans = s_buildScratch.lanePlans;
+    GaugeLaneLayout **builtLayouts = s_buildScratch.builtLayouts;
+    u8 laneCount = 0;
+    u8 longestLaneLength = 0;
+
+    for (u8 laneIndex = 0; laneIndex < GAUGE_MAX_LANES; laneIndex++)
+    {
+        const GaugeLane *lane = &sanitized->lanes[laneIndex];
+        if (definition_lane_is_empty(lane))
+            continue;
+
+        if (laneCount >= GAUGE_MAX_LANES)
+        {
+            release_built_layouts(builtLayouts);
+            return 0;
+        }
+
+        if (!build_lane_plan(sanitized,
+                             laneIndex,
+                             lane,
+                             baseLane,
+                             &lanePlans[laneCount]))
+        {
+            release_built_layouts(builtLayouts);
+            return 0;
+        }
+
+        if (lanePlans[laneCount].length > longestLaneLength)
+            longestLaneLength = lanePlans[laneCount].length;
+
+        laneCount++;
+    }
+
+    if (laneCount == 0)
+        return 0;
+
+    for (u8 laneIndex = 0; laneIndex < laneCount; laneIndex++)
+    {
+        if (!build_layout_from_lane_plan(sanitized,
+                                         &lanePlans[laneIndex],
+                                         &builtLayouts[laneIndex]))
+        {
+            release_built_layouts(builtLayouts);
+            return 0;
+        }
+    }
+
+    u8 baseLaneRuntimeIndex = CACHE_INVALID_U8;
+    for (u8 laneIndex = 0; laneIndex < laneCount; laneIndex++)
+    {
+        if (lanePlans[laneIndex].laneIndex == baseLaneIndex)
+        {
+            baseLaneRuntimeIndex = laneIndex;
+            break;
+        }
+    }
+
+    if (baseLaneRuntimeIndex == CACHE_INVALID_U8)
+    {
+        release_built_layouts(builtLayouts);
+        return 0;
+    }
+
+    GaugeLaneLayout *baseLayout = builtLayouts[baseLaneRuntimeIndex];
+    const u16 maxFillPixels = (sanitized->mode == GAUGE_MODE_PIP)
+        ? compute_pip_total_pixels(baseLayout)
+        : (u16)(baseLayout->length << TILE_TO_PIXEL_SHIFT);
+
+    u16 resolvedMaxValue = sanitized->maxValue;
+    if (resolvedMaxValue == 0)
+    {
+        resolvedMaxValue = (sanitized->mode == GAUGE_MODE_PIP)
+            ? baseLayout->pipCount
+            : (u16)(longestLaneLength << TILE_TO_PIXEL_SHIFT);
+    }
+    resolvedMaxValue = clamp_max_value_to_capacity(resolvedMaxValue);
+
+    if (maxFillPixels == 0 || resolvedMaxValue == 0)
+    {
+        release_built_layouts(builtLayouts);
+        return 0;
+    }
+
+    GaugeLaneInstance **lanes = (GaugeLaneInstance **)gauge_alloc_bytes(
+        (u16)(laneCount * (u8)sizeof(GaugeLaneInstance *)));
+    if (!lanes)
+    {
+        release_built_layouts(builtLayouts);
+        return 0;
+    }
+
+    u16 *valueToPixelsData = (u16 *)gauge_alloc_bytes(
+        (u16)((GAUGE_LUT_CAPACITY + 1) * (u8)sizeof(u16)));
+    if (!valueToPixelsData)
+    {
+        gauge_free_ptr((void **)&lanes);
+        release_built_layouts(builtLayouts);
+        return 0;
+    }
+
+    const GaugeValueMode valueMode = (GaugeValueMode)sanitized->mode;
+    const u16 *valueToPixelsLUT = NULL;
+    if (valueMode == GAUGE_VALUE_MODE_PIP)
+    {
+        fill_pip_value_lut(valueToPixelsData, resolvedMaxValue, baseLayout);
+        valueToPixelsLUT = valueToPixelsData;
+    }
+    else
+    {
+        fill_value_to_pixels_lut(valueToPixelsData, resolvedMaxValue, maxFillPixels);
+        if (resolvedMaxValue != maxFillPixels)
+            valueToPixelsLUT = valueToPixelsData;
+    }
+
+    gauge->lanes = lanes;
+    gauge->laneCount = laneCount;
+    gauge->baseLaneIndex = baseLaneRuntimeIndex;
+    gauge->baseLaneHasBridge = gauge_layout_has_bridge(baseLayout);
+    gauge->baseLaneSpanPixels = maxFillPixels;
+    gauge->ownedLayoutCount = laneCount;
+    gauge->tickAndRenderHandler = resolve_tick_and_render_handler(valueMode);
+    gauge->valueMode = valueMode;
+    gauge->vramNextOffset = 0;
+    gauge->logic.valueToPixelsData = valueToPixelsData;
+    for (u8 laneIndex = 0; laneIndex < laneCount; laneIndex++)
+        gauge->ownedLayouts[laneIndex] = builtLayouts[laneIndex];
+
+    GaugeLogic_init(&gauge->logic,
+                    resolvedMaxValue,
+                    maxFillPixels,
+                    valueToPixelsLUT,
+                    resolvedMaxValue);
+    gauge->logic.valueToPixelsData = valueToPixelsData;
+    gauge_rebuild_pip_quantize_lut(gauge);
+    gauge_apply_behavior_from_definition(gauge, &sanitized->behavior);
+
+    u16 nextVram = vramBase;
+    for (u8 laneIndex = 0; laneIndex < laneCount; laneIndex++)
+    {
+        const u16 vramSize = compute_vram_size_for_layout(builtLayouts[laneIndex],
+                                                          sanitized->vramMode,
+                                                          gauge->logic.trailEnabled,
+                                                          valueMode);
+        GaugeLaneInstance *lane = (GaugeLaneInstance *)gauge_alloc_bytes((u16)sizeof(GaugeLaneInstance));
+        if (!lane)
+        {
+            Gauge_release(gauge);
+            return 0;
+        }
+
+        if (!GaugeLaneInstance_initInternal(lane,
+                                            gauge,
+                                            builtLayouts[laneIndex],
+                                            lanePlans[laneIndex].originX,
+                                            lanePlans[laneIndex].originY,
+                                            nextVram,
+                                            sanitized->vramMode))
+        {
+            gauge_free_ptr((void **)&lane);
+            Gauge_release(gauge);
+            return 0;
+        }
+
+        gauge->lanes[laneIndex] = lane;
+        gauge->vramNextOffset = (u16)(gauge->vramNextOffset + vramSize);
+        nextVram = (u16)(nextVram + vramSize);
+    }
+
+    build_base_lane_projection_maps(gauge);
+
+    DMA_flushQueue();
+
+    return 1;
+}
+
+/** Update gauge: tick logic + render all lanes. Call once per frame. */
+void Gauge_update(Gauge *gauge)
+{
+    if (!gauge || !gauge->tickAndRenderHandler)
+        return;
+
+    gauge->tickAndRenderHandler(gauge);
+}
+
+void Gauge_setMaxValue(Gauge *gauge, u16 newMaxValue)
+{
+    if (!gauge || !gauge->tickAndRenderHandler)
+        return;
+
+    newMaxValue = clamp_max_value_to_capacity(newMaxValue);
+    if (newMaxValue == 0 || newMaxValue == gauge->logic.maxValue)
+        return;
+
+    GaugeLogic *logic = &gauge->logic;
+    const u16 oldMaxFillPixels = logic->maxFillPixels;
+    const u16 oldTrailPixels = logic->trailPixels;
+
+    logic->maxValue = newMaxValue;
+    if (logic->currentValue > newMaxValue)
+        logic->currentValue = newMaxValue;
+    if (logic->criticalValue > newMaxValue)
+        logic->criticalValue = newMaxValue;
+
+    gauge_rebuild_value_to_pixels_lut(gauge);
+    gauge_rebuild_pip_quantize_lut(gauge);
+
+    gauge_set_current_value_and_target(logic, logic->currentValue, 1);
+
+    logic->trailPixels = reproject_trail_pixels_by_ratio(oldTrailPixels,
+                                                         oldMaxFillPixels,
+                                                         logic->maxFillPixels);
+    if (logic->trailPixels < logic->valuePixels)
+        logic->trailPixels = logic->valuePixels;
+    if (logic->trailPixels > logic->maxFillPixels)
+        logic->trailPixels = logic->maxFillPixels;
+
+    invalidate_render_cache(logic);
+}
+
+/** Set gauge value instantly (no trail, no animation). Resets all trail state. */
+void Gauge_setValue(Gauge *gauge, u16 newValue)
+{
+    if (!gauge)
+        return;
+
+    GaugeLogic *logic = &gauge->logic;
+    logic->needUpdate = 1;
+    gauge_set_current_value_and_target(logic, newValue, 1);
+    apply_configured_trail_mode_state(logic, 0);
+}
+
+void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
+{
+    if (!gauge)
+        return;
+
+    GaugeLogic *logic = &gauge->logic;
+    logic->needUpdate = 1;
+
+    gauge_set_current_value_and_target(logic,
+                                       (logic->currentValue > amount) ? (u16)(logic->currentValue - amount) : 0,
+                                       !logic->valueAnimEnabled);
+
+    if (gauge->logicTickHandler != GaugeLogic_tick_follow_mode)
+    {
+        apply_non_follow_trail_mode_state(logic, 0);
+        return;
+    }
+
+    const u16 previousDisplayedValuePixels = logic->valuePixels;
+    if (logic->activeTrailState == GAUGE_TRAIL_STATE_GAIN)
+    {
+        logic->trailPixels = previousDisplayedValuePixels;
+    }
+    else if (logic->trailPixels < previousDisplayedValuePixels)
+    {
+        logic->trailPixels = previousDisplayedValuePixels;
+    }
+
+    logic->holdFramesRemaining = holdFrames;
+    logic->blinkFramesRemaining = blinkFrames;
+    logic->blinkTimer = 0;
+    logic->activeTrailState = GAUGE_TRAIL_STATE_DAMAGE;
+}
+
+void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
+{
+    if (!gauge)
+        return;
+
+    GaugeLogic *logic = &gauge->logic;
+    logic->needUpdate = 1;
+
+    gauge_set_current_value_and_target(logic,
+                                       (logic->currentValue + amount > logic->maxValue)
+                                           ? logic->maxValue
+                                           : (u16)(logic->currentValue + amount),
+                                       !logic->valueAnimEnabled);
+
+    if ((GaugeGainMode)logic->configuredGainMode == GAUGE_GAIN_MODE_FOLLOW &&
+        logic->valueAnimEnabled)
+    {
+        logic->trailPixels = logic->valueTargetPixels;
+        logic->holdFramesRemaining = holdFrames;
+        logic->blinkFramesRemaining = blinkFrames;
+        logic->blinkTimer = 0;
+        logic->activeTrailState = GAUGE_TRAIL_STATE_GAIN;
+        return;
+    }
+
+    if ((GaugeTrailMode)logic->configuredTrailMode == GAUGE_TRAIL_MODE_FOLLOW)
+    {
+        logic->trailPixels = logic->valuePixels;
+        logic->holdFramesRemaining = 0;
+        logic->blinkFramesRemaining = 0;
+        logic->blinkTimer = 0;
+        logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
+    }
+    else
+    {
+        apply_non_follow_trail_mode_state(logic, 0);
+    }
+}
+
+void Gauge_release(Gauge *gauge)
+{
+    if (!gauge)
+        return;
+
+    for (u8 i = 0; i < gauge->laneCount; i++)
+    {
+        GaugeLaneInstance *lane = (gauge->lanes != NULL) ? gauge->lanes[i] : NULL;
+        if (!lane)
+            continue;
+
+        GaugeLaneInstance_releaseInternal(lane);
+        gauge_free_ptr((void **)&lane);
+        gauge->lanes[i] = NULL;
+    }
+
+    gauge_free_ptr((void **)&gauge->lanes);
+    gauge_free_ptr((void **)&gauge->logic.valueToPixelsData);
+    gauge_free_ptr((void **)&gauge->logic.pixelsToQuantizedPixelsLUT);
+
+    for (u8 layoutIndex = 0; layoutIndex < gauge->ownedLayoutCount; layoutIndex++)
+    {
+        GaugeLaneLayout *ownedLayout = gauge->ownedLayouts[layoutIndex];
+        if (!ownedLayout)
+            continue;
+
+        if (ownedLayout->length != 0 || ownedLayout->refCount != 0)
+            GaugeLaneLayout_release(ownedLayout);
+        gauge_free_ptr((void **)&ownedLayout);
+        gauge->ownedLayouts[layoutIndex] = NULL;
+    }
+    gauge->ownedLayoutCount = 0;
+
+    memset(gauge, 0, sizeof(*gauge));
+}
+
+u16 Gauge_getValue(const Gauge *gauge)
+{
+    return gauge ? gauge->logic.currentValue : 0;
+}
 
 
 /* =============================================================================
@@ -2093,6 +2734,8 @@ static void layout_free_optional_ptr(void **ptr,
                                      const void *defaultViewA,
                                      const void *defaultViewB,
                                      const void *defaultViewC);
+static void layout_reset_bridge_views(GaugeLaneLayout *layout);
+static void layout_reset_pip_runtime_views(GaugeLaneLayout *layout);
 static inline u16 compute_pip_render_state_lut_index(u8 pipState, u8 renderIndex);
 static u8 layout_sync_optional_segment_tilesets_by_usage(u8 hasAny,
                                                           const u32 ***segmentTilesetsBySegment,
@@ -2155,12 +2798,7 @@ static void build_bridge_luts(GaugeLaneLayout *layout)
 
     if (!hasBaseBridge && !hasGainBridge)
     {
-        layout_free_optional_ptr((void **)&layout->bridgeEndByFillIndex, s_zeroCellFlags, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->bridgeBreakByFillIndex, s_zeroCellFlags, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->bridgeBreakBoundaryByFillIndex, s_zeroCellFlags, NULL, NULL);
-        layout->bridgeEndByFillIndex = (u8 *)s_zeroCellFlags;
-        layout->bridgeBreakByFillIndex = (u8 *)s_zeroCellFlags;
-        layout->bridgeBreakBoundaryByFillIndex = (u8 *)s_zeroCellFlags;
+        layout_reset_bridge_views(layout);
         return;
     }
 
@@ -2177,12 +2815,7 @@ static void build_bridge_luts(GaugeLaneLayout *layout)
                                          s_zeroCellFlags,
                                          0))
     {
-        layout_free_optional_ptr((void **)&layout->bridgeEndByFillIndex, s_zeroCellFlags, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->bridgeBreakByFillIndex, s_zeroCellFlags, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->bridgeBreakBoundaryByFillIndex, s_zeroCellFlags, NULL, NULL);
-        layout->bridgeEndByFillIndex = (u8 *)s_zeroCellFlags;
-        layout->bridgeBreakByFillIndex = (u8 *)s_zeroCellFlags;
-        layout->bridgeBreakBoundaryByFillIndex = (u8 *)s_zeroCellFlags;
+        layout_reset_bridge_views(layout);
         return;
     }
 
@@ -2361,26 +2994,7 @@ static void build_pip_luts(GaugeLaneLayout *layout)
 
     if (!hasPipStyles)
     {
-        layout->pipCount = 0;
-        layout->pipRenderCount = 0;
-        layout_free_optional_ptr((void **)&layout->pipIndexByFillIndex, s_invalidCellIndexes, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipLocalTileByFillIndex, s_zeroCellFlags, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipWidthByPipIndex, s_oneCellFlags, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipRenderFillIndexByRenderIndex, s_invalidCellIndexes, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipRenderRowByRenderIndex, s_zeroCellFlags, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipRenderExtraHFlipByRenderIndex, s_zeroCellFlags, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipRenderExtraVFlipByRenderIndex, s_zeroCellFlags, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipRenderStripIndexByState, s_zeroPipRenderStateLut, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipRenderTileOffsetByState, s_zeroPipRenderStateLut, NULL, NULL);
-        layout->pipIndexByFillIndex = (u8 *)s_invalidCellIndexes;
-        layout->pipLocalTileByFillIndex = (u8 *)s_zeroCellFlags;
-        layout->pipWidthByPipIndex = (u8 *)s_oneCellFlags;
-        layout->pipRenderFillIndexByRenderIndex = (u8 *)s_invalidCellIndexes;
-        layout->pipRenderRowByRenderIndex = (u8 *)s_zeroCellFlags;
-        layout->pipRenderExtraHFlipByRenderIndex = (u8 *)s_zeroCellFlags;
-        layout->pipRenderExtraVFlipByRenderIndex = (u8 *)s_zeroCellFlags;
-        layout->pipRenderStripIndexByState = (u8 *)s_zeroPipRenderStateLut;
-        layout->pipRenderTileOffsetByState = (u8 *)s_zeroPipRenderStateLut;
+        layout_reset_pip_runtime_views(layout);
         return;
     }
 
@@ -2421,26 +3035,7 @@ static void build_pip_luts(GaugeLaneLayout *layout)
                                         s_zeroPipRenderStateLut,
                                         0))
     {
-        layout->pipCount = 0;
-        layout->pipRenderCount = 0;
-        layout_free_optional_ptr((void **)&layout->pipIndexByFillIndex, s_invalidCellIndexes, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipLocalTileByFillIndex, s_zeroCellFlags, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipWidthByPipIndex, s_oneCellFlags, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipRenderFillIndexByRenderIndex, s_invalidCellIndexes, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipRenderRowByRenderIndex, s_zeroCellFlags, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipRenderExtraHFlipByRenderIndex, s_zeroCellFlags, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipRenderExtraVFlipByRenderIndex, s_zeroCellFlags, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipRenderStripIndexByState, s_zeroPipRenderStateLut, NULL, NULL);
-        layout_free_optional_ptr((void **)&layout->pipRenderTileOffsetByState, s_zeroPipRenderStateLut, NULL, NULL);
-        layout->pipIndexByFillIndex = (u8 *)s_invalidCellIndexes;
-        layout->pipLocalTileByFillIndex = (u8 *)s_zeroCellFlags;
-        layout->pipWidthByPipIndex = (u8 *)s_oneCellFlags;
-        layout->pipRenderFillIndexByRenderIndex = (u8 *)s_invalidCellIndexes;
-        layout->pipRenderRowByRenderIndex = (u8 *)s_zeroCellFlags;
-        layout->pipRenderExtraHFlipByRenderIndex = (u8 *)s_zeroCellFlags;
-        layout->pipRenderExtraVFlipByRenderIndex = (u8 *)s_zeroCellFlags;
-        layout->pipRenderStripIndexByState = (u8 *)s_zeroPipRenderStateLut;
-        layout->pipRenderTileOffsetByState = (u8 *)s_zeroPipRenderStateLut;
+        layout_reset_pip_runtime_views(layout);
         return;
     }
 
@@ -2843,6 +3438,121 @@ static const LayoutBinding s_layoutBindings[LAYOUT_TILESET_GROUP_COUNT][LAYOUT_T
     }
 };
 
+typedef struct
+{
+    u16 memberOffset;
+    const void *defaultView;
+} OptionalPointerBinding;
+
+#define OPTIONAL_POINTER_BINDING(memberName, sentinelView) \
+    { GAUGE_MEMBER_OFFSET(GaugeLaneLayout, memberName), (sentinelView) }
+
+static const OptionalPointerBinding s_layoutOptionalPointerBindings[] = {
+    OPTIONAL_POINTER_BINDING(capEndBySegment, s_zeroSegmentFlags),
+    OPTIONAL_POINTER_BINDING(pipTilesetBySegment, s_nullSegmentTilesets),
+    OPTIONAL_POINTER_BINDING(pipWidthBySegment, s_oneSegmentFlags),
+    OPTIONAL_POINTER_BINDING(pipHeightBySegment, s_oneSegmentFlags),
+    OPTIONAL_POINTER_BINDING(pipOffsetBySegment, s_zeroSegmentFlags),
+    OPTIONAL_POINTER_BINDING(pipStateCountBySegment, s_zeroSegmentFlags),
+    OPTIONAL_POINTER_BINDING(pipStripCoverageBySegment, s_zeroSegmentFlags),
+    OPTIONAL_POINTER_BINDING(pipHalfAxisBySegment, s_zeroSegmentFlags),
+    OPTIONAL_POINTER_BINDING(pipSourceWidthBySegment, s_oneSegmentFlags),
+    OPTIONAL_POINTER_BINDING(pipSourceHeightBySegment, s_oneSegmentFlags),
+    OPTIONAL_POINTER_BINDING(pipIndexByFillIndex, s_invalidCellIndexes),
+    OPTIONAL_POINTER_BINDING(pipLocalTileByFillIndex, s_zeroCellFlags),
+    OPTIONAL_POINTER_BINDING(pipWidthByPipIndex, s_oneCellFlags),
+    OPTIONAL_POINTER_BINDING(pipRenderFillIndexByRenderIndex, s_invalidCellIndexes),
+    OPTIONAL_POINTER_BINDING(pipRenderRowByRenderIndex, s_zeroCellFlags),
+    OPTIONAL_POINTER_BINDING(pipRenderExtraHFlipByRenderIndex, s_zeroCellFlags),
+    OPTIONAL_POINTER_BINDING(pipRenderExtraVFlipByRenderIndex, s_zeroCellFlags),
+    OPTIONAL_POINTER_BINDING(pipRenderStripIndexByState, s_zeroPipRenderStateLut),
+    OPTIONAL_POINTER_BINDING(pipRenderTileOffsetByState, s_zeroPipRenderStateLut),
+    OPTIONAL_POINTER_BINDING(bridgeEndByFillIndex, s_zeroCellFlags),
+    OPTIONAL_POINTER_BINDING(bridgeBreakByFillIndex, s_zeroCellFlags),
+    OPTIONAL_POINTER_BINDING(bridgeBreakBoundaryByFillIndex, s_zeroCellFlags)
+};
+
+static const OptionalPointerBinding s_layoutPipRuntimeBindings[] = {
+    OPTIONAL_POINTER_BINDING(pipIndexByFillIndex, s_invalidCellIndexes),
+    OPTIONAL_POINTER_BINDING(pipLocalTileByFillIndex, s_zeroCellFlags),
+    OPTIONAL_POINTER_BINDING(pipWidthByPipIndex, s_oneCellFlags),
+    OPTIONAL_POINTER_BINDING(pipRenderFillIndexByRenderIndex, s_invalidCellIndexes),
+    OPTIONAL_POINTER_BINDING(pipRenderRowByRenderIndex, s_zeroCellFlags),
+    OPTIONAL_POINTER_BINDING(pipRenderExtraHFlipByRenderIndex, s_zeroCellFlags),
+    OPTIONAL_POINTER_BINDING(pipRenderExtraVFlipByRenderIndex, s_zeroCellFlags),
+    OPTIONAL_POINTER_BINDING(pipRenderStripIndexByState, s_zeroPipRenderStateLut),
+    OPTIONAL_POINTER_BINDING(pipRenderTileOffsetByState, s_zeroPipRenderStateLut)
+};
+
+static const OptionalPointerBinding s_layoutBridgeBindings[] = {
+    OPTIONAL_POINTER_BINDING(bridgeEndByFillIndex, s_zeroCellFlags),
+    OPTIONAL_POINTER_BINDING(bridgeBreakByFillIndex, s_zeroCellFlags),
+    OPTIONAL_POINTER_BINDING(bridgeBreakBoundaryByFillIndex, s_zeroCellFlags)
+};
+
+static inline void **layout_get_optional_pointer_target(GaugeLaneLayout *layout,
+                                                        const OptionalPointerBinding *binding)
+{
+    if (!layout || !binding)
+        return NULL;
+
+    return (void **)((u8 *)layout + binding->memberOffset);
+}
+
+static void layout_set_optional_pointer_defaults(GaugeLaneLayout *layout,
+                                                 const OptionalPointerBinding *bindings,
+                                                 u16 bindingCount)
+{
+    if (!layout || !bindings)
+        return;
+
+    for (u16 bindingIndex = 0; bindingIndex < bindingCount; bindingIndex++)
+    {
+        void **target = layout_get_optional_pointer_target(layout, &bindings[bindingIndex]);
+        if (target)
+            *target = (void *)bindings[bindingIndex].defaultView;
+    }
+}
+
+static void layout_free_optional_pointer_bindings(GaugeLaneLayout *layout,
+                                                  const OptionalPointerBinding *bindings,
+                                                  u16 bindingCount)
+{
+    if (!layout || !bindings)
+        return;
+
+    for (u16 bindingIndex = 0; bindingIndex < bindingCount; bindingIndex++)
+    {
+        void **target = layout_get_optional_pointer_target(layout, &bindings[bindingIndex]);
+        if (!target)
+            continue;
+
+        layout_free_optional_ptr(target, bindings[bindingIndex].defaultView, NULL, NULL);
+    }
+}
+
+static void layout_reset_bridge_views(GaugeLaneLayout *layout)
+{
+    layout_free_optional_pointer_bindings(layout,
+                                          s_layoutBridgeBindings,
+                                          GAUGE_ARRAY_LEN(s_layoutBridgeBindings));
+    layout_set_optional_pointer_defaults(layout,
+                                         s_layoutBridgeBindings,
+                                         GAUGE_ARRAY_LEN(s_layoutBridgeBindings));
+}
+
+static void layout_reset_pip_runtime_views(GaugeLaneLayout *layout)
+{
+    layout_free_optional_pointer_bindings(layout,
+                                          s_layoutPipRuntimeBindings,
+                                          GAUGE_ARRAY_LEN(s_layoutPipRuntimeBindings));
+    layout_set_optional_pointer_defaults(layout,
+                                         s_layoutPipRuntimeBindings,
+                                         GAUGE_ARRAY_LEN(s_layoutPipRuntimeBindings));
+    layout->pipCount = 0;
+    layout->pipRenderCount = 0;
+}
+
 static inline const LayoutBinding *layout_get_binding(LayoutTilesetGroupId group,
                                                       LayoutTilesetSlot slot)
 {
@@ -2893,33 +3603,10 @@ static void layout_set_optional_views_to_defaults(GaugeLaneLayout *layout)
             *target = (const u32 **)binding->defaultView;
         }
     }
-
-    layout->capEndBySegment = (u8 *)s_zeroSegmentFlags;
-
-    layout->pipTilesetBySegment = (const u32 **)s_nullSegmentTilesets;
-    layout->pipWidthBySegment = (u8 *)s_oneSegmentFlags;
-    layout->pipHeightBySegment = (u8 *)s_oneSegmentFlags;
-    layout->pipOffsetBySegment = (u8 *)s_zeroSegmentFlags;
-    layout->pipStateCountBySegment = (u8 *)s_zeroSegmentFlags;
-    layout->pipStripCoverageBySegment = (u8 *)s_zeroSegmentFlags;
-    layout->pipHalfAxisBySegment = (u8 *)s_zeroSegmentFlags;
-    layout->pipSourceWidthBySegment = (u8 *)s_oneSegmentFlags;
-    layout->pipSourceHeightBySegment = (u8 *)s_oneSegmentFlags;
-
-    layout->pipIndexByFillIndex = (u8 *)s_invalidCellIndexes;
-    layout->pipLocalTileByFillIndex = (u8 *)s_zeroCellFlags;
-    layout->pipWidthByPipIndex = (u8 *)s_oneCellFlags;
+    layout_set_optional_pointer_defaults(layout,
+                                         s_layoutOptionalPointerBindings,
+                                         GAUGE_ARRAY_LEN(s_layoutOptionalPointerBindings));
     layout->pipRenderCount = 0;
-    layout->pipRenderFillIndexByRenderIndex = (u8 *)s_invalidCellIndexes;
-    layout->pipRenderRowByRenderIndex = (u8 *)s_zeroCellFlags;
-    layout->pipRenderExtraHFlipByRenderIndex = (u8 *)s_zeroCellFlags;
-    layout->pipRenderExtraVFlipByRenderIndex = (u8 *)s_zeroCellFlags;
-    layout->pipRenderStripIndexByState = (u8 *)s_zeroPipRenderStateLut;
-    layout->pipRenderTileOffsetByState = (u8 *)s_zeroPipRenderStateLut;
-
-    layout->bridgeEndByFillIndex = (u8 *)s_zeroCellFlags;
-    layout->bridgeBreakByFillIndex = (u8 *)s_zeroCellFlags;
-    layout->bridgeBreakBoundaryByFillIndex = (u8 *)s_zeroCellFlags;
 }
 
 static void layout_free_buffers(GaugeLaneLayout *layout)
@@ -2953,31 +3640,9 @@ static void layout_free_buffers(GaugeLaneLayout *layout)
         }
     }
 
-    layout_free_optional_ptr((void **)&layout->capEndBySegment, s_zeroSegmentFlags, NULL, NULL);
-
-    layout_free_optional_ptr((void **)&layout->pipTilesetBySegment, s_nullSegmentTilesets, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->pipWidthBySegment, s_oneSegmentFlags, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->pipHeightBySegment, s_oneSegmentFlags, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->pipOffsetBySegment, s_zeroSegmentFlags, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->pipStateCountBySegment, s_zeroSegmentFlags, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->pipStripCoverageBySegment, s_zeroSegmentFlags, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->pipHalfAxisBySegment, s_zeroSegmentFlags, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->pipSourceWidthBySegment, s_oneSegmentFlags, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->pipSourceHeightBySegment, s_oneSegmentFlags, NULL, NULL);
-
-    layout_free_optional_ptr((void **)&layout->pipIndexByFillIndex, s_invalidCellIndexes, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->pipLocalTileByFillIndex, s_zeroCellFlags, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->pipWidthByPipIndex, s_oneCellFlags, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->pipRenderFillIndexByRenderIndex, s_invalidCellIndexes, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->pipRenderRowByRenderIndex, s_zeroCellFlags, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->pipRenderExtraHFlipByRenderIndex, s_zeroCellFlags, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->pipRenderExtraVFlipByRenderIndex, s_zeroCellFlags, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->pipRenderStripIndexByState, s_zeroPipRenderStateLut, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->pipRenderTileOffsetByState, s_zeroPipRenderStateLut, NULL, NULL);
-
-    layout_free_optional_ptr((void **)&layout->bridgeEndByFillIndex, s_zeroCellFlags, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->bridgeBreakByFillIndex, s_zeroCellFlags, NULL, NULL);
-    layout_free_optional_ptr((void **)&layout->bridgeBreakBoundaryByFillIndex, s_zeroCellFlags, NULL, NULL);
+    layout_free_optional_pointer_bindings(layout,
+                                          s_layoutOptionalPointerBindings,
+                                          GAUGE_ARRAY_LEN(s_layoutOptionalPointerBindings));
 
     layout->length = 0;
     layout->segmentCount = 0;
@@ -3197,30 +3862,9 @@ typedef struct
 static inline u8 usage_flag_for_slot(const SkinSetUsageFlags *usageFlags,
                                      LayoutTilesetSlot slot)
 {
-    if (!usageFlags)
-        return 0;
-
-    switch (slot)
-    {
-    case LAYOUT_TILESET_SLOT_BODY:
-        return usageFlags->body;
-    case LAYOUT_TILESET_SLOT_END:
-        return usageFlags->end;
-    case LAYOUT_TILESET_SLOT_TRAIL:
-        return usageFlags->trail;
-    case LAYOUT_TILESET_SLOT_BRIDGE:
-        return usageFlags->bridge;
-    case LAYOUT_TILESET_SLOT_CAP_START:
-        return usageFlags->capStart;
-    case LAYOUT_TILESET_SLOT_CAP_END:
-        return usageFlags->capEnd;
-    case LAYOUT_TILESET_SLOT_CAP_START_BREAK:
-        return usageFlags->capStartBreak;
-    case LAYOUT_TILESET_SLOT_CAP_START_TRAIL:
-        return usageFlags->capStartTrail;
-    default:
-        return 0;
-    }
+    return (!usageFlags || slot >= LAYOUT_TILESET_SLOT_COUNT)
+        ? 0
+        : ((const u8 *)usageFlags)[slot];
 }
 
 static void sync_layout_tileset_group_slots_from_usage(GaugeLaneLayout *layout,
@@ -4951,6 +5595,98 @@ static void gauge_build_baseLane_pip_states(Gauge *gauge,
     }
 }
 
+typedef struct
+{
+    const Gauge *gauge;
+    const GaugeLaneLayout *layout;
+    u8 trailMode;
+    u8 isLinkedLane;
+    LinkedLaneTerminalOverrideContext terminalCtx;
+    LocalStripCache stripCache;
+} FillLaneResolveContext;
+
+typedef struct
+{
+    u8 segmentId;
+    CellDecisionType baseLaneType;
+    u8 baseLaneIdx;
+    u8 terminalOverrideApplied;
+    CellDecision decision;
+} FillLaneCellDecision;
+
+static inline u8 init_fill_lane_resolve_context(GaugeLaneInstance *lane,
+                                                u16 valuePixels,
+                                                u16 trailPixelsRendered,
+                                                u8 trailMode,
+                                                FillLaneResolveContext *out)
+{
+    const Gauge *gauge = lane->gauge;
+    if (!gauge || !out)
+        return 0;
+
+    out->gauge = gauge;
+    out->layout = lane->layout;
+    out->trailMode = trailMode;
+    out->isLinkedLane = (lane != gauge_get_baseLane_instance(gauge)) ? 1 : 0;
+    memset(&out->stripCache, 0, sizeof(out->stripCache));
+    prepare_linkedLane_terminal_override(gauge,
+                                         lane,
+                                         lane->layout,
+                                         out->isLinkedLane,
+                                         valuePixels,
+                                         trailPixelsRendered,
+                                         &out->terminalCtx);
+    return 1;
+}
+
+static inline void resolve_fill_lane_cell_decision(GaugeLaneInstance *lane,
+                                                   FillLaneResolveContext *context,
+                                                   u8 cellIndex,
+                                                   FillLaneCellDecision *out)
+{
+    const GaugeLaneLayout *layout = context->layout;
+    const u8 cellFillIndex = layout->fillIndexByCell[cellIndex];
+    const u8 mappedBaseLaneFillIndex = lane->baseLaneFillIndexByCell[cellIndex];
+    const u8 segmentId = layout->segmentIdByCell[cellIndex];
+    const CellDecisionType baseLaneType =
+        (CellDecisionType)context->gauge->baseLaneDecisionTypeByFillIndex[mappedBaseLaneFillIndex];
+    const u8 baseLaneIdx =
+        context->gauge->baseLaneDecisionIdxByFillIndex[mappedBaseLaneFillIndex];
+    const u8 capStartUsesBreak =
+        context->gauge->baseLaneDecisionCapStartBreakByFillIndex[mappedBaseLaneFillIndex];
+    const u8 capStartUsesTrail =
+        context->gauge->baseLaneDecisionCapStartTrailByFillIndex[mappedBaseLaneFillIndex];
+    const u8 useBlinkVariant =
+        context->gauge->baseLaneDecisionUseBlinkVariantByFillIndex[mappedBaseLaneFillIndex];
+    LocalResolvedDecision resolved;
+
+    resolve_local_decision_for_lane(lane,
+                                    cellFillIndex,
+                                    segmentId,
+                                    baseLaneType,
+                                    baseLaneIdx,
+                                    capStartUsesBreak,
+                                    capStartUsesTrail,
+                                    context->isLinkedLane,
+                                    context->terminalCtx.terminalOverrideActive,
+                                    context->terminalCtx.terminalForcedIndex,
+                                    useBlinkVariant,
+                                    context->trailMode,
+                                    &context->stripCache,
+                                    &resolved);
+
+    out->segmentId = segmentId;
+    out->baseLaneType = baseLaneType;
+    out->baseLaneIdx = baseLaneIdx;
+    out->terminalOverrideApplied = resolved.terminalOverrideApplied;
+    out->decision.type = resolved.type;
+    out->decision.strip = resolved.strip;
+    out->decision.fillStripIndex = resolved.fillStripIndex;
+    out->decision.capStartUsesBreak = resolved.capStartUsesBreak;
+    out->decision.capStartUsesTrail = resolved.capStartUsesTrail;
+    out->decision.useBlinkVariant = useBlinkVariant;
+}
+
 /**
  * Process fixed mode: stream tiles for all cells via DMA.
  *
@@ -4982,14 +5718,13 @@ static void process_fixed_mode(GaugeLaneInstance *lane,
     (void)trailPixelsActual;
     (void)blinkOffActive;
     const GaugeLaneLayout *layout = lane->layout;
-    const Gauge *gauge = lane->gauge;
-    if (!gauge)
+    FillLaneResolveContext resolveContext;
+    if (!init_fill_lane_resolve_context(lane,
+                                        valuePixels,
+                                        trailPixelsRendered,
+                                        trailMode,
+                                        &resolveContext))
         return;
-    const u8 isLinkedLane = (lane != gauge_get_baseLane_instance(gauge)) ? 1 : 0;
-    LinkedLaneTerminalOverrideContext terminalCtx;
-    prepare_linkedLane_terminal_override(gauge, lane, layout, isLinkedLane,
-                                        valuePixels, trailPixelsRendered, &terminalCtx);
-    LocalStripCache stripCache = {0};
 
 #if GAUGE_ENABLE_TRACE
     const u8 traceEnabled = s_traceContext.active;
@@ -5005,42 +5740,23 @@ static void process_fixed_mode(GaugeLaneInstance *lane,
     {
         GaugeStreamCell *cell = &lane->cells[i];
         const u8 cellIndex = cell->cellIndex;
-        const u8 cellFillIndex = layout->fillIndexByCell[cellIndex];
-        const u8 mappedBaseLaneFillIndex = lane->baseLaneFillIndexByCell[cellIndex];
-        const u8 segmentId = layout->segmentIdByCell[cellIndex];
-        const CellDecisionType baseLaneType =
-            (CellDecisionType)gauge->baseLaneDecisionTypeByFillIndex[mappedBaseLaneFillIndex];
-        const u8 baseLaneIdx = gauge->baseLaneDecisionIdxByFillIndex[mappedBaseLaneFillIndex];
-        const u8 capStartUsesBreak =
-            gauge->baseLaneDecisionCapStartBreakByFillIndex[mappedBaseLaneFillIndex];
-        const u8 capStartUsesTrail =
-            gauge->baseLaneDecisionCapStartTrailByFillIndex[mappedBaseLaneFillIndex];
-        const u8 useBlinkVariant =
-            gauge->baseLaneDecisionUseBlinkVariantByFillIndex[mappedBaseLaneFillIndex];
-        LocalResolvedDecision resolved;
-        resolve_local_decision_for_lane(lane, cellFillIndex, segmentId, baseLaneType, baseLaneIdx,
-                                        capStartUsesBreak, capStartUsesTrail,
-                                        isLinkedLane,
-                                        terminalCtx.terminalOverrideActive,
-                                        terminalCtx.terminalForcedIndex,
-                                        useBlinkVariant, trailMode,
-                                        &stripCache, &resolved);
-
-        CellDecision decision;
-        decision.type = resolved.type;
-        decision.strip = resolved.strip;
-        decision.fillStripIndex = resolved.fillStripIndex;
-        decision.capStartUsesBreak = resolved.capStartUsesBreak;
-        decision.capStartUsesTrail = resolved.capStartUsesTrail;
-        decision.useBlinkVariant = useBlinkVariant;
+        FillLaneCellDecision cellDecision;
+        resolve_fill_lane_cell_decision(lane, &resolveContext, cellIndex, &cellDecision);
 
 #if GAUGE_ENABLE_TRACE
         if (traceEnabled)
-            trace_record_cell(traceByCell, cellIndex, segmentId, baseLaneType, baseLaneIdx,
-                              resolved.terminalOverrideApplied, &decision);
+            trace_record_cell(traceByCell,
+                              cellIndex,
+                              cellDecision.segmentId,
+                              cellDecision.baseLaneType,
+                              cellDecision.baseLaneIdx,
+                              cellDecision.terminalOverrideApplied,
+                              &cellDecision.decision);
 #endif
 
-        upload_cell_if_needed(cell, decision.strip, decision.fillStripIndex);
+        upload_cell_if_needed(cell,
+                              cellDecision.decision.strip,
+                              cellDecision.decision.fillStripIndex);
     }
 
 #if GAUGE_ENABLE_TRACE
@@ -5079,14 +5795,13 @@ static void process_dynamic_mode(GaugeLaneInstance *lane,
     (void)trailPixelsActual;
     GaugeDynamic *dyn = &lane->dyn;
     const GaugeLaneLayout *layout = lane->layout;
-    const Gauge *gauge = lane->gauge;
-    if (!gauge)
+    FillLaneResolveContext resolveContext;
+    if (!init_fill_lane_resolve_context(lane,
+                                        valuePixels,
+                                        trailPixelsRendered,
+                                        trailMode,
+                                        &resolveContext))
         return;
-    const u8 isLinkedLane = (lane != gauge_get_baseLane_instance(gauge)) ? 1 : 0;
-    LinkedLaneTerminalOverrideContext terminalCtx;
-    prepare_linkedLane_terminal_override(gauge, lane, layout, isLinkedLane,
-                                        valuePixels, trailPixelsRendered, &terminalCtx);
-    LocalStripCache stripCache = {0};
 
     /* Pre-compute tilemap attribute base (without tile index) */
     const u16 attrBase = TILE_ATTR_FULL(layout->palette, layout->priority,
@@ -5119,143 +5834,124 @@ static void process_dynamic_mode(GaugeLaneInstance *lane,
         if (!dyn->cellValid[cellIndex])
             continue;
 
-        const u8 cellFillIndex = layout->fillIndexByCell[cellIndex];
-        const u8 mappedBaseLaneFillIndex = lane->baseLaneFillIndexByCell[cellIndex];
-        const u8 segmentId = layout->segmentIdByCell[cellIndex];
-        const CellDecisionType baseLaneType =
-            (CellDecisionType)gauge->baseLaneDecisionTypeByFillIndex[mappedBaseLaneFillIndex];
-        const u8 baseLaneIdx = gauge->baseLaneDecisionIdxByFillIndex[mappedBaseLaneFillIndex];
-        const u8 capStartUsesBreak =
-            gauge->baseLaneDecisionCapStartBreakByFillIndex[mappedBaseLaneFillIndex];
-        const u8 capStartUsesTrail =
-            gauge->baseLaneDecisionCapStartTrailByFillIndex[mappedBaseLaneFillIndex];
-        const u8 useBlinkVariant =
-            gauge->baseLaneDecisionUseBlinkVariantByFillIndex[mappedBaseLaneFillIndex];
-        LocalResolvedDecision resolved;
-        resolve_local_decision_for_lane(lane, cellFillIndex, segmentId, baseLaneType, baseLaneIdx,
-                                        capStartUsesBreak, capStartUsesTrail,
-                                        isLinkedLane,
-                                        terminalCtx.terminalOverrideActive,
-                                        terminalCtx.terminalForcedIndex,
-                                        useBlinkVariant, trailMode,
-                                        &stripCache, &resolved);
-
-        CellDecision decision;
-        decision.type = resolved.type;
-        decision.strip = resolved.strip;
-        decision.fillStripIndex = resolved.fillStripIndex;
-        decision.capStartUsesBreak = resolved.capStartUsesBreak;
-        decision.capStartUsesTrail = resolved.capStartUsesTrail;
-        decision.useBlinkVariant = useBlinkVariant;
+        FillLaneCellDecision cellDecision;
+        resolve_fill_lane_cell_decision(lane, &resolveContext, cellIndex, &cellDecision);
 
 #if GAUGE_ENABLE_TRACE
         if (s_traceContext.active)
-            trace_emit_cell_line(cellIndex, segmentId, baseLaneType, baseLaneIdx,
-                                 resolved.terminalOverrideApplied, &decision);
+            trace_emit_cell_line(cellIndex,
+                                 cellDecision.segmentId,
+                                 cellDecision.baseLaneType,
+                                 cellDecision.baseLaneIdx,
+                                 cellDecision.terminalOverrideApplied,
+                                 &cellDecision.decision);
 #endif
 
         /* === VRAM routing: map decision type to VRAM slot + cache === */
         u16 vramTile = 0;
         u8 needsUpload = 0;
 
-        switch (decision.type)
+        switch (cellDecision.decision.type)
         {
         case CELL_DECISION_CAP_END:
             vramTile = dyn->vramTileCapEnd;
-            if (dyn->cachedFillIndexCapEnd != decision.fillStripIndex)
+            if (dyn->cachedFillIndexCapEnd != cellDecision.decision.fillStripIndex)
             {
                 needsUpload = 1;
-                dyn->cachedFillIndexCapEnd = decision.fillStripIndex;
+                dyn->cachedFillIndexCapEnd = cellDecision.decision.fillStripIndex;
             }
             break;
 
         case CELL_DECISION_CAP_START:
             vramTile = dyn->vramTileCapStart;
-            if (dyn->cachedFillIndexCapStart != decision.fillStripIndex ||
-                dyn->loadedCapStartUsesBreak != decision.capStartUsesBreak ||
-                dyn->loadedCapStartUsesTrail != decision.capStartUsesTrail)
+            if (dyn->cachedFillIndexCapStart != cellDecision.decision.fillStripIndex ||
+                dyn->loadedCapStartUsesBreak != cellDecision.decision.capStartUsesBreak ||
+                dyn->loadedCapStartUsesTrail != cellDecision.decision.capStartUsesTrail)
             {
                 needsUpload = 1;
-                dyn->cachedFillIndexCapStart = decision.fillStripIndex;
-                dyn->loadedCapStartUsesBreak = decision.capStartUsesBreak;
-                dyn->loadedCapStartUsesTrail = decision.capStartUsesTrail;
+                dyn->cachedFillIndexCapStart = cellDecision.decision.fillStripIndex;
+                dyn->loadedCapStartUsesBreak = cellDecision.decision.capStartUsesBreak;
+                dyn->loadedCapStartUsesTrail = cellDecision.decision.capStartUsesTrail;
             }
             break;
 
         case CELL_DECISION_BRIDGE:
         {
-            const u16 vramTileBridge = dyn->vramTileBridge[segmentId];
+            const u16 vramTileBridge = dyn->vramTileBridge[cellDecision.segmentId];
             if (vramTileBridge == 0)
                 continue;  /* No VRAM bridge allocated -> skip */
             vramTile = vramTileBridge;
-            if (dyn->cachedFillIndexBridge[segmentId] != decision.fillStripIndex)
+            if (dyn->cachedFillIndexBridge[cellDecision.segmentId] != cellDecision.decision.fillStripIndex)
             {
                 needsUpload = 1;
-                dyn->cachedFillIndexBridge[segmentId] = decision.fillStripIndex;
+                dyn->cachedFillIndexBridge[cellDecision.segmentId] = cellDecision.decision.fillStripIndex;
             }
             break;
         }
 
         case CELL_DECISION_STANDARD_FULL:
-            vramTile = dyn->vramTileFullValue[segmentId];
+            vramTile = dyn->vramTileFullValue[cellDecision.segmentId];
             break;
 
         case CELL_DECISION_STANDARD_EMPTY:
-            vramTile = dyn->vramTileEmpty[segmentId];
+            vramTile = dyn->vramTileEmpty[cellDecision.segmentId];
             break;
 
         case CELL_DECISION_STANDARD_TRAIL:
-            vramTile = dyn->vramTileFullTrail[segmentId];
+            vramTile = dyn->vramTileFullTrail[cellDecision.segmentId];
             break;
 
         case CELL_DECISION_PARTIAL_END:
             vramTile = dyn->vramTilePartialEnd;
-            if (dyn->loadedSegmentPartialEnd != segmentId ||
-                dyn->cachedFillIndexPartialEnd != decision.fillStripIndex)
+            if (dyn->loadedSegmentPartialEnd != cellDecision.segmentId ||
+                dyn->cachedFillIndexPartialEnd != cellDecision.decision.fillStripIndex)
             {
                 needsUpload = 1;
-                dyn->loadedSegmentPartialEnd = segmentId;
-                dyn->cachedFillIndexPartialEnd = decision.fillStripIndex;
+                dyn->loadedSegmentPartialEnd = cellDecision.segmentId;
+                dyn->cachedFillIndexPartialEnd = cellDecision.decision.fillStripIndex;
             }
             break;
 
         case CELL_DECISION_PARTIAL_TRAIL:
             vramTile = dyn->vramTilePartialTrail;
-            if (dyn->loadedSegmentPartialTrail != segmentId ||
-                dyn->cachedFillIndexPartialTrail != decision.fillStripIndex)
+            if (dyn->loadedSegmentPartialTrail != cellDecision.segmentId ||
+                dyn->cachedFillIndexPartialTrail != cellDecision.decision.fillStripIndex)
             {
                 needsUpload = 1;
-                dyn->loadedSegmentPartialTrail = segmentId;
-                dyn->cachedFillIndexPartialTrail = decision.fillStripIndex;
+                dyn->loadedSegmentPartialTrail = cellDecision.segmentId;
+                dyn->cachedFillIndexPartialTrail = cellDecision.decision.fillStripIndex;
             }
             break;
 
         case CELL_DECISION_PARTIAL_TRAIL2:
             vramTile = dyn->vramTilePartialTrailSecond;
-            if (dyn->loadedSegmentPartialTrailSecond != segmentId ||
-                dyn->cachedFillIndexPartialTrailSecond != decision.fillStripIndex)
+            if (dyn->loadedSegmentPartialTrailSecond != cellDecision.segmentId ||
+                dyn->cachedFillIndexPartialTrailSecond != cellDecision.decision.fillStripIndex)
             {
                 needsUpload = 1;
-                dyn->loadedSegmentPartialTrailSecond = segmentId;
-                dyn->cachedFillIndexPartialTrailSecond = decision.fillStripIndex;
+                dyn->loadedSegmentPartialTrailSecond = cellDecision.segmentId;
+                dyn->cachedFillIndexPartialTrailSecond = cellDecision.decision.fillStripIndex;
             }
             break;
 
         case CELL_DECISION_PARTIAL_VALUE:
             vramTile = dyn->vramTilePartialValue;
-            if (dyn->loadedSegmentPartialValue != segmentId ||
-                dyn->cachedFillIndexPartialValue != decision.fillStripIndex)
+            if (dyn->loadedSegmentPartialValue != cellDecision.segmentId ||
+                dyn->cachedFillIndexPartialValue != cellDecision.decision.fillStripIndex)
             {
                 needsUpload = 1;
-                dyn->loadedSegmentPartialValue = segmentId;
-                dyn->cachedFillIndexPartialValue = decision.fillStripIndex;
+                dyn->loadedSegmentPartialValue = cellDecision.segmentId;
+                dyn->cachedFillIndexPartialValue = cellDecision.decision.fillStripIndex;
             }
             break;
         }
 
         /* Upload partial tile if needed */
-        if (needsUpload && decision.strip)
-            upload_fill_tile(decision.strip, decision.fillStripIndex, vramTile, DMA);
+        if (needsUpload && cellDecision.decision.strip)
+            upload_fill_tile(cellDecision.decision.strip,
+                             cellDecision.decision.fillStripIndex,
+                             vramTile,
+                             DMA);
 
         /* Update tilemap only if tile changed (change detection optimization) */
         if (dyn->cellCurrentTileIndex[cellIndex] != vramTile)
@@ -5378,6 +6074,33 @@ static inline u8 resolve_available_pip_state(u8 requestedState,
     }
 }
 
+typedef struct
+{
+    u8 requestedState;
+    u8 resolvedState;
+    u8 stateCount;
+    u16 renderStateIndex;
+} PipResolvedRenderState;
+
+static inline void resolve_pip_render_state(const Gauge *gauge,
+                                            const GaugeLaneInstance *lane,
+                                            const GaugeLaneLayout *layout,
+                                            u8 cellIndex,
+                                            u8 segmentId,
+                                            u8 renderIndex,
+                                            u8 trailMode,
+                                            PipResolvedRenderState *out)
+{
+    const u8 mappedBaseLaneFillIndex = lane->baseLaneFillIndexByCell[cellIndex];
+    out->requestedState = gauge->baseLanePipStateByFillIndex[mappedBaseLaneFillIndex];
+    out->stateCount = layout->pipStateCountBySegment[segmentId];
+    out->resolvedState = resolve_available_pip_state(out->requestedState,
+                                                     out->stateCount,
+                                                     trailMode);
+    out->renderStateIndex =
+        compute_pip_render_state_lut_index(out->resolvedState, renderIndex);
+}
+
 /**
  * PIP-mode renderer: update each cell's tile from compact strip based on pip state.
  *
@@ -5422,18 +6145,21 @@ static void process_pip_mode(GaugeLaneInstance *lane,
             const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
             const u8 segmentId = layout->segmentIdByCell[cellIndex];
             const u16 pipBaseTile = dyn->vramTilePipBase[segmentId];
-            const u8 pipStateCount = layout->pipStateCountBySegment[segmentId];
-            if (pipStateCount < 2)
+            PipResolvedRenderState renderState;
+            resolve_pip_render_state(gauge,
+                                     lane,
+                                     layout,
+                                     cellIndex,
+                                     segmentId,
+                                     renderIndex,
+                                     trailMode,
+                                     &renderState);
+            if (renderState.stateCount < 2)
                 continue;
 
-            const u8 mappedBaseLaneFillIndex = lane->baseLaneFillIndexByCell[cellIndex];
-            const u8 requestedState = gauge->baseLanePipStateByFillIndex[mappedBaseLaneFillIndex];
-            const u8 resolvedState = resolve_available_pip_state(requestedState,
-                                                                 pipStateCount,
-                                                                 trailMode);
-            const u16 renderStateIndex = compute_pip_render_state_lut_index(resolvedState, renderIndex);
-            const u8 stripIndex = layout->pipRenderStripIndexByState[renderStateIndex];
-            const u16 desiredTile = (u16)(pipBaseTile + layout->pipRenderTileOffsetByState[renderStateIndex]);
+            const u8 stripIndex = layout->pipRenderStripIndexByState[renderState.renderStateIndex];
+            const u16 desiredTile =
+                (u16)(pipBaseTile + layout->pipRenderTileOffsetByState[renderState.renderStateIndex]);
             const u8 changed = (dyn->cellCurrentTileIndex[renderIndex] != desiredTile);
 
             if (changed)
@@ -5459,9 +6185,9 @@ static void process_pip_mode(GaugeLaneInstance *lane,
                                      layout->pipTilesetBySegment[segmentId],
                                      stripIndex,
                                      desiredTile,
-                                     requestedState,
-                                     resolvedState,
-                                     pipStateCount,
+                                     renderState.requestedState,
+                                     renderState.resolvedState,
+                                     renderState.stateCount,
                                      changed);
 #endif
         }
@@ -5484,14 +6210,16 @@ static void process_pip_mode(GaugeLaneInstance *lane,
         if (renderIndex == CACHE_INVALID_U8)
             continue;
 
-        const u8 mappedBaseLaneFillIndex = lane->baseLaneFillIndexByCell[cellIndex];
-        const u8 requestedState = gauge->baseLanePipStateByFillIndex[mappedBaseLaneFillIndex];
-        const u8 stateCount = layout->pipStateCountBySegment[segmentId];
-        const u8 pipState = resolve_available_pip_state(requestedState,
-                                                        stateCount,
-                                                        trailMode);
-        const u16 renderStateIndex = compute_pip_render_state_lut_index(pipState, renderIndex);
-        const u8 stripIndex = layout->pipRenderStripIndexByState[renderStateIndex];
+        PipResolvedRenderState renderState;
+        resolve_pip_render_state(gauge,
+                                 lane,
+                                 layout,
+                                 cellIndex,
+                                 segmentId,
+                                 renderIndex,
+                                 trailMode,
+                                 &renderState);
+        const u8 stripIndex = layout->pipRenderStripIndexByState[renderState.renderStateIndex];
         const u8 changed =
             (cell->cachedFillIndex != stripIndex) ||
             (cell->cachedStrip != pipStrip);
@@ -5506,9 +6234,9 @@ static void process_pip_mode(GaugeLaneInstance *lane,
                                  pipStrip,
                                  stripIndex,
                                  cell->vramTileIndex,
-                                 requestedState,
-                                 pipState,
-                                 stateCount,
+                                 renderState.requestedState,
+                                 renderState.resolvedState,
+                                 renderState.stateCount,
                                  changed);
 #endif
     }
@@ -5694,7 +6422,7 @@ static void GaugeLaneInstance_releaseInternal(GaugeLaneInstance *lane)
 
 
 /* =============================================================================
-   Gauge public API
+   Gauge runtime support
    ============================================================================= */
 
 /**
@@ -6005,79 +6733,21 @@ static u16 reproject_trail_pixels_by_ratio(u16 oldTrailPixels,
                   (u32)(oldMaxFillPixels >> 1)) / oldMaxFillPixels);
 }
 
-void Gauge_setMaxValue(Gauge *gauge, u16 newMaxValue)
+static inline void gauge_refresh_value_target_pixels(GaugeLogic *logic)
 {
-    if (!gauge || !gauge->tickAndRenderHandler)
-        return;
-
-    newMaxValue = clamp_max_value_to_capacity(newMaxValue);
-    if (newMaxValue == 0 || newMaxValue == gauge->logic.maxValue)
-        return;
-
-    GaugeLogic *logic = &gauge->logic;
-    const u16 oldMaxFillPixels = logic->maxFillPixels;
-    const u16 oldTrailPixels = logic->trailPixels;
-
-    logic->maxValue = newMaxValue;
-    if (logic->currentValue > newMaxValue)
-        logic->currentValue = newMaxValue;
-    if (logic->criticalValue > newMaxValue)
-        logic->criticalValue = newMaxValue;
-
-    gauge_rebuild_value_to_pixels_lut(gauge);
-    gauge_rebuild_pip_quantize_lut(gauge);
-
     logic->valueTargetPixels = value_to_pixels(logic, logic->currentValue);
     if (logic->valueTargetPixels > logic->maxFillPixels)
         logic->valueTargetPixels = logic->maxFillPixels;
-
-    logic->valuePixels = logic->valueTargetPixels;
-
-    logic->trailPixels = reproject_trail_pixels_by_ratio(oldTrailPixels,
-                                                         oldMaxFillPixels,
-                                                         logic->maxFillPixels);
-    if (logic->trailPixels < logic->valuePixels)
-        logic->trailPixels = logic->valuePixels;
-    if (logic->trailPixels > logic->maxFillPixels)
-        logic->trailPixels = logic->maxFillPixels;
-
-    invalidate_render_cache(logic);
 }
 
-void Gauge_release(Gauge *gauge)
+static inline void gauge_set_current_value_and_target(GaugeLogic *logic,
+                                                      u16 newValue,
+                                                      u8 syncDisplayedValue)
 {
-    if (!gauge)
-        return;
-
-    for (u8 i = 0; i < gauge->laneCount; i++)
-    {
-        GaugeLaneInstance *lane = (gauge->lanes != NULL) ? gauge->lanes[i] : NULL;
-        if (!lane)
-            continue;
-
-        GaugeLaneInstance_releaseInternal(lane);
-        gauge_free_ptr((void **)&lane);
-        gauge->lanes[i] = NULL;
-    }
-
-    gauge_free_ptr((void **)&gauge->lanes);
-    gauge_free_ptr((void **)&gauge->logic.valueToPixelsData);
-    gauge_free_ptr((void **)&gauge->logic.pixelsToQuantizedPixelsLUT);
-
-    for (u8 layoutIndex = 0; layoutIndex < gauge->ownedLayoutCount; layoutIndex++)
-    {
-        GaugeLaneLayout *ownedLayout = gauge->ownedLayouts[layoutIndex];
-        if (!ownedLayout)
-            continue;
-
-        if (ownedLayout->length != 0 || ownedLayout->refCount != 0)
-            GaugeLaneLayout_release(ownedLayout);
-        gauge_free_ptr((void **)&ownedLayout);
-        gauge->ownedLayouts[layoutIndex] = NULL;
-    }
-    gauge->ownedLayoutCount = 0;
-
-    memset(gauge, 0, sizeof(*gauge));
+    logic->currentValue = (newValue > logic->maxValue) ? logic->maxValue : newValue;
+    gauge_refresh_value_target_pixels(logic);
+    if (syncDisplayedValue)
+        logic->valuePixels = logic->valueTargetPixels;
 }
 
 /* =============================================================================
@@ -6103,7 +6773,6 @@ static inline u8 sanitize_palette_index(u8 palette)
 {
     return (u8)(palette & 3);
 }
-
 
 static u8 definition_lane_is_empty(const GaugeLane *lane)
 {
@@ -6249,28 +6918,6 @@ static u8 resolve_lane_palette(const GaugeDefinition *definition,
 
     return sanitize_palette_index(definition->palette);
 }
-
-typedef struct
-{
-    const GaugeLane *lane;
-    u8 laneIndex;
-    u16 originX;
-    u16 originY;
-    u16 fillOffset;
-    u8 palette;
-    u8 length;
-    u8 segmentCount;
-    u8 segmentIdByCell[GAUGE_MAX_LENGTH];
-} GaugeBuildLanePlan;
-
-typedef struct
-{
-    GaugeDefinition sanitizedDefinition;
-    GaugeBuildLanePlan lanePlans[GAUGE_MAX_LANES];
-    GaugeLaneLayout *builtLayouts[GAUGE_MAX_LANES];
-} GaugeBuildScratch;
-
-static GaugeBuildScratch s_buildScratch;
 
 static inline u8 sanitize_vram_mode(u8 vramMode)
 {
@@ -6473,6 +7120,31 @@ static void scan_fill_assets_usage(const GaugeFillAssets *assets,
     usageFlags->capStartTrail |= (capStartTrail != NULL);
 }
 
+static inline const GaugeFillAssets *resolve_fill_assets_for_group(const GaugeFillSkin *skin,
+                                                                   LayoutTilesetGroupId group)
+{
+    if (!skin)
+        return NULL;
+    switch (group)
+    {
+    case LAYOUT_TILESET_GROUP_GAIN:
+        return &skin->gain;
+    case LAYOUT_TILESET_GROUP_BLINK:
+    case LAYOUT_TILESET_GROUP_GAIN_BLINK:
+        return &skin->blinkOff;
+    case LAYOUT_TILESET_GROUP_BASE:
+    default:
+        return &skin->normal;
+    }
+}
+
+static const LayoutTilesetGroupId s_fillTilesetGroups[4] = {
+    LAYOUT_TILESET_GROUP_BASE,
+    LAYOUT_TILESET_GROUP_GAIN,
+    LAYOUT_TILESET_GROUP_BLINK,
+    LAYOUT_TILESET_GROUP_GAIN_BLINK
+};
+
 static void assign_layout_tileset_group_slot(GaugeLaneLayout *layout,
                                              LayoutTilesetGroupId group,
                                              LayoutTilesetSlot slot,
@@ -6534,12 +7206,6 @@ static u8 build_fill_layout_direct(const GaugeDefinition *definition,
         LayoutTilesetGroupId group;
         SkinSetUsageFlags *usageFlags;
     } FillTilesetGroupUsage;
-    static const LayoutTilesetGroupId s_fillTilesetGroups[4] = {
-        LAYOUT_TILESET_GROUP_BASE,
-        LAYOUT_TILESET_GROUP_GAIN,
-        LAYOUT_TILESET_GROUP_BLINK,
-        LAYOUT_TILESET_GROUP_GAIN_BLINK
-    };
     const FillTilesetGroupUsage fillTilesetGroups[4] = {
         { LAYOUT_TILESET_GROUP_BASE, &baseFlags },
         { LAYOUT_TILESET_GROUP_GAIN, &gainFlags },
@@ -6558,17 +7224,11 @@ static u8 build_fill_layout_direct(const GaugeDefinition *definition,
         if (!segment->skin || !segment->skin->fill.normal.body)
             return 0;
 
-        const GaugeFillAssets *fillAssetsByGroup[4] = {
-            &segment->skin->fill.normal,
-            &segment->skin->fill.gain,
-            &segment->skin->fill.blinkOff,
-            &segment->skin->fill.blinkOff
-        };
-
         baseBodyTilesets[segmentIndex] = segment->skin->fill.normal.body->tiles;
         for (u8 groupIndex = 0; groupIndex < 4; groupIndex++)
         {
-            scan_fill_assets_usage(fillAssetsByGroup[groupIndex],
+            scan_fill_assets_usage(resolve_fill_assets_for_group(&segment->skin->fill,
+                                                                 fillTilesetGroups[groupIndex].group),
                                    definition->fixedStartCap,
                                    definition->fixedEndCap,
                                    fillTilesetGroups[groupIndex].usageFlags);
@@ -6604,19 +7264,14 @@ static u8 build_fill_layout_direct(const GaugeDefinition *definition,
     for (u8 segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++)
     {
         const GaugeFillSkin *skin = &lanePlan->lane->segments[segmentIndex].skin->fill;
-        const GaugeFillAssets *fillAssetsByGroup[4] = {
-            &skin->normal,
-            &skin->gain,
-            &skin->blinkOff,
-            &skin->blinkOff
-        };
 
         for (u8 groupIndex = 0; groupIndex < 4; groupIndex++)
         {
             populate_layout_tileset_group_from_fill_assets(layout,
                                                            s_fillTilesetGroups[groupIndex],
                                                            segmentIndex,
-                                                           fillAssetsByGroup[groupIndex],
+                                                           resolve_fill_assets_for_group(skin,
+                                                                                         s_fillTilesetGroups[groupIndex]),
                                                            definition->fixedStartCap,
                                                            definition->fixedEndCap);
         }
@@ -6633,7 +7288,14 @@ static u8 build_pip_layout_direct(const GaugeDefinition *definition,
                                   const GaugeBuildLanePlan *lanePlan,
                                   GaugeLaneLayout *layout)
 {
+    typedef struct {
+        const u32 *tiles;
+        u8 pipWidth, pipHeight, stateCount, coverage;
+        u8 sourceWidth, sourceHeight, halfAxis;
+    } ResolvedPipStyle;
+
     const u8 segmentCount = lanePlan->segmentCount;
+    ResolvedPipStyle resolvedStyles[GAUGE_MAX_SEGMENTS];
     u8 hasPipStyles = 0;
     u8 hasCustomWidths = 0;
     u8 hasCustomHeights = 0;
@@ -6641,6 +7303,8 @@ static u8 build_pip_layout_direct(const GaugeDefinition *definition,
     u8 hasCustomHalfAxis = 0;
     u8 hasCustomSourceWidths = 0;
     u8 hasCustomSourceHeights = 0;
+
+    memset(resolvedStyles, 0, sizeof(resolvedStyles));
 
     GaugeLaneLayout_initEx(layout,
                            lanePlan->length,
@@ -6666,29 +7330,31 @@ static u8 build_pip_layout_direct(const GaugeDefinition *definition,
             return 0;
 
         const GaugePipSkin *pip = &segment->skin->pip;
-        const u8 pipWidth = pip->pipWidth ? pip->pipWidth : 1;
-        const u8 pipHeight = pip->pipHeight ? pip->pipHeight : 1;
-        u8 pipStateCount = 0;
-        u8 sourceWidth = 1;
-        u8 sourceHeight = 1;
-        u8 halfAxis = PIP_HALF_AXIS_HORIZONTAL;
+        ResolvedPipStyle *resolved = &resolvedStyles[segmentIndex];
+        resolved->tiles = pip->tileset ? pip->tileset->tiles : NULL;
+        resolved->pipWidth = pip->pipWidth ? pip->pipWidth : 1;
+        resolved->pipHeight = pip->pipHeight ? pip->pipHeight : 1;
+        resolved->coverage = pip->coverage;
+        resolved->sourceWidth = 1;
+        resolved->sourceHeight = 1;
+        resolved->halfAxis = PIP_HALF_AXIS_HORIZONTAL;
 
         if (!resolve_pip_strip_geometry_from_skin(pip,
-                                                  &pipStateCount,
-                                                  &sourceWidth,
-                                                  &sourceHeight,
-                                                  &halfAxis))
+                                                  &resolved->stateCount,
+                                                  &resolved->sourceWidth,
+                                                  &resolved->sourceHeight,
+                                                  &resolved->halfAxis))
         {
             return 0;
         }
 
         hasPipStyles = 1;
-        hasCustomWidths |= (pipWidth > 1);
-        hasCustomHeights |= (pipHeight > 1);
-        hasCustomCoverage |= (pip->coverage != GAUGE_STRIP_COVERAGE_FULL);
-        hasCustomHalfAxis |= (halfAxis != PIP_HALF_AXIS_HORIZONTAL);
-        hasCustomSourceWidths |= (sourceWidth > 1);
-        hasCustomSourceHeights |= (sourceHeight > 1);
+        hasCustomWidths |= (resolved->pipWidth > 1);
+        hasCustomHeights |= (resolved->pipHeight > 1);
+        hasCustomCoverage |= (resolved->coverage != GAUGE_STRIP_COVERAGE_FULL);
+        hasCustomHalfAxis |= (resolved->halfAxis != PIP_HALF_AXIS_HORIZONTAL);
+        hasCustomSourceWidths |= (resolved->sourceWidth > 1);
+        hasCustomSourceHeights |= (resolved->sourceHeight > 1);
     }
 
     layout_sync_optional_segment_tilesets_by_usage(
@@ -6740,43 +7406,28 @@ static u8 build_pip_layout_direct(const GaugeDefinition *definition,
 
     for (u8 segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++)
     {
-        const GaugePipSkin *pip = &lanePlan->lane->segments[segmentIndex].skin->pip;
-        const u8 pipWidth = pip->pipWidth ? pip->pipWidth : 1;
-        const u8 pipHeight = pip->pipHeight ? pip->pipHeight : 1;
-        u8 pipStateCount = 0;
-        u8 sourceWidth = 1;
-        u8 sourceHeight = 1;
-        u8 halfAxis = PIP_HALF_AXIS_HORIZONTAL;
-        u8 coverage = pip->coverage;
-
-        if (!resolve_pip_strip_geometry_from_skin(pip,
-                                                  &pipStateCount,
-                                                  &sourceWidth,
-                                                  &sourceHeight,
-                                                  &halfAxis))
-        {
-            return 0;
-        }
-
+        const ResolvedPipStyle *resolved = &resolvedStyles[segmentIndex];
+        u8 coverage = resolved->coverage;
         if (coverage > GAUGE_STRIP_COVERAGE_QUARTER)
             coverage = GAUGE_STRIP_COVERAGE_FULL;
 
         if (layout->pipTilesetBySegment != s_nullSegmentTilesets)
-            layout->pipTilesetBySegment[segmentIndex] = pip->tileset->tiles;
+            layout->pipTilesetBySegment[segmentIndex] = resolved->tiles;
         if (layout->pipWidthBySegment != s_oneSegmentFlags)
-            layout->pipWidthBySegment[segmentIndex] = pipWidth;
+            layout->pipWidthBySegment[segmentIndex] = resolved->pipWidth;
         if (layout->pipHeightBySegment != s_oneSegmentFlags)
-            layout->pipHeightBySegment[segmentIndex] = (pipHeight > 4) ? 4 : pipHeight;
+            layout->pipHeightBySegment[segmentIndex] =
+                (resolved->pipHeight > 4) ? 4 : resolved->pipHeight;
         if (layout->pipStateCountBySegment != s_zeroSegmentFlags)
-            layout->pipStateCountBySegment[segmentIndex] = pipStateCount;
+            layout->pipStateCountBySegment[segmentIndex] = resolved->stateCount;
         if (layout->pipStripCoverageBySegment != s_zeroSegmentFlags)
             layout->pipStripCoverageBySegment[segmentIndex] = coverage;
         if (layout->pipHalfAxisBySegment != s_zeroSegmentFlags)
-            layout->pipHalfAxisBySegment[segmentIndex] = halfAxis;
+            layout->pipHalfAxisBySegment[segmentIndex] = resolved->halfAxis;
         if (layout->pipSourceWidthBySegment != s_oneSegmentFlags)
-            layout->pipSourceWidthBySegment[segmentIndex] = sourceWidth;
+            layout->pipSourceWidthBySegment[segmentIndex] = resolved->sourceWidth;
         if (layout->pipSourceHeightBySegment != s_oneSegmentFlags)
-            layout->pipSourceHeightBySegment[segmentIndex] = sourceHeight;
+            layout->pipSourceHeightBySegment[segmentIndex] = resolved->sourceHeight;
     }
 
     finalize_layout_derived_state(layout);
@@ -6852,211 +7503,6 @@ static u8 build_layout_from_lane_plan(const GaugeDefinition *definition,
         GaugeLaneLayout_setFillOffset(layout, lanePlan->fillOffset);
 
     *outLayout = layout;
-    return 1;
-}
-
-u8 Gauge_build(Gauge *gauge,
-               const GaugeDefinition *definition,
-               u16 vramBase)
-{
-    if (!gauge || !definition)
-        return 0;
-    if (!gauge_is_zeroed(gauge))
-        return 0;
-
-    memset(&s_buildScratch, 0, sizeof(s_buildScratch));
-    GaugeDefinition *sanitized = &s_buildScratch.sanitizedDefinition;
-    *sanitized = *definition;
-    sanitized->mode = (GaugeMode)sanitize_value_mode((u8)sanitized->mode);
-    sanitized->orientation = (GaugeOrientation)sanitize_orientation((u8)sanitized->orientation);
-    sanitized->fillDirection = (GaugeFillDirection)sanitize_fill_direction((u8)sanitized->fillDirection);
-    sanitized->vramMode = (GaugeVramMode)sanitize_vram_mode((u8)sanitized->vramMode);
-    sanitized->palette = sanitize_palette_index(sanitized->palette);
-    sanitized->priority = sanitized->priority ? 1 : 0;
-    sanitized->verticalFlip = sanitized->verticalFlip ? 1 : 0;
-    sanitized->horizontalFlip = sanitized->horizontalFlip ? 1 : 0;
-    sanitized->fixedStartCap = sanitized->fixedStartCap ? 1 : 0;
-    sanitized->fixedEndCap = sanitized->fixedEndCap ? 1 : 0;
-    if (sanitized->maxValue > GAUGE_LUT_CAPACITY)
-        sanitized->maxValue = GAUGE_LUT_CAPACITY;
-
-    u8 baseLaneIndex = 0;
-    if (!find_baseLane_index(sanitized, &baseLaneIndex))
-        return 0;
-
-    const GaugeLane *baseLane = &sanitized->lanes[baseLaneIndex];
-    GaugeBuildLanePlan *lanePlans = s_buildScratch.lanePlans;
-    GaugeLaneLayout **builtLayouts = s_buildScratch.builtLayouts;
-    u8 laneCount = 0;
-    u8 longestLaneLength = 0;
-
-    for (u8 laneIndex = 0; laneIndex < GAUGE_MAX_LANES; laneIndex++)
-    {
-        const GaugeLane *lane = &sanitized->lanes[laneIndex];
-        if (definition_lane_is_empty(lane))
-            continue;
-
-        if (laneCount >= GAUGE_MAX_LANES)
-        {
-            release_built_layouts(builtLayouts);
-            return 0;
-        }
-
-        if (!build_lane_plan(sanitized,
-                             laneIndex,
-                             lane,
-                             baseLane,
-                             &lanePlans[laneCount]))
-        {
-            release_built_layouts(builtLayouts);
-            return 0;
-        }
-
-        if (lanePlans[laneCount].length > longestLaneLength)
-            longestLaneLength = lanePlans[laneCount].length;
-
-        laneCount++;
-    }
-
-    if (laneCount == 0)
-        return 0;
-
-    for (u8 laneIndex = 0; laneIndex < laneCount; laneIndex++)
-    {
-        if (!build_layout_from_lane_plan(sanitized,
-                                         &lanePlans[laneIndex],
-                                         &builtLayouts[laneIndex]))
-        {
-            release_built_layouts(builtLayouts);
-            return 0;
-        }
-    }
-
-    u8 baseLaneRuntimeIndex = CACHE_INVALID_U8;
-    for (u8 laneIndex = 0; laneIndex < laneCount; laneIndex++)
-    {
-        if (lanePlans[laneIndex].laneIndex == baseLaneIndex)
-        {
-            baseLaneRuntimeIndex = laneIndex;
-            break;
-        }
-    }
-
-    if (baseLaneRuntimeIndex == CACHE_INVALID_U8)
-    {
-        release_built_layouts(builtLayouts);
-        return 0;
-    }
-
-    GaugeLaneLayout *baseLayout = builtLayouts[baseLaneRuntimeIndex];
-    const u16 maxFillPixels = (sanitized->mode == GAUGE_MODE_PIP)
-        ? compute_pip_total_pixels(baseLayout)
-        : (u16)(baseLayout->length << TILE_TO_PIXEL_SHIFT);
-
-    u16 resolvedMaxValue = sanitized->maxValue;
-    if (resolvedMaxValue == 0)
-    {
-        resolvedMaxValue = (sanitized->mode == GAUGE_MODE_PIP)
-            ? baseLayout->pipCount
-            : (u16)(longestLaneLength << TILE_TO_PIXEL_SHIFT);
-    }
-    resolvedMaxValue = clamp_max_value_to_capacity(resolvedMaxValue);
-
-    if (maxFillPixels == 0 || resolvedMaxValue == 0)
-    {
-        release_built_layouts(builtLayouts);
-        return 0;
-    }
-
-    GaugeLaneInstance **lanes = (GaugeLaneInstance **)gauge_alloc_bytes(
-        (u16)(laneCount * (u8)sizeof(GaugeLaneInstance *)));
-    if (!lanes)
-    {
-        release_built_layouts(builtLayouts);
-        return 0;
-    }
-
-    u16 *valueToPixelsData = (u16 *)gauge_alloc_bytes(
-        (u16)((GAUGE_LUT_CAPACITY + 1) * (u8)sizeof(u16)));
-    if (!valueToPixelsData)
-    {
-        gauge_free_ptr((void **)&lanes);
-        release_built_layouts(builtLayouts);
-        return 0;
-    }
-
-    const GaugeValueMode valueMode = (GaugeValueMode)sanitized->mode;
-    const u16 *valueToPixelsLUT = NULL;
-    if (valueMode == GAUGE_VALUE_MODE_PIP)
-    {
-        fill_pip_value_lut(valueToPixelsData, resolvedMaxValue, baseLayout);
-        valueToPixelsLUT = valueToPixelsData;
-    }
-    else
-    {
-        fill_value_to_pixels_lut(valueToPixelsData, resolvedMaxValue, maxFillPixels);
-        if (resolvedMaxValue != maxFillPixels)
-            valueToPixelsLUT = valueToPixelsData;
-    }
-
-    gauge->lanes = lanes;
-    gauge->laneCount = laneCount;
-    gauge->baseLaneIndex = baseLaneRuntimeIndex;
-    gauge->baseLaneHasBridge = gauge_layout_has_bridge(baseLayout);
-    gauge->baseLaneSpanPixels = maxFillPixels;
-    gauge->ownedLayoutCount = laneCount;
-    gauge->tickAndRenderHandler = resolve_tick_and_render_handler(valueMode);
-    gauge->valueMode = valueMode;
-    gauge->vramNextOffset = 0;
-    gauge->logic.valueToPixelsData = valueToPixelsData;
-    for (u8 laneIndex = 0; laneIndex < laneCount; laneIndex++)
-        gauge->ownedLayouts[laneIndex] = builtLayouts[laneIndex];
-
-    GaugeLogic_init(&gauge->logic,
-                    resolvedMaxValue,
-                    maxFillPixels,
-                    valueToPixelsLUT,
-                    resolvedMaxValue);
-    gauge->logic.valueToPixelsData = valueToPixelsData;
-    gauge_rebuild_pip_quantize_lut(gauge);
-    gauge_apply_behavior_from_definition(gauge, &sanitized->behavior);
-
-    u16 nextVram = vramBase;
-    for (u8 laneIndex = 0; laneIndex < laneCount; laneIndex++)
-    {
-        const u16 vramSize = compute_vram_size_for_layout(builtLayouts[laneIndex],
-                                                          sanitized->vramMode,
-                                                          gauge->logic.trailEnabled,
-                                                          valueMode);
-        GaugeLaneInstance *lane = (GaugeLaneInstance *)gauge_alloc_bytes((u16)sizeof(GaugeLaneInstance));
-        if (!lane)
-        {
-            Gauge_release(gauge);
-            return 0;
-        }
-
-        if (!GaugeLaneInstance_initInternal(lane,
-                                            gauge,
-                                            builtLayouts[laneIndex],
-                                            lanePlans[laneIndex].originX,
-                                            lanePlans[laneIndex].originY,
-                                            nextVram,
-                                            sanitized->vramMode))
-        {
-            gauge_free_ptr((void **)&lane);
-            Gauge_release(gauge);
-            return 0;
-        }
-
-        gauge->lanes[laneIndex] = lane;
-        gauge->vramNextOffset = (u16)(gauge->vramNextOffset + vramSize);
-        nextVram = (u16)(nextVram + vramSize);
-    }
-
-    build_base_lane_projection_maps(gauge);
-
-    DMA_flushQueue();
-
     return 1;
 }
 
@@ -7153,6 +7599,74 @@ static inline u8 compute_pip_blink_off_active(const GaugeLogic *logic,
     return 0;
 }
 
+typedef struct
+{
+    BlinkState blinkState;
+    u16 valuePixelsRaw;
+    u16 trailPixelsRaw;
+    u16 valuePixels;
+    u16 trailPixelsRendered;
+    u16 trailPixelsActual;
+    u16 valueTargetForEarlyReturn;
+    u8 blinkOffActive;
+} GaugeRenderFrame;
+
+static inline u8 gauge_prepare_frame_common(Gauge *gauge,
+                                            GaugeRenderFrame *frame)
+{
+    GaugeLogic *logic = &gauge->logic;
+
+    if (!logic->needUpdate)
+        return 0;
+
+    if (gauge->logicTickHandler)
+        gauge->logicTickHandler(logic);
+
+    frame->valuePixelsRaw = logic->valuePixels;
+    frame->trailPixelsRaw = logic->trailPixels;
+    if (frame->trailPixelsRaw < frame->valuePixelsRaw)
+        frame->trailPixelsRaw = frame->valuePixelsRaw;
+
+    frame->blinkState = compute_blink_state(logic);
+    return 1;
+}
+
+static void gauge_render_prepared_frame(Gauge *gauge,
+                                        const GaugeRenderFrame *frame)
+{
+#if GAUGE_ENABLE_TRACE
+    trace_begin_frame(gauge,
+                      frame->valuePixels,
+                      frame->trailPixelsRendered,
+                      frame->trailPixelsActual,
+                      frame->blinkState.trailMode,
+                      frame->blinkOffActive);
+#endif
+
+    u8 laneIndex = gauge->laneCount;
+    while (laneIndex--)
+    {
+        GaugeLaneInstance *lane = gauge->lanes[laneIndex];
+        if (!lane)
+            continue;
+#if GAUGE_ENABLE_TRACE
+        trace_set_lane_index(laneIndex);
+#endif
+        lane->renderHandler(lane,
+                            frame->valuePixels,
+                            frame->trailPixelsRendered,
+                            frame->trailPixelsActual,
+                            frame->blinkOffActive,
+                            frame->blinkState.blinkOnChanged,
+                            frame->blinkState.trailMode,
+                            frame->blinkState.trailModeChanged);
+    }
+
+#if GAUGE_ENABLE_TRACE
+    trace_end_frame();
+#endif
+}
+
 /**
  * Update render cache, check for early return, and detect idle state.
  *
@@ -7206,76 +7720,54 @@ static inline u8 update_render_cache_and_check(
     return 0;
 }
 
+static inline void gauge_prepare_fill_frame(const GaugeLogic *logic,
+                                            GaugeRenderFrame *frame)
+{
+    const BlinkState *blinkState = &frame->blinkState;
+
+    frame->valuePixels = frame->valuePixelsRaw;
+    frame->trailPixelsRendered = blinkState->blinkOn
+        ? frame->trailPixelsRaw
+        : frame->valuePixelsRaw;
+    frame->trailPixelsActual = frame->trailPixelsRaw;
+    frame->valueTargetForEarlyReturn = logic->valueTargetPixels;
+    frame->blinkOffActive = blinkState->blinkOffActive;
+
+    if (blinkState->useValueBlinkRendering && !blinkState->blinkOn)
+    {
+        frame->valuePixels = 0;
+        frame->trailPixelsRendered = frame->valuePixelsRaw;
+        frame->trailPixelsActual = frame->valuePixelsRaw;
+        frame->valueTargetForEarlyReturn = 0;
+    }
+}
+
 static void gauge_tick_and_render_fill(Gauge *gauge)
 {
+    GaugeRenderFrame frame;
     GaugeLogic *logic = &gauge->logic;
 
-    /* Skip entirely when gauge is idle (no animations, no pending render).
-     * Cost: ~8 cycles (load byte + branch) vs ~70-90 cycles for the full path. */
-    if (!logic->needUpdate) return;
-
-    /* Tick logic state machine */
-    if (gauge->logicTickHandler)
-        gauge->logicTickHandler(logic);
-    
-    /* --- Compute current render state --- */
-    const u16 valuePixelsRaw = logic->valuePixels;
-
-    /* Compute trail with blink effect.
-     * trailPixels = actual trail position (clamped to at least valuePixels).
-     * trailPixelsRendered = what the render loop uses:
-     *   - blinkOn=1 -> show trail normally (trailPixels)
-     *   - blinkOn=0 -> hide trail by collapsing it to valuePixels */
-    u16 trailPixelsRaw = logic->trailPixels;
-    if (trailPixelsRaw < valuePixelsRaw)
-        trailPixelsRaw = valuePixelsRaw;
-
-    const BlinkState bs = compute_blink_state(logic);
-    u16 valuePixels = valuePixelsRaw;
-    u16 trailPixelsRendered = bs.blinkOn ? trailPixelsRaw : valuePixelsRaw;
-    u16 trailPixelsActual = trailPixelsRaw;
-    u16 valueTargetForEarlyReturn = logic->valueTargetPixels;
-
-    if (bs.useValueBlinkRendering && !bs.blinkOn)
-    {
-        valuePixels = 0;
-        trailPixelsRendered = valuePixelsRaw;
-        trailPixelsActual = valuePixelsRaw;
-        valueTargetForEarlyReturn = 0;
-    }
-
-    if (update_render_cache_and_check(logic, valuePixels, trailPixelsRendered,
-                                       &bs, valueTargetForEarlyReturn,
-                                       valuePixelsRaw, trailPixelsRaw))
+    if (!gauge_prepare_frame_common(gauge, &frame))
         return;
 
-    gauge_build_baseLane_fill_decisions(gauge, valuePixels, trailPixelsRendered,
-                                      trailPixelsActual, bs.blinkOffActive,
-                                      bs.trailMode);
+    gauge_prepare_fill_frame(logic, &frame);
 
-#if GAUGE_ENABLE_TRACE
-    trace_begin_frame(gauge, valuePixels, trailPixelsRendered, trailPixelsActual,
-                      bs.trailMode, bs.blinkOffActive);
-#endif
+    if (update_render_cache_and_check(logic,
+                                      frame.valuePixels,
+                                      frame.trailPixelsRendered,
+                                      &frame.blinkState,
+                                      frame.valueTargetForEarlyReturn,
+                                      frame.valuePixelsRaw,
+                                      frame.trailPixelsRaw))
+        return;
 
-    /* --- Render all lanes (countdown: 68000 dbra optimization) --- */
-    u8 i = gauge->laneCount;
-    while (i--)
-    {
-        GaugeLaneInstance *lane = gauge->lanes[i];
-        if (!lane)
-            continue;
-#if GAUGE_ENABLE_TRACE
-        trace_set_lane_index(i);
-#endif
-        lane->renderHandler(lane, valuePixels, trailPixelsRendered, trailPixelsActual,
-                            bs.blinkOffActive, bs.blinkOnChanged,
-                            bs.trailMode, bs.trailModeChanged);
-    }
-
-#if GAUGE_ENABLE_TRACE
-    trace_end_frame();
-#endif
+    gauge_build_baseLane_fill_decisions(gauge,
+                                        frame.valuePixels,
+                                        frame.trailPixelsRendered,
+                                        frame.trailPixelsActual,
+                                        frame.blinkOffActive,
+                                        frame.blinkState.trailMode);
+    gauge_render_prepared_frame(gauge, &frame);
 }
 
 /**
@@ -7313,6 +7805,36 @@ static inline u16 quantize_pixels_to_pip_step(const GaugeLogic *logic, u16 pixel
     return lut[value];
 }
 
+static inline void gauge_prepare_pip_frame(const GaugeLogic *logic,
+                                           GaugeRenderFrame *frame)
+{
+    const BlinkState *blinkState = &frame->blinkState;
+    const u16 valuePixelsQuantized =
+        quantize_pixels_to_pip_step(logic, frame->valuePixelsRaw);
+    u16 trailPixels =
+        quantize_pixels_to_pip_step(logic, frame->trailPixelsRaw);
+
+    if (trailPixels < valuePixelsQuantized)
+        trailPixels = valuePixelsQuantized;
+
+    frame->valuePixels = valuePixelsQuantized;
+    frame->trailPixelsRendered = blinkState->blinkOn
+        ? trailPixels
+        : valuePixelsQuantized;
+    frame->trailPixelsActual = trailPixels;
+    frame->valueTargetForEarlyReturn =
+        quantize_pixels_to_pip_step(logic, logic->valueTargetPixels);
+    frame->blinkOffActive = compute_pip_blink_off_active(logic, blinkState);
+
+    if (blinkState->useValueBlinkRendering && blinkState->blinkOn)
+    {
+        frame->valuePixels = 0;
+        frame->trailPixelsRendered = valuePixelsQuantized;
+        frame->trailPixelsActual = valuePixelsQuantized;
+        frame->valueTargetForEarlyReturn = 0;
+    }
+}
+
 /**
  * PIP-mode update path: tick logic + render all lanes.
  *
@@ -7323,229 +7845,31 @@ static inline u16 quantize_pixels_to_pip_step(const GaugeLogic *logic, u16 pixel
  */
 static void gauge_tick_and_render_pip(Gauge *gauge)
 {
+    GaugeRenderFrame frame;
     GaugeLogic *logic = &gauge->logic;
 
-    /* Skip entirely when gauge is idle (no animations, no pending render). */
-    if (!logic->needUpdate) return;
-
-    /* Tick logic state machine (shared with FILL mode). */
-    if (gauge->logicTickHandler)
-        gauge->logicTickHandler(logic);
-
-    /* --- Compute current render state (quantized to pip steps) --- */
-    const u16 valuePixelsRaw = logic->valuePixels;
-    u16 trailPixelsRaw = logic->trailPixels;
-    if (trailPixelsRaw < valuePixelsRaw)
-        trailPixelsRaw = valuePixelsRaw;
-
-    const BlinkState bs = compute_blink_state(logic);
-
-    const u16 valuePixelsQuantized = quantize_pixels_to_pip_step(logic, valuePixelsRaw);
-    u16 trailPixels = quantize_pixels_to_pip_step(logic, trailPixelsRaw);
-    if (trailPixels < valuePixelsQuantized)
-        trailPixels = valuePixelsQuantized;
-
-    u16 valuePixels = valuePixelsQuantized;
-    u16 trailPixelsRendered = bs.blinkOn ? trailPixels : valuePixelsQuantized;
-    u16 trailPixelsActual = trailPixels;
-    u16 valueTargetPixels = quantize_pixels_to_pip_step(logic, logic->valueTargetPixels);
-    const u8 pipBlinkOffActive = compute_pip_blink_off_active(logic, &bs);
-
-    if (bs.useValueBlinkRendering && bs.blinkOn)
-    {
-        valuePixels = 0;
-        trailPixelsRendered = valuePixelsQuantized;
-        trailPixelsActual = valuePixelsQuantized;
-        valueTargetPixels = 0;
-    }
-
-    if (update_render_cache_and_check(logic, valuePixels, trailPixelsRendered,
-                                       &bs, valueTargetPixels,
-                                       valuePixelsRaw, trailPixelsRaw))
+    if (!gauge_prepare_frame_common(gauge, &frame))
         return;
 
-    gauge_build_baseLane_pip_states(gauge, valuePixels, trailPixelsRendered,
-                                  trailPixelsActual, pipBlinkOffActive,
-                                  bs.trailMode);
+    gauge_prepare_pip_frame(logic, &frame);
 
-#if GAUGE_ENABLE_TRACE
-    trace_begin_frame(gauge, valuePixels, trailPixelsRendered, trailPixelsActual,
-                      bs.trailMode, pipBlinkOffActive);
-#endif
+    if (update_render_cache_and_check(logic,
+                                      frame.valuePixels,
+                                      frame.trailPixelsRendered,
+                                      &frame.blinkState,
+                                      frame.valueTargetForEarlyReturn,
+                                      frame.valuePixelsRaw,
+                                      frame.trailPixelsRaw))
+        return;
 
-    /* --- Render all lanes --- */
-    u8 i = gauge->laneCount;
-    while (i--)
-    {
-        GaugeLaneInstance *lane = gauge->lanes[i];
-        if (!lane)
-            continue;
-#if GAUGE_ENABLE_TRACE
-        trace_set_lane_index(i);
-#endif
-        lane->renderHandler(lane, valuePixels, trailPixelsRendered, trailPixelsActual,
-                            pipBlinkOffActive, bs.blinkOnChanged,
-                            bs.trailMode, bs.trailModeChanged);
-    }
-
-#if GAUGE_ENABLE_TRACE
-    trace_end_frame();
-#endif
+    gauge_build_baseLane_pip_states(gauge,
+                                    frame.valuePixels,
+                                    frame.trailPixelsRendered,
+                                    frame.trailPixelsActual,
+                                    frame.blinkOffActive,
+                                    frame.blinkState.trailMode);
+    gauge_render_prepared_frame(gauge, &frame);
 }
-
-/** Update gauge: tick logic + render all lanes. Call once per frame. */
-void Gauge_update(Gauge *gauge)
-{
-    if (!gauge || !gauge->tickAndRenderHandler)
-        return;
-
-    gauge->tickAndRenderHandler(gauge);
-}
-
-/** Set gauge value instantly (no trail, no animation). Resets all trail state. */
-void Gauge_setValue(Gauge *gauge, u16 newValue)
-{
-    if (!gauge)
-        return;
-
-    GaugeLogic *logic = &gauge->logic;
-    logic->needUpdate = 1;
-
-    logic->currentValue = (newValue > logic->maxValue) ? logic->maxValue : newValue;
-    logic->valueTargetPixels = value_to_pixels(logic, logic->currentValue);
-
-    if (logic->valueTargetPixels > logic->maxFillPixels)
-        logic->valueTargetPixels = logic->maxFillPixels;
-
-    logic->valuePixels = logic->valueTargetPixels;
-    apply_configured_trail_mode_state(logic, 0);
-}
-
-/**
- * Decrease gauge value (damage).
- *
- * FOLLOW mode:
- *   Trail holds at the previous position for holdFrames, then blinks for
- *   blinkFrames, then shrinks toward the new value.
- *
- * Other modes:
- *   Decrease applies their configured immediate behavior
- *   (disabled/static/critical).
- */
-void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
-{
-    if (!gauge)
-        return;
-
-    GaugeLogic *logic = &gauge->logic;
-    logic->needUpdate = 1;
-
-    /* Update value */
-    logic->currentValue = (logic->currentValue > amount) ? (logic->currentValue - amount) : 0;
-    logic->valueTargetPixels = value_to_pixels(logic, logic->currentValue);
-
-    if (logic->valueTargetPixels > logic->maxFillPixels)
-        logic->valueTargetPixels = logic->maxFillPixels;
-
-    /* Instant value change if animation disabled */
-    if (!logic->valueAnimEnabled)
-        logic->valuePixels = logic->valueTargetPixels;
-
-    if (gauge->logicTickHandler != GaugeLogic_tick_follow_mode)
-    {
-        apply_non_follow_trail_mode_state(logic, 0);
-        return;
-    }
-
-    /* Trail anchors at the currently displayed value (not the new target).
-     * This creates the visual "damage gap" between trail and value.
-     * Uses valuePixels (animated position) so the trail doesn't jump ahead
-     * if a previous animation is still in progress.
-     * If switching from GAIN mode, reset trail from the target to current. */
-    const u16 previousDisplayedValuePixels = logic->valuePixels;
-    if (logic->activeTrailState == GAUGE_TRAIL_STATE_GAIN)
-    {
-        logic->trailPixels = previousDisplayedValuePixels;
-    }
-    else if (logic->trailPixels < previousDisplayedValuePixels)
-    {
-        logic->trailPixels = previousDisplayedValuePixels;
-    }
-
-    /* Start hold/blink sequence */
-    logic->holdFramesRemaining = holdFrames;
-    logic->blinkFramesRemaining = blinkFrames;
-    logic->blinkTimer = 0;
-    logic->activeTrailState = GAUGE_TRAIL_STATE_DAMAGE;
-}
-
-/**
- * Increase gauge value (heal).
- *
- * Gain mode FOLLOW:
- *   If value animation is enabled, triggers gain trail:
- *   trail jumps to target, holds, blinks, then value catches up.
- *
- * Other gain modes:
- *   Increase falls back to the configured damage-mode visual state.
- */
-void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
-{
-    if (!gauge)
-        return;
-
-    GaugeLogic *logic = &gauge->logic;
-    logic->needUpdate = 1;
-
-    /* Update value (with overflow protection) */
-    if (logic->currentValue + amount > logic->maxValue)
-        logic->currentValue = logic->maxValue;
-    else
-        logic->currentValue = (u16)(logic->currentValue + amount);
-
-    logic->valueTargetPixels = value_to_pixels(logic, logic->currentValue);
-
-    if (logic->valueTargetPixels > logic->maxFillPixels)
-        logic->valueTargetPixels = logic->maxFillPixels;
-
-    /* Instant value change if animation disabled */
-    if (!logic->valueAnimEnabled)
-        logic->valuePixels = logic->valueTargetPixels;
-
-    if ((GaugeGainMode)logic->configuredGainMode == GAUGE_GAIN_MODE_FOLLOW &&
-        logic->valueAnimEnabled)
-    {
-        /* Gain trail: trail leads, value catches up after hold/blink */
-        logic->trailPixels = logic->valueTargetPixels;
-        logic->holdFramesRemaining = holdFrames;
-        logic->blinkFramesRemaining = blinkFrames;
-        logic->blinkTimer = 0;
-        logic->activeTrailState = GAUGE_TRAIL_STATE_GAIN;
-        return;
-    }
-
-    if ((GaugeTrailMode)logic->configuredTrailMode == GAUGE_TRAIL_MODE_FOLLOW)
-    {
-        /* No gain behavior: trail follows value immediately. */
-        logic->trailPixels = logic->valuePixels;
-        logic->holdFramesRemaining = 0;
-        logic->blinkFramesRemaining = 0;
-        logic->blinkTimer = 0;
-        logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
-    }
-    else
-    {
-        /* Non-follow damage mode keeps its own visual contract. */
-        apply_non_follow_trail_mode_state(logic, 0);
-    }
-}
-
-u16 Gauge_getValue(const Gauge *gauge)
-{
-    return gauge ? gauge->logic.currentValue : 0;
-}
-
-
 /* =============================================================================
    Utility functions
    ============================================================================= */
