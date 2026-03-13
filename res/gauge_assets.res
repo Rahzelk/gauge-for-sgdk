@@ -1,3 +1,5 @@
+SPRITE menu_cursor_sprite "menu-cursor.png" 1 1 NONE
+
 
 #=============================================================================
 #   ROM ASSETS ORDERING (45 tiles per segment per lane)
@@ -35,9 +37,6 @@ TILESET gauge_v_straight_yellow_strip "tilesets/gauge_v_straight_yellow_strip.pn
 TILESET gauge_v_straight_yellow_strip_gain "tilesets/gauge_v_straight_yellow_strip_gain.png" NONE NONE
 TILESET gauge_v_straight_yellow_strip_blinkoff "tilesets/gauge_v_straight_yellow_strip_blinkoff.png" NONE NONE
 TILESET gauge_h_straight_small_blue_strip "tilesets/gauge_h_straight_small_blue_strip.png" NONE NONE
-SPRITE menu_cursor_sprite "tilesets/menu-cursor.png" 1 1 NONE
-
-
 
 
 TILESET gauge_h_bevel_yellow_strip_trail "tilesets/gauge_h_bevel_yellow_strip_trail.png" NONE NONE
