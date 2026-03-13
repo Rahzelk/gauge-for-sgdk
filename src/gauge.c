@@ -2733,29 +2733,240 @@ static inline void compute_cell_decision(const GaugeLaneLayout *layout,
 }
 
 
-/**
- * Upload a tile from a ROM strip to VRAM if not already cached (fixed mode).
- *
- * Compares the desired strip and tile index against the cell's cache.
- * If different, queues a DMA transfer and updates the cache.
- *
- * @param cell            Stream cell with VRAM address and cache
- * @param wantedStrip     ROM strip to read from (NULL = skip)
- * @param desiredStripIdx Tile index within the strip (0..44 for 45-tile, 0..63 for 64-tile)
- */
-static inline void upload_cell_if_needed(GaugeStreamCell *cell,
-                                         const u32 *wantedStrip,
-                                         u8 desiredStripIdx)
+typedef struct
 {
-    if (!wantedStrip) return;
-    if (cell->cachedFillIndex == desiredStripIdx &&
-        cell->cachedStrip == wantedStrip)
+    u16 basetile;
+    u16 firstX;
+    u16 firstY;
+    u16 lastX;
+    u16 lastY;
+    u16 tiles[GAUGE_MAX_LENGTH];
+    u8 length;
+    u8 active;
+} GaugeTilemapSpan;
+
+typedef struct
+{
+    const u32 *strip;
+    u16 startVramTile;
+    u16 lastVramTile;
+    u8 startStripIndex;
+    u8 lastStripIndex;
+    u8 length;
+    u8 active;
+} GaugeTileUploadSpan;
+
+static inline void tilemap_span_reset(GaugeTilemapSpan *span)
+{
+    span->active = 0;
+    span->length = 0;
+    span->basetile = 0;
+    span->firstX = 0;
+    span->firstY = 0;
+    span->lastX = 0;
+    span->lastY = 0;
+}
+
+static inline void tilemap_span_begin(GaugeTilemapSpan *span,
+                                      u16 basetile,
+                                      u16 x,
+                                      u16 y,
+                                      u16 tileIndex)
+{
+    span->active = 1;
+    span->length = 1;
+    span->basetile = basetile;
+    span->firstX = x;
+    span->firstY = y;
+    span->lastX = x;
+    span->lastY = y;
+    span->tiles[0] = tileIndex;
+}
+
+static inline u8 tilemap_span_can_append(const GaugeTilemapSpan *span,
+                                         u8 orientation,
+                                         u16 basetile,
+                                         u16 x,
+                                         u16 y)
+{
+    if (!span->active)
+        return 1;
+    if (span->basetile != basetile || span->length >= GAUGE_MAX_LENGTH)
+        return 0;
+
+    if (orientation == GAUGE_ORIENT_HORIZONTAL)
+        return (y == span->firstY) && (x == (u16)(span->lastX + 1));
+
+    return (x == span->firstX) && ((u16)(y + 1) == span->lastY);
+}
+
+static inline void tilemap_span_append(GaugeTilemapSpan *span,
+                                       u16 x,
+                                       u16 y,
+                                       u16 tileIndex)
+{
+    span->tiles[span->length] = tileIndex;
+    span->length++;
+    span->lastX = x;
+    span->lastY = y;
+}
+
+static inline void tilemap_span_push(GaugeTilemapSpan *span,
+                                     u8 orientation,
+                                     u16 basetile,
+                                     u16 x,
+                                     u16 y,
+                                     u16 tileIndex)
+{
+    if (!tilemap_span_can_append(span, orientation, basetile, x, y))
+    {
+        u16 reversedTiles[GAUGE_MAX_LENGTH];
+        if (orientation == GAUGE_ORIENT_HORIZONTAL)
+        {
+            VDP_setTileMapDataRowEx(WINDOW,
+                                    span->tiles,
+                                    span->basetile,
+                                    span->firstY,
+                                    span->firstX,
+                                    span->length,
+                                    DMA_QUEUE);
+        }
+        else
+        {
+            for (u8 i = 0; i < span->length; i++)
+                reversedTiles[i] = span->tiles[(u8)(span->length - 1 - i)];
+
+            VDP_setTileMapDataColumnEx(WINDOW,
+                                       reversedTiles,
+                                       span->basetile,
+                                       span->firstX,
+                                       span->lastY,
+                                       span->length,
+                                       1,
+                                       DMA_QUEUE);
+        }
+
+        tilemap_span_reset(span);
+    }
+
+    if (!span->active)
+        tilemap_span_begin(span, basetile, x, y, tileIndex);
+    else
+        tilemap_span_append(span, x, y, tileIndex);
+}
+
+static inline void tilemap_span_flush(GaugeTilemapSpan *span, u8 orientation)
+{
+    if (!span->active)
         return;
 
-    const u32 *src = wantedStrip + FILL_IDX_TO_OFFSET(desiredStripIdx);
-    VDP_loadTileData(src, cell->vramTileIndex, 1, DMA_QUEUE);
-    cell->cachedFillIndex = desiredStripIdx;
-    cell->cachedStrip = wantedStrip;
+    if (orientation == GAUGE_ORIENT_HORIZONTAL)
+    {
+        VDP_setTileMapDataRowEx(WINDOW,
+                                span->tiles,
+                                span->basetile,
+                                span->firstY,
+                                span->firstX,
+                                span->length,
+                                DMA_QUEUE);
+    }
+    else
+    {
+        u16 reversedTiles[GAUGE_MAX_LENGTH];
+
+        for (u8 i = 0; i < span->length; i++)
+            reversedTiles[i] = span->tiles[(u8)(span->length - 1 - i)];
+
+        VDP_setTileMapDataColumnEx(WINDOW,
+                                   reversedTiles,
+                                   span->basetile,
+                                   span->firstX,
+                                   span->lastY,
+                                   span->length,
+                                   1,
+                                   DMA_QUEUE);
+    }
+
+    tilemap_span_reset(span);
+}
+
+static inline void tile_upload_span_reset(GaugeTileUploadSpan *span)
+{
+    span->active = 0;
+    span->strip = NULL;
+    span->startVramTile = 0;
+    span->lastVramTile = 0;
+    span->startStripIndex = 0;
+    span->lastStripIndex = 0;
+    span->length = 0;
+}
+
+static inline void tile_upload_span_begin(GaugeTileUploadSpan *span,
+                                          const u32 *strip,
+                                          u16 vramTile,
+                                          u8 stripIndex)
+{
+    span->active = 1;
+    span->strip = strip;
+    span->startVramTile = vramTile;
+    span->lastVramTile = vramTile;
+    span->startStripIndex = stripIndex;
+    span->lastStripIndex = stripIndex;
+    span->length = 1;
+}
+
+static inline u8 tile_upload_span_can_append(const GaugeTileUploadSpan *span,
+                                             const u32 *strip,
+                                             u16 vramTile,
+                                             u8 stripIndex)
+{
+    if (!span->active)
+        return 1;
+
+    return span->strip == strip &&
+           span->length < GAUGE_MAX_LENGTH &&
+           vramTile == (u16)(span->lastVramTile + 1) &&
+           stripIndex == (u8)(span->lastStripIndex + 1);
+}
+
+static inline void tile_upload_span_append(GaugeTileUploadSpan *span,
+                                           u16 vramTile,
+                                           u8 stripIndex)
+{
+    span->lastVramTile = vramTile;
+    span->lastStripIndex = stripIndex;
+    span->length++;
+}
+
+static inline void tile_upload_span_push(GaugeTileUploadSpan *span,
+                                         const u32 *strip,
+                                         u16 vramTile,
+                                         u8 stripIndex)
+{
+    if (!strip)
+        return;
+
+    if (!tile_upload_span_can_append(span, strip, vramTile, stripIndex))
+    {
+        const u32 *src = span->strip + FILL_IDX_TO_OFFSET(span->startStripIndex);
+        VDP_loadTileData(src, span->startVramTile, span->length, DMA_QUEUE);
+        tile_upload_span_reset(span);
+    }
+
+    if (!span->active)
+        tile_upload_span_begin(span, strip, vramTile, stripIndex);
+    else
+        tile_upload_span_append(span, vramTile, stripIndex);
+}
+
+static inline void tile_upload_span_flush(GaugeTileUploadSpan *span)
+{
+    if (!span->active)
+        return;
+
+    const u32 *src = span->strip + FILL_IDX_TO_OFFSET(span->startStripIndex);
+    VDP_loadTileData(src, span->startVramTile, span->length, DMA_QUEUE);
+    tile_upload_span_reset(span);
 }
 
 /**
@@ -4829,6 +5040,9 @@ static void init_dynamic_tilemap(GaugeLaneInstance *lane)
 {
     const GaugeLaneLayout *layout = lane->layout;
     GaugeDynamic *dyn = &lane->dyn;
+    GaugeTilemapSpan tilemapSpan;
+
+    tilemap_span_reset(&tilemapSpan);
 
     /* Pre-calculate tilemap positions and cell validity for each cell */
     for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
@@ -4844,6 +5058,8 @@ static void init_dynamic_tilemap(GaugeLaneInstance *lane)
     }
 
     /* Write initial tilemap (all empty tiles) */
+    const u16 attrBase = TILE_ATTR_FULL(layout->palette, layout->priority,
+                                        layout->verticalFlip, layout->horizontalFlip, 0);
     for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
     {
         if (!dyn->cellValid[cellIndex])
@@ -4851,16 +5067,18 @@ static void init_dynamic_tilemap(GaugeLaneInstance *lane)
 
         const u8 segmentId = layout->segmentIdByCell[cellIndex];
         const u16 vramTile = dyn->vramTileEmpty[segmentId];
-        const u16 attr = TILE_ATTR_FULL(layout->palette, layout->priority,
-                                        layout->verticalFlip, layout->horizontalFlip, vramTile);
-
-        VDP_setTileMapXY(WINDOW, attr,
-                         layout->tilemapPosByCell[cellIndex].x,
-                         layout->tilemapPosByCell[cellIndex].y);
+        tilemap_span_push(&tilemapSpan,
+                          layout->orientation,
+                          attrBase,
+                          layout->tilemapPosByCell[cellIndex].x,
+                          layout->tilemapPosByCell[cellIndex].y,
+                          vramTile);
 
         /* Initialize cache to avoid redundant writes on first update */
         dyn->cellCurrentTileIndex[cellIndex] = vramTile;
     }
+
+    tilemap_span_flush(&tilemapSpan, layout->orientation);
 }
 
 /**
@@ -4938,11 +5156,14 @@ static u8 init_dynamic_pip_vram(GaugeLaneInstance *lane, GaugeRuntimeArena *runt
 {
     const GaugeLaneLayout *layout = lane->layout;
     GaugeDynamic *dyn = &lane->dyn;
+    GaugeTilemapSpan tilemapSpan;
     u16 nextVram = lane->vramBase;
     const u8 renderCount = layout->pipRenderCount;
 
     if (!alloc_dynamic_buffers_from_arena(dyn, layout->segmentCount, renderCount, runtimeArena))
         return 0;
+
+    tilemap_span_reset(&tilemapSpan);
 
     for (u8 segmentId = 0; segmentId < dyn->segmentCount; segmentId++)
     {
@@ -5005,51 +5226,57 @@ static u8 init_dynamic_pip_vram(GaugeLaneInstance *lane, GaugeRuntimeArena *runt
         {
             for (u8 row = 0; row < sourceHeight; row++)
             {
-                for (u8 sourceCol = 0; sourceCol < sourceWidth; sourceCol++)
-                {
-                    const u8 stripIndex = compute_pip_strip_index(sourceWidth,
-                                                                   pipStateCount,
-                                                                   state,
-                                                                   row,
-                                                                   sourceCol);
-                    upload_fill_tile(pipStrip, stripIndex, nextVram, DMA_QUEUE);
-                    nextVram++;
-                }
+                const u8 stripIndex = compute_pip_strip_index(sourceWidth,
+                                                               pipStateCount,
+                                                               state,
+                                                               row,
+                                                               0);
+                const u32 *src = pipStrip + FILL_IDX_TO_OFFSET(stripIndex);
+                VDP_loadTileData(src, nextVram, sourceWidth, DMA_QUEUE);
+                nextVram = (u16)(nextVram + sourceWidth);
             }
         }
     }
 
     /* Initialize tilemap with EMPTY state for each render tile. */
-    for (u8 renderIndex = 0; renderIndex < renderCount; renderIndex++)
+    for (u8 targetRow = 0; targetRow < 4; targetRow++)
     {
-        const u8 fillIndex = layout->pipRenderFillIndexByRenderIndex[renderIndex];
-        if (fillIndex == CACHE_INVALID_U8)
-            continue;
+        for (u8 renderIndex = 0; renderIndex < renderCount; renderIndex++)
+        {
+            const u8 fillIndex = layout->pipRenderFillIndexByRenderIndex[renderIndex];
+            if (fillIndex == CACHE_INVALID_U8)
+                continue;
 
-        const u8 renderRow = layout->pipRenderRowByRenderIndex[renderIndex];
-        const u8 extraHFlip = layout->pipRenderExtraHFlipByRenderIndex[renderIndex];
-        const u8 extraVFlip = layout->pipRenderExtraVFlipByRenderIndex[renderIndex];
-        const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
-        const u8 segmentId = layout->segmentIdByCell[cellIndex];
-        if (!layout->pipTilesetBySegment[segmentId] ||
-            layout->pipStateCountBySegment[segmentId] < 2)
-            continue;
+            const u8 renderRow = layout->pipRenderRowByRenderIndex[renderIndex];
+            if (renderRow != targetRow)
+                continue;
 
-        const u16 pipBaseTile = dyn->vramTilePipBase[segmentId];
-        const u16 renderStateIndex = compute_pip_render_state_lut_index(PIP_STATE_EMPTY, renderIndex);
-        const u16 vramTile = (u16)(pipBaseTile + layout->pipRenderTileOffsetByState[renderStateIndex]);
-        const u16 attr = TILE_ATTR_FULL(layout->palette, layout->priority,
-                                        (u8)(layout->verticalFlip ^ extraVFlip),
-                                        (u8)(layout->horizontalFlip ^ extraHFlip),
-                                        vramTile);
+            const u8 extraHFlip = layout->pipRenderExtraHFlipByRenderIndex[renderIndex];
+            const u8 extraVFlip = layout->pipRenderExtraVFlipByRenderIndex[renderIndex];
+            const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
+            const u8 segmentId = layout->segmentIdByCell[cellIndex];
+            if (!layout->pipTilesetBySegment[segmentId] ||
+                layout->pipStateCountBySegment[segmentId] < 2)
+                continue;
 
-        u16 x = 0;
-        u16 y = 0;
-        compute_pip_render_xy(layout, lane->originX, lane->originY, fillIndex, renderRow, &x, &y);
-        VDP_setTileMapXY(WINDOW, attr, x, y);
+            const u16 pipBaseTile = dyn->vramTilePipBase[segmentId];
+            const u16 renderStateIndex = compute_pip_render_state_lut_index(PIP_STATE_EMPTY, renderIndex);
+            const u16 vramTile = (u16)(pipBaseTile + layout->pipRenderTileOffsetByState[renderStateIndex]);
+            const u16 attrBase = TILE_ATTR_FULL(layout->palette, layout->priority,
+                                                (u8)(layout->verticalFlip ^ extraVFlip),
+                                                (u8)(layout->horizontalFlip ^ extraHFlip),
+                                                0);
 
-        dyn->cellCurrentTileIndex[renderIndex] = vramTile;
-        dyn->cellValid[renderIndex] = 1;
+            u16 x = 0;
+            u16 y = 0;
+            compute_pip_render_xy(layout, lane->originX, lane->originY, fillIndex, renderRow, &x, &y);
+            tilemap_span_push(&tilemapSpan, layout->orientation, attrBase, x, y, vramTile);
+
+            dyn->cellCurrentTileIndex[renderIndex] = vramTile;
+            dyn->cellValid[renderIndex] = 1;
+        }
+
+        tilemap_span_flush(&tilemapSpan, layout->orientation);
     }
 
     return 1;
@@ -5059,61 +5286,76 @@ static u8 init_dynamic_pip_vram(GaugeLaneInstance *lane, GaugeRuntimeArena *runt
  * Initialize tilemap for PIP mode (one VRAM tile per rendered PIP tile).
  *
  * Allocates one VRAM tile per render tile, uploads the EMPTY state from each segment's
- * compact strip, and writes the initial tilemap. Also sets up GaugeStreamCell
- * entries for per-cell DMA updates at runtime.
+ * compact strip, and writes the initial tilemap. Cells are stored row-major so
+ * runtime updates can batch contiguous uploads along the visible longitudinal axis.
  *
  * @param lane  GaugeLaneInstance to initialize (must have layout set)
  */
 static void write_tilemap_pip_init(GaugeLaneInstance *lane)
 {
     const GaugeLaneLayout *layout = lane->layout;
+    GaugeTilemapSpan tilemapSpan;
+    GaugeTileUploadSpan uploadSpan;
+
     lane->cellCount = 0;
+    tilemap_span_reset(&tilemapSpan);
+    tile_upload_span_reset(&uploadSpan);
 
-    for (u8 renderIndex = 0; renderIndex < layout->pipRenderCount; renderIndex++)
+    for (u8 targetRow = 0; targetRow < 4; targetRow++)
     {
-        const u8 fillIndex = layout->pipRenderFillIndexByRenderIndex[renderIndex];
-        if (fillIndex == CACHE_INVALID_U8)
-            continue;
-        const u8 renderRow = layout->pipRenderRowByRenderIndex[renderIndex];
-        const u8 extraHFlip = layout->pipRenderExtraHFlipByRenderIndex[renderIndex];
-        const u8 extraVFlip = layout->pipRenderExtraVFlipByRenderIndex[renderIndex];
-        const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
-        const u8 segmentId = layout->segmentIdByCell[cellIndex];
-        const u32 *pipStrip = layout->pipTilesetBySegment[segmentId];
-        if (!pipStrip)
-            continue;
-        const u8 pipStateCount = layout->pipStateCountBySegment[segmentId];
-        if (pipStateCount < 2)
-            continue;
+        for (u8 renderIndex = 0; renderIndex < layout->pipRenderCount; renderIndex++)
+        {
+            const u8 fillIndex = layout->pipRenderFillIndexByRenderIndex[renderIndex];
+            if (fillIndex == CACHE_INVALID_U8)
+                continue;
 
-        if (lane->cellCount >= layout->pipRenderCount)
-            break;
+            const u8 renderRow = layout->pipRenderRowByRenderIndex[renderIndex];
+            if (renderRow != targetRow)
+                continue;
 
-        const u16 vramTile = (u16)(lane->vramBase + lane->cellCount);
-        const u16 attr = TILE_ATTR_FULL(layout->palette, layout->priority,
-                                        (u8)(layout->verticalFlip ^ extraVFlip),
-                                        (u8)(layout->horizontalFlip ^ extraHFlip),
-                                        vramTile);
+            const u8 extraHFlip = layout->pipRenderExtraHFlipByRenderIndex[renderIndex];
+            const u8 extraVFlip = layout->pipRenderExtraVFlipByRenderIndex[renderIndex];
+            const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
+            const u8 segmentId = layout->segmentIdByCell[cellIndex];
+            const u32 *pipStrip = layout->pipTilesetBySegment[segmentId];
+            if (!pipStrip)
+                continue;
 
-        u16 x = 0;
-        u16 y = 0;
-        compute_pip_render_xy(layout, lane->originX, lane->originY, fillIndex, renderRow, &x, &y);
-        VDP_setTileMapXY(WINDOW, attr, x, y);
+            const u8 pipStateCount = layout->pipStateCountBySegment[segmentId];
+            if (pipStateCount < 2)
+                continue;
 
-        const u16 renderStateIndex = compute_pip_render_state_lut_index(PIP_STATE_EMPTY, renderIndex);
-        const u8 stripIndex = layout->pipRenderStripIndexByState[renderStateIndex];
+            if (lane->cellCount >= layout->pipRenderCount)
+                break;
 
-        /* Preload EMPTY tile for this local position. */
-        upload_fill_tile(pipStrip, stripIndex, vramTile, DMA_QUEUE);
+            const u16 vramTile = (u16)(lane->vramBase + lane->cellCount);
+            const u16 attrBase = TILE_ATTR_FULL(layout->palette, layout->priority,
+                                                (u8)(layout->verticalFlip ^ extraVFlip),
+                                                (u8)(layout->horizontalFlip ^ extraHFlip),
+                                                0);
 
-        lane->cells[lane->cellCount].vramTileIndex = vramTile;
-        lane->cells[lane->cellCount].cachedStrip = pipStrip;
-        lane->cells[lane->cellCount].cachedFillIndex = stripIndex;
-        lane->cells[lane->cellCount].cellIndex = cellIndex;
-        lane->cells[lane->cellCount].pipFillIndex = fillIndex;
-        lane->cells[lane->cellCount].pipRow = renderRow;
-        lane->cells[lane->cellCount].pipRenderIndex = renderIndex;
-        lane->cellCount++;
+            u16 x = 0;
+            u16 y = 0;
+            compute_pip_render_xy(layout, lane->originX, lane->originY, fillIndex, renderRow, &x, &y);
+            tilemap_span_push(&tilemapSpan, layout->orientation, attrBase, x, y, vramTile);
+
+            const u16 renderStateIndex = compute_pip_render_state_lut_index(PIP_STATE_EMPTY, renderIndex);
+            const u8 stripIndex = layout->pipRenderStripIndexByState[renderStateIndex];
+
+            tile_upload_span_push(&uploadSpan, pipStrip, vramTile, stripIndex);
+
+            lane->cells[lane->cellCount].vramTileIndex = vramTile;
+            lane->cells[lane->cellCount].cachedStrip = pipStrip;
+            lane->cells[lane->cellCount].cachedFillIndex = stripIndex;
+            lane->cells[lane->cellCount].cellIndex = cellIndex;
+            lane->cells[lane->cellCount].pipFillIndex = fillIndex;
+            lane->cells[lane->cellCount].pipRow = renderRow;
+            lane->cells[lane->cellCount].pipRenderIndex = renderIndex;
+            lane->cellCount++;
+        }
+
+        tilemap_span_flush(&tilemapSpan, layout->orientation);
+        tile_upload_span_flush(&uploadSpan);
     }
 }
 
@@ -5121,15 +5363,21 @@ static void write_tilemap_pip_init(GaugeLaneInstance *lane)
  * Initialize tilemap for fixed VRAM mode (one VRAM tile per cell, fill mode).
  *
  * Allocates one VRAM tile per valid cell, pre-caches tileset strip pointers
- * (body/end/trail/bridge) per cell to avoid per-frame segment lookups, uploads
- * initial empty tiles, and writes the tilemap on the WINDOW plane.
+ * (body/end/trail/bridge) per cell to avoid per-frame segment lookups, and writes
+ * the tilemap on the WINDOW plane. Tile data itself is still uploaded lazily on
+ * the first runtime update.
  *
  * @param lane  GaugeLaneInstance to initialize (must have layout and vramBase set)
  */
 static void write_tilemap_fixed_init(GaugeLaneInstance *lane)
 {
     const GaugeLaneLayout *layout = lane->layout;
+    GaugeTilemapSpan tilemapSpan;
+
+    tilemap_span_reset(&tilemapSpan);
     lane->cellCount = 0;
+    const u16 attrBase = TILE_ATTR_FULL(layout->palette, layout->priority,
+                                        layout->verticalFlip, layout->horizontalFlip, 0);
 
     for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
     {
@@ -5144,13 +5392,15 @@ static void write_tilemap_fixed_init(GaugeLaneInstance *lane)
             break;
 
         const u16 vramTile = (u16)(lane->vramBase + lane->cellCount);
-        const u16 attr = TILE_ATTR_FULL(layout->palette, layout->priority,
-                                        layout->verticalFlip, layout->horizontalFlip, vramTile);
-
         u16 x, y;
         compute_tile_xy(layout->orientation, lane->originX, lane->originY, cellIndex, &x, &y);
 
-        VDP_setTileMapXY(WINDOW, attr, x, y);
+        tilemap_span_push(&tilemapSpan,
+                          layout->orientation,
+                          attrBase,
+                          x,
+                          y,
+                          vramTile);
 
         lane->cells[lane->cellCount].vramTileIndex = vramTile;
         lane->cells[lane->cellCount].cachedStrip = NULL;
@@ -5161,7 +5411,9 @@ static void write_tilemap_fixed_init(GaugeLaneInstance *lane)
         lane->cells[lane->cellCount].pipRenderIndex = CACHE_INVALID_U8;
         lane->cellCount++;
 
-    } 
+    }
+
+    tilemap_span_flush(&tilemapSpan, layout->orientation);
 }
 
 static inline GaugeLaneInstance *gauge_get_baseLane_instance(const Gauge *gauge)
@@ -5795,6 +6047,7 @@ static void process_fixed_mode(GaugeLaneInstance *lane,
     (void)trailPixelsActual;
     (void)blinkOffActive;
     const GaugeLaneLayout *layout = lane->layout;
+    GaugeTileUploadSpan uploadSpan;
     FillLaneResolveContext resolveContext;
     if (!init_fill_lane_resolve_context(lane,
                                         valuePixels,
@@ -5802,6 +6055,8 @@ static void process_fixed_mode(GaugeLaneInstance *lane,
                                         trailMode,
                                         &resolveContext))
         return;
+
+    tile_upload_span_reset(&uploadSpan);
 
 #if GAUGE_ENABLE_TRACE
     const u8 traceEnabled = s_traceContext.active;
@@ -5811,9 +6066,7 @@ static void process_fixed_mode(GaugeLaneInstance *lane,
         trace_clear_recorded_cells(traceByCell, layout->length);
 #endif
 
-    /* Countdown loop: 68000 zero-flag test is free after decrement (dbra) */
-    u8 i = lane->cellCount;
-    while (i--)
+    for (u8 i = 0; i < lane->cellCount; i++)
     {
         GaugeStreamCell *cell = &lane->cells[i];
         const u8 cellIndex = cell->cellIndex;
@@ -5831,10 +6084,20 @@ static void process_fixed_mode(GaugeLaneInstance *lane,
                               &cellDecision.decision);
 #endif
 
-        upload_cell_if_needed(cell,
-                              cellDecision.decision.strip,
-                              cellDecision.decision.fillStripIndex);
+        if (cellDecision.decision.strip &&
+            (cell->cachedFillIndex != cellDecision.decision.fillStripIndex ||
+             cell->cachedStrip != cellDecision.decision.strip))
+        {
+            tile_upload_span_push(&uploadSpan,
+                                  cellDecision.decision.strip,
+                                  cell->vramTileIndex,
+                                  cellDecision.decision.fillStripIndex);
+            cell->cachedFillIndex = cellDecision.decision.fillStripIndex;
+            cell->cachedStrip = cellDecision.decision.strip;
+        }
     }
+
+    tile_upload_span_flush(&uploadSpan);
 
 #if GAUGE_ENABLE_TRACE
     if (traceEnabled)
@@ -5872,6 +6135,7 @@ static void process_dynamic_mode(GaugeLaneInstance *lane,
     (void)trailPixelsActual;
     GaugeDynamic *dyn = &lane->dyn;
     const GaugeLaneLayout *layout = lane->layout;
+    GaugeTilemapSpan tilemapSpan;
     FillLaneResolveContext resolveContext;
     if (!init_fill_lane_resolve_context(lane,
                                         valuePixels,
@@ -5879,6 +6143,8 @@ static void process_dynamic_mode(GaugeLaneInstance *lane,
                                         trailMode,
                                         &resolveContext))
         return;
+
+    tilemap_span_reset(&tilemapSpan);
 
     /* Pre-compute tilemap attribute base (without tile index) */
     const u16 attrBase = TILE_ATTR_FULL(layout->palette, layout->priority,
@@ -6033,12 +6299,17 @@ static void process_dynamic_mode(GaugeLaneInstance *lane,
         /* Update tilemap only if tile changed (change detection optimization) */
         if (dyn->cellCurrentTileIndex[cellIndex] != vramTile)
         {
-            VDP_setTileMapXY(WINDOW, attrBase | vramTile,
-                             layout->tilemapPosByCell[cellIndex].x,
-                             layout->tilemapPosByCell[cellIndex].y);
+            tilemap_span_push(&tilemapSpan,
+                              layout->orientation,
+                              attrBase,
+                              layout->tilemapPosByCell[cellIndex].x,
+                              layout->tilemapPosByCell[cellIndex].y,
+                              vramTile);
             dyn->cellCurrentTileIndex[cellIndex] = vramTile;
         }
     }
+
+    tilemap_span_flush(&tilemapSpan, layout->orientation);
 }
 
 /**
@@ -6207,70 +6478,90 @@ static void process_pip_mode(GaugeLaneInstance *lane,
     if (lane->vramMode == GAUGE_VRAM_DYNAMIC)
     {
         GaugeDynamic *dyn = &lane->dyn;
+        GaugeTilemapSpan tilemapSpan;
 
-        for (u8 renderIndex = 0; renderIndex < layout->pipRenderCount; renderIndex++)
+        tilemap_span_reset(&tilemapSpan);
+
+        for (u8 targetRow = 0; targetRow < 4; targetRow++)
         {
-            if (!dyn->cellValid[renderIndex])
-                continue;
-
-            const u8 fillIndex = layout->pipRenderFillIndexByRenderIndex[renderIndex];
-            if (fillIndex == CACHE_INVALID_U8)
-                continue;
-            const u8 renderRow = layout->pipRenderRowByRenderIndex[renderIndex];
-            const u8 extraHFlip = layout->pipRenderExtraHFlipByRenderIndex[renderIndex];
-            const u8 extraVFlip = layout->pipRenderExtraVFlipByRenderIndex[renderIndex];
-            const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
-            const u8 segmentId = layout->segmentIdByCell[cellIndex];
-            const u16 pipBaseTile = dyn->vramTilePipBase[segmentId];
-            PipResolvedRenderState renderState;
-            resolve_pip_render_state(gauge,
-                                     lane,
-                                     layout,
-                                     cellIndex,
-                                     segmentId,
-                                     renderIndex,
-                                     trailMode,
-                                     &renderState);
-            if (renderState.stateCount < 2)
-                continue;
-
-            const u8 stripIndex = layout->pipRenderStripIndexByState[renderState.renderStateIndex];
-            const u16 desiredTile =
-                (u16)(pipBaseTile + layout->pipRenderTileOffsetByState[renderState.renderStateIndex]);
-            const u8 changed = (dyn->cellCurrentTileIndex[renderIndex] != desiredTile);
-
-            if (changed)
+            for (u8 renderIndex = 0; renderIndex < layout->pipRenderCount; renderIndex++)
             {
-                u16 x = 0;
-                u16 y = 0;
-                compute_pip_render_xy(layout, lane->originX, lane->originY, fillIndex, renderRow, &x, &y);
-                const u16 attr = TILE_ATTR_FULL(layout->palette, layout->priority,
-                                                (u8)(layout->verticalFlip ^ extraVFlip),
-                                                (u8)(layout->horizontalFlip ^ extraHFlip),
-                                                desiredTile);
-                VDP_setTileMapXY(WINDOW, attr,
-                                 x,
-                                 y);
-                dyn->cellCurrentTileIndex[renderIndex] = desiredTile;
-            }
+                if (!dyn->cellValid[renderIndex])
+                    continue;
+
+                const u8 fillIndex = layout->pipRenderFillIndexByRenderIndex[renderIndex];
+                if (fillIndex == CACHE_INVALID_U8)
+                    continue;
+
+                const u8 renderRow = layout->pipRenderRowByRenderIndex[renderIndex];
+                if (renderRow != targetRow)
+                    continue;
+
+                const u8 extraHFlip = layout->pipRenderExtraHFlipByRenderIndex[renderIndex];
+                const u8 extraVFlip = layout->pipRenderExtraVFlipByRenderIndex[renderIndex];
+                const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
+                const u8 segmentId = layout->segmentIdByCell[cellIndex];
+                const u16 pipBaseTile = dyn->vramTilePipBase[segmentId];
+                PipResolvedRenderState renderState;
+                resolve_pip_render_state(gauge,
+                                         lane,
+                                         layout,
+                                         cellIndex,
+                                         segmentId,
+                                         renderIndex,
+                                         trailMode,
+                                         &renderState);
+                if (renderState.stateCount < 2)
+                    continue;
+
+                const u8 stripIndex = layout->pipRenderStripIndexByState[renderState.renderStateIndex];
+                const u16 desiredTile =
+                    (u16)(pipBaseTile + layout->pipRenderTileOffsetByState[renderState.renderStateIndex]);
+                const u8 changed = (dyn->cellCurrentTileIndex[renderIndex] != desiredTile);
+
+                if (changed)
+                {
+                    u16 x = 0;
+                    u16 y = 0;
+                    const u16 attrBase = TILE_ATTR_FULL(layout->palette, layout->priority,
+                                                        (u8)(layout->verticalFlip ^ extraVFlip),
+                                                        (u8)(layout->horizontalFlip ^ extraHFlip),
+                                                        0);
+                    compute_pip_render_xy(layout, lane->originX, lane->originY, fillIndex, renderRow, &x, &y);
+                    tilemap_span_push(&tilemapSpan,
+                                      layout->orientation,
+                                      attrBase,
+                                      x,
+                                      y,
+                                      desiredTile);
+                    dyn->cellCurrentTileIndex[renderIndex] = desiredTile;
+                }
 
 #if GAUGE_ENABLE_TRACE
-            trace_emit_pip_cell_line(cellIndex,
-                                     segmentId,
-                                     renderIndex,
-                                     1,
-                                     layout->pipTilesetBySegment[segmentId],
-                                     stripIndex,
-                                     desiredTile,
-                                     renderState.requestedState,
-                                     renderState.resolvedState,
-                                     renderState.stateCount,
-                                     changed);
+                trace_emit_pip_cell_line(cellIndex,
+                                         segmentId,
+                                         renderIndex,
+                                         1,
+                                         layout->pipTilesetBySegment[segmentId],
+                                         stripIndex,
+                                         desiredTile,
+                                         renderState.requestedState,
+                                         renderState.resolvedState,
+                                         renderState.stateCount,
+                                         changed);
 #endif
+            }
+
+            tilemap_span_flush(&tilemapSpan, layout->orientation);
         }
 
         return;
     }
+
+    GaugeTileUploadSpan uploadSpan;
+    u8 currentRow = CACHE_INVALID_U8;
+
+    tile_upload_span_reset(&uploadSpan);
 
     for (u8 i = 0; i < lane->cellCount; i++)
     {
@@ -6287,6 +6578,10 @@ static void process_pip_mode(GaugeLaneInstance *lane,
         if (renderIndex == CACHE_INVALID_U8)
             continue;
 
+        if (currentRow != CACHE_INVALID_U8 && cell->pipRow != currentRow)
+            tile_upload_span_flush(&uploadSpan);
+        currentRow = cell->pipRow;
+
         PipResolvedRenderState renderState;
         resolve_pip_render_state(gauge,
                                  lane,
@@ -6301,7 +6596,15 @@ static void process_pip_mode(GaugeLaneInstance *lane,
             (cell->cachedFillIndex != stripIndex) ||
             (cell->cachedStrip != pipStrip);
 
-        upload_cell_if_needed(cell, pipStrip, stripIndex);
+        if (changed)
+        {
+            tile_upload_span_push(&uploadSpan,
+                                  pipStrip,
+                                  cell->vramTileIndex,
+                                  stripIndex);
+            cell->cachedFillIndex = stripIndex;
+            cell->cachedStrip = pipStrip;
+        }
 
 #if GAUGE_ENABLE_TRACE
         trace_emit_pip_cell_line(cellIndex,
@@ -6317,6 +6620,8 @@ static void process_pip_mode(GaugeLaneInstance *lane,
                                  changed);
 #endif
     }
+
+    tile_upload_span_flush(&uploadSpan);
 }
 
 

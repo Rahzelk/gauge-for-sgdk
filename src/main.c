@@ -7,7 +7,7 @@
    ============================================================================= */
 
 #define GAUGE_VRAM_BASE            TILE_USER_INDEX
-#define DEMO_GAUGE_VRAM_MODE       GAUGE_VRAM_DYNAMIC
+#define DEMO_GAUGE_VRAM_MODE       GAUGE_VRAM_FIXED
 
 #define DEMO_SCREEN_COUNT          4
 #define DEMO_MAX_CASES_PER_SCREEN  6
