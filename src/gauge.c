@@ -1,7 +1,7 @@
 #include "gauge.h"
 
 /* =============================================================================
-   gauge.c - HUD gauge implementation for SGDK (fill + pip, fixed + dynamic)
+   gauge.c - HUD gauge implementation for SGDK (fill + pip, fixed-only)
    =============================================================================
  
    TILE STRIP SYSTEM:
@@ -43,9 +43,8 @@
    PERFORMANCE:
    ------------
    - logicTickHandler: ~50-100 cycles (mostly conditionals)
-   - process_fixed_mode: ~200 cycles/cell (DMA dominant), lazy strip eval
-   - process_dynamic_mode: ~300-500 cycles total (tilemap writes dominant)
-   - Change detection avoids redundant DMA/tilemap writes
+   - process_fill_mode: ~200 cycles/cell (DMA dominant), lazy strip eval
+   - Change detection avoids redundant DMA writes
 
    ============================================================================= */
 
@@ -280,8 +279,6 @@ struct GaugeLaneLayout
     u8 *pipRenderExtraHFlipByRenderIndex;
     u8 *pipRenderExtraVFlipByRenderIndex;
     u8 *pipRenderStripIndexByState;
-    u8 *pipRenderTileOffsetByState;
-
     u8 *bridgeEndByFillIndex;
     u8 *bridgeBreakByFillIndex;
     u8 *bridgeBreakBoundaryByFillIndex;
@@ -311,47 +308,11 @@ typedef struct
     u8 pipRenderIndex;
 } GaugeStreamCell;
 
-typedef struct
-{
-    u16 *vramTileEmpty;
-    u16 *vramTileFullValue;
-    u16 *vramTileFullTrail;
-    u16 *vramTileBridge;
-    u16 *vramTilePipBase;
-    u16 vramTileCapStart;
-    u16 vramTileCapEnd;
-
-    u16 vramTilePartialValue;
-    u16 vramTilePartialTrail;
-    u16 vramTilePartialEnd;
-    u16 vramTilePartialTrailSecond;
-
-    u8 loadedSegmentPartialValue;
-    u8 cachedFillIndexPartialValue;
-    u8 loadedSegmentPartialTrail;
-    u8 cachedFillIndexPartialTrail;
-    u8 loadedSegmentPartialEnd;
-    u8 cachedFillIndexPartialEnd;
-    u8 loadedSegmentPartialTrailSecond;
-    u8 cachedFillIndexPartialTrailSecond;
-    u8 *cachedFillIndexBridge;
-    u8 cachedFillIndexCapStart;
-    u8 cachedFillIndexCapEnd;
-    u8 loadedCapStartUsesBreak;
-    u8 loadedCapStartUsesTrail;
-
-    u16 *cellCurrentTileIndex;
-    u8 *cellValid;
-    u8 segmentCount;
-    u8 cellCount;
-} GaugeDynamic;
-
 struct GaugeLaneInstance
 {
     u16 originX;
     u16 originY;
 
-    GaugeVramMode vramMode;
     u16 vramBase;
     GaugeLaneRenderHandler *renderHandler;
     const Gauge *gauge;
@@ -361,8 +322,6 @@ struct GaugeLaneInstance
 
     GaugeStreamCell *cells;
     u8 cellCount;
-
-    GaugeDynamic dyn;
 };
 
 typedef struct
@@ -393,7 +352,6 @@ static inline u8 sanitize_value_mode(u8 mode);
 static inline u8 sanitize_orientation(u8 orientation);
 static inline u8 sanitize_fill_direction(u8 fillDirection);
 static inline u8 sanitize_palette_index(u8 palette);
-static inline u8 sanitize_vram_mode(u8 vramMode);
 static u8 definition_lane_is_empty(const GaugeLane *lane);
 static u8 find_baseLane_index(const GaugeDefinition *definition,
                               u8 *outLaneIndex);
@@ -410,7 +368,6 @@ static inline u8 gauge_layout_has_bridge(const GaugeLaneLayout *layout);
 static u16 compute_pip_total_pixels(const GaugeLaneLayout *layout);
 static u16 clamp_max_value_to_capacity(u16 maxValue);
 static u16 compute_vram_size_for_layout(const GaugeLaneLayout *layout,
-                                        GaugeVramMode vramMode,
                                         u8 trailEnabled,
                                         GaugeValueMode valueMode);
 static GaugeTickAndRenderHandler *resolve_tick_and_render_handler(GaugeValueMode valueMode);
@@ -418,7 +375,6 @@ static u8 gauge_compute_stream_cell_capacity(GaugeValueMode valueMode,
                                              const GaugeLaneLayout *layout);
 static u16 gauge_compute_runtime_arena_size(GaugeLaneLayout * const *builtLayouts,
                                             u8 laneCount,
-                                            GaugeVramMode vramMode,
                                             GaugeValueMode valueMode,
                                             u16 maxFillPixels);
 static void GaugeLaneLayout_setFillOffset(GaugeLaneLayout *layout, u16 fillOffsetPixels);
@@ -432,7 +388,6 @@ static u8 GaugeLaneInstance_initInternal(GaugeLaneInstance *lane,
                                          u16 originX,
                                          u16 originY,
                                          u16 vramBase,
-                                         GaugeVramMode vramMode,
                                          GaugeRuntimeArena *runtimeArena);
 static void GaugeLaneInstance_releaseInternal(GaugeLaneInstance *lane);
 static void GaugeLogic_init(GaugeLogic *logic,
@@ -484,7 +439,6 @@ u8 Gauge_build(Gauge *gauge,
     sanitized->mode = (GaugeMode)sanitize_value_mode((u8)sanitized->mode);
     sanitized->orientation = (GaugeOrientation)sanitize_orientation((u8)sanitized->orientation);
     sanitized->fillDirection = (GaugeFillDirection)sanitize_fill_direction((u8)sanitized->fillDirection);
-    sanitized->vramMode = (GaugeVramMode)sanitize_vram_mode((u8)sanitized->vramMode);
     sanitized->palette = sanitize_palette_index(sanitized->palette);
     sanitized->priority = sanitized->priority ? 1 : 0;
     sanitized->verticalFlip = sanitized->verticalFlip ? 1 : 0;
@@ -585,7 +539,6 @@ u8 Gauge_build(Gauge *gauge,
     const GaugeValueMode valueMode = (GaugeValueMode)sanitized->mode;
     const u16 runtimeArenaBytes = gauge_compute_runtime_arena_size(builtLayouts,
                                                                    laneCount,
-                                                                   sanitized->vramMode,
                                                                    valueMode,
                                                                    maxFillPixels);
     void *runtimeArenaMemory = gauge_alloc_bytes(runtimeArenaBytes);
@@ -670,7 +623,6 @@ u8 Gauge_build(Gauge *gauge,
     for (u8 laneIndex = 0; laneIndex < laneCount; laneIndex++)
     {
         const u16 vramSize = compute_vram_size_for_layout(builtLayouts[laneIndex],
-                                                          sanitized->vramMode,
                                                           gauge->logic.trailEnabled,
                                                           valueMode);
         GaugeLaneInstance *lane = &laneStorage[laneIndex];
@@ -681,7 +633,6 @@ u8 Gauge_build(Gauge *gauge,
                                             lanePlans[laneIndex].originX,
                                             lanePlans[laneIndex].originY,
                                             nextVram,
-                                            sanitized->vramMode,
                                             &runtimeArena))
         {
             Gauge_release(gauge);
@@ -1122,6 +1073,34 @@ static inline void compute_tile_xy(u8 orient,
     }
 }
 
+static inline void compute_pip_render_xy(const GaugeLaneLayout *layout,
+                                         u16 originX,
+                                         u16 originY,
+                                         u8 fillIndex,
+                                         u8 renderRow,
+                                         u16 *outX,
+                                         u16 *outY)
+{
+    if (!layout)
+        return;
+
+    if (layout->orientation == GAUGE_ORIENT_HORIZONTAL)
+    {
+        *outX = (u16)(originX + fillIndex);
+        *outY = (u16)(originY + renderRow);
+    }
+    else
+    {
+        *outX = (u16)(originX + renderRow);
+        *outY = (u16)(originY - fillIndex);
+    }
+}
+
+static inline u16 compute_pip_render_state_lut_index(u8 pipState, u8 renderIndex)
+{
+    return (u16)((u16)pipState * (u16)GAUGE_PIP_MAX_RENDER_TILES + renderIndex);
+}
+
 
 
 /* =============================================================================
@@ -1136,7 +1115,7 @@ static inline void compute_tile_xy(u8 orient,
    D = BRIDGE      (BRIDGE tileset, transition between segments)
    =============================================================================
 
-   Shared by process_fixed_mode() and process_dynamic_mode().
+   Shared by process_fill_mode() and the fill decision helpers.
    Contains all the information needed to classify cells in the break zone
    between the value edge and the trail edge.
 
@@ -1191,10 +1170,6 @@ typedef struct
 static inline const u32 *select_base_strip(const u32 *normalStrip,
                                            const u32 *gainStrip,
                                            u8 trailMode);
-static u16 compute_vram_size_for_layout(const GaugeLaneLayout *layout,
-                                        GaugeVramMode vramMode,
-                                        u8 trailEnabled,
-                                        GaugeValueMode valueMode);
 static inline u8 select_pip_state_for_cell(const GaugeLaneLayout *layout,
                                            u8 cellIndex,
                                            u16 valuePixels,
@@ -1652,7 +1627,7 @@ static inline const u32 *select_blink_strip(const u32 *normalBlinkStrip,
  * (end, trail, or value break) using the actual trail zone (breakInfoActual).
  * If so, overrides the corresponding strip pointer to the blink-off variant.
  *
- * Shared between process_fixed_mode() and process_dynamic_mode() to avoid
+ * Shared by fill rendering to avoid
  * duplicating ~40 lines of identical classification logic.
  *
  * @return 1 if blink-off was applied, 0 otherwise.
@@ -1774,12 +1749,11 @@ static inline u8 layout_has_blink_off_mode(const GaugeLaneLayout *layout, u8 tra
    =============================================================================
 
    These types and helpers factor the cell rendering DECISION (which strip and
-   tile index to use) out of process_fixed_mode() and process_dynamic_mode().
+   tile index to use) out of the fill renderer.
 
-   The decision is mode-agnostic:
-   - Fixed mode:   uses (strip, fillStripIndex) to DMA a tile per cell.
-   - Dynamic mode: uses (type) to route to the correct shared VRAM slot,
-                   then (strip, fillStripIndex) to DMA partial tiles.
+   The decision is fixed-only:
+   - Each cell selects a ROM strip and a tile index.
+   - The fixed renderer then uploads that tile to the lane-owned VRAM slot.
 
    This eliminates ~320 lines of duplicated classification logic.
    ============================================================================= */
@@ -1857,8 +1831,7 @@ static inline CellBreakType classify_break_zone_cell(
 
 
 /**
- * Cell decision type -- encodes which VRAM slot dynamic mode should use.
- * Fixed mode ignores this (uniform output for all types).
+ * Cell decision type -- semantic tile class selected for a fill cell.
  */
 typedef enum
 {
@@ -1878,15 +1851,15 @@ typedef enum
  * Cell rendering decision result.
  *
  * Produced by compute_cell_decision() for each cell.
- * Contains all information needed by both fixed and dynamic renderers.
+ * Contains all information needed by the fixed fill renderer.
  */
 typedef struct
 {
     const u32 *strip;           /* Selected ROM strip (NULL = skip rendering) */
     u8 fillStripIndex;          /* Tile index within the strip (0..44 or 0..63) */
-    CellDecisionType type;      /* VRAM slot type for dynamic mode routing */
-    u8 capStartUsesBreak;       /* 1 if cap start uses break variant (for dyn cache) */
-    u8 capStartUsesTrail;       /* 1 if cap start uses trail variant (for dyn cache) */
+    CellDecisionType type;      /* Semantic tile class used by the local resolver */
+    u8 capStartUsesBreak;       /* 1 if cap start uses break variant */
+    u8 capStartUsesTrail;       /* 1 if cap start uses trail variant */
     u8 useBlinkVariant;         /* 1 when decision strip comes from blink-off variant */
 } CellDecision;
 
@@ -2058,7 +2031,6 @@ static void trace_emit_cell_line(u8 cellIndex,
 static void trace_emit_pip_cell_line(u8 cellIndex,
                                      u8 segmentId,
                                      u8 renderIndex,
-                                     u8 dynamicMode,
                                      const u32 *pipStrip,
                                      u8 stripIndex,
                                      u16 tileIndex,
@@ -2071,11 +2043,10 @@ static void trace_emit_pip_cell_line(u8 cellIndex,
         return;
 
     kprintf(
-        "GAUGE_TRACE CELL lane=%u cell=%u seg=%u class=PIP type=%s strip=0x%08lX idx=%u req=%s res=%s tile=%u render=%u changed=%u states=%u\n",
+        "GAUGE_TRACE CELL lane=%u cell=%u seg=%u class=PIP strip=0x%08lX idx=%u req=%s res=%s tile=%u render=%u changed=%u states=%u\n",
         (unsigned int)s_traceContext.laneIndex,
         (unsigned int)cellIndex,
         (unsigned int)segmentId,
-        dynamicMode ? "DYNAMIC" : "FIXED",
         (unsigned long)(u32)pipStrip,
         (unsigned int)stripIndex,
         pip_state_to_text(requestedState),
@@ -2156,7 +2127,7 @@ static void trace_emit_recorded_cells(const GaugeLaneLayout *layout,
 #endif
 
 /**
- * Fill loop context -- loop-invariant state shared between fixed and dynamic.
+ * Fill loop context -- loop-invariant state shared across fill cells.
  *
  * Computed once before the cell loop by init_fill_loop_context().
  * Contains break zone info, cap detection, and rendering parameters.
@@ -2174,8 +2145,8 @@ typedef struct
     u8 capEndCellIndex;
     u8 capStartSegId;
     u8 capEndSegId;
-    u8 capStartEnabled;               /* Dynamic mode may override to 0 if VRAM absent */
-    u8 capEndEnabled;                 /* Dynamic mode may override to 0 if VRAM absent */
+    u8 capStartEnabled;
+    u8 capEndEnabled;
     u8 blinkOffActive;
     u8 trailMode;
 } FillLoopContext;
@@ -2185,7 +2156,7 @@ typedef struct
  * Initialize fill loop context with loop-invariant state.
  *
  * Computes break zones, early-exit boundaries, and cap detection.
- * Called once before the cell loop in both fixed and dynamic modes.
+ * Called once before the fill cell loop.
  *
  * @param layout              Layout configuration
  * @param valuePixels         Current value fill in pixels
@@ -2239,16 +2210,13 @@ static inline void init_fill_loop_context(const GaugeLaneLayout *layout,
 /**
  * Compute the rendering decision for a single cell.
  *
- * This is the unified decision function shared by process_fixed_mode() and
- * process_dynamic_mode(). It determines:
+ * This is the unified decision function shared by the fixed fill pipeline. It determines:
  * - Which ROM strip to use (body, end, trail, bridge, cap, blink-off variant)
  * - Which tile index within that strip
- * - Which cell type (for dynamic mode VRAM slot routing)
+ * - Which semantic cell type is active
  *
- * The caller provides bodyStrip as a parameter because its source differs
- * between modes:
- * - Fixed:   layout->tilesetBySegment[segmentId] (per-cell cache removed)
- * - Dynamic: layout->tilesetBySegment[segmentId]
+ * The caller provides bodyStrip so the local lane resolver can reuse the same
+ * classification logic with either base-lane or lane-local strips.
  *
  * All other strips (end, trail, bridge, caps, blink variants) are looked up
  * from the layout inside this function.
@@ -2466,8 +2434,7 @@ static inline void compute_cell_decision(const GaugeLaneLayout *layout,
             }
             else
             {
-                /* No bridge tileset: fall back to body strip, fully filled.
-                 * Fixed mode renders this; dynamic mode skips via vramTileBridge==0. */
+                /* No bridge tileset: fall back to a fully filled body tile. */
                 const u32 *fallbackStrip = bodyStrip;
                 if (ctx->blinkOffActive && blinkOffBodyStrip && bridgeInTrailZone)
                     fallbackStrip = blinkOffBodyStrip;
@@ -2565,12 +2532,12 @@ static inline void compute_cell_decision(const GaugeLaneLayout *layout,
         }
     }
 
-    /* Trail strip with body fallback (defensive, matches dynamic mode) */
+    /* Trail strip with body fallback (defensive). */
     const u32 *trailStripFinal = trailStripUse ? trailStripUse : bodyStripUse;
     /* NOTE: full-trail index depends on the strip type:
      * - TRAIL strip uses s_trailTileIndexByValueTrail[0][8] (index 7)
      * - BODY strip uses STRIP_INDEX_FULL_TRAIL (index 8)
-     * This keeps FIXED and DYNAMIC behavior consistent when no trail strip exists. */
+     * This preserves the previous body fallback when no dedicated trail strip exists. */
     const u8 fullTrailIndex = (trailStripUse != NULL)
         ? s_trailTileIndexByValueTrail[0][8]
         : STRIP_INDEX_FULL_TRAIL;
@@ -3027,7 +2994,6 @@ static void layout_free_optional_ptr(void **ptr,
                                      const void *defaultViewC);
 static void layout_reset_bridge_views(GaugeLaneLayout *layout);
 static void layout_reset_pip_runtime_views(GaugeLaneLayout *layout);
-static inline u16 compute_pip_render_state_lut_index(u8 pipState, u8 renderIndex);
 static u8 layout_sync_optional_segment_tilesets_by_usage(u8 hasAny,
                                                           const u32 ***segmentTilesetsBySegment,
                                                           u8 segmentCount);
@@ -3301,10 +3267,6 @@ static void build_pip_luts(GaugeLaneLayout *layout)
         !layout_ensure_byte_lut_storage(&layout->pipRenderStripIndexByState,
                                         GAUGE_PIP_RENDER_STATE_LUT_SIZE,
                                         s_zeroPipRenderStateLut,
-                                        0) ||
-        !layout_ensure_byte_lut_storage(&layout->pipRenderTileOffsetByState,
-                                        GAUGE_PIP_RENDER_STATE_LUT_SIZE,
-                                        s_zeroPipRenderStateLut,
                                         0))
     {
         layout_reset_pip_runtime_views(layout);
@@ -3328,7 +3290,6 @@ static void build_pip_luts(GaugeLaneLayout *layout)
         layout->pipRenderExtraVFlipByRenderIndex[i] = 0;
     }
     memset(layout->pipRenderStripIndexByState, 0, GAUGE_PIP_RENDER_STATE_LUT_SIZE);
-    memset(layout->pipRenderTileOffsetByState, 0, GAUGE_PIP_RENDER_STATE_LUT_SIZE);
 
     u8 fillIndex = 0;
     while (fillIndex < layout->length && layout->pipCount < layout->length)
@@ -3371,8 +3332,8 @@ static void build_pip_luts(GaugeLaneLayout *layout)
     }
 
     /* Build physical render LUT: each fillIndex is duplicated by segment height.
-     * At the same time, precompute state-major strip/tile address LUTs used by
-     * the fixed and dynamic PIP hot paths.
+     * At the same time, precompute the state-major strip index LUT used by the
+     * fixed PIP hot path.
      */
     for (u8 i = 0; i < layout->length && layout->pipRenderCount < maxRenderCount; i++)
     {
@@ -3425,9 +3386,7 @@ static void build_pip_luts(GaugeLaneLayout *layout)
 
             const u8 renderIndex = layout->pipRenderCount;
             const u8 stripStateStride = sourceWidth;
-            const u8 tileStateStride = (u8)(sourceWidth * sourceHeight);
             const u8 stripBaseIndex = (u8)((u16)sourceRow * (u16)(sourceWidth * layout->pipStateCountBySegment[segmentId]) + sourceCol);
-            const u8 tileBaseOffset = (u8)((u16)sourceRow * sourceWidth + sourceCol);
             layout->pipRenderFillIndexByRenderIndex[renderIndex] = i;
             layout->pipRenderRowByRenderIndex[renderIndex] = row;
             layout->pipRenderExtraHFlipByRenderIndex[renderIndex] = extraHFlip;
@@ -3438,8 +3397,6 @@ static void build_pip_luts(GaugeLaneLayout *layout)
                 const u16 renderStateIndex = compute_pip_render_state_lut_index(pipState, renderIndex);
                 layout->pipRenderStripIndexByState[renderStateIndex] =
                     (u8)(stripBaseIndex + ((u16)pipState * stripStateStride));
-                layout->pipRenderTileOffsetByState[renderStateIndex] =
-                    (u8)(tileBaseOffset + ((u16)pipState * tileStateStride));
             }
             layout->pipRenderCount++;
         }
@@ -3738,7 +3695,6 @@ static const OptionalPointerBinding s_layoutOptionalPointerBindings[] = {
     OPTIONAL_POINTER_BINDING(pipRenderExtraHFlipByRenderIndex, s_zeroCellFlags),
     OPTIONAL_POINTER_BINDING(pipRenderExtraVFlipByRenderIndex, s_zeroCellFlags),
     OPTIONAL_POINTER_BINDING(pipRenderStripIndexByState, s_zeroPipRenderStateLut),
-    OPTIONAL_POINTER_BINDING(pipRenderTileOffsetByState, s_zeroPipRenderStateLut),
     OPTIONAL_POINTER_BINDING(bridgeEndByFillIndex, s_zeroCellFlags),
     OPTIONAL_POINTER_BINDING(bridgeBreakByFillIndex, s_zeroCellFlags),
     OPTIONAL_POINTER_BINDING(bridgeBreakBoundaryByFillIndex, s_zeroCellFlags)
@@ -3752,8 +3708,7 @@ static const OptionalPointerBinding s_layoutPipRuntimeBindings[] = {
     OPTIONAL_POINTER_BINDING(pipRenderRowByRenderIndex, s_zeroCellFlags),
     OPTIONAL_POINTER_BINDING(pipRenderExtraHFlipByRenderIndex, s_zeroCellFlags),
     OPTIONAL_POINTER_BINDING(pipRenderExtraVFlipByRenderIndex, s_zeroCellFlags),
-    OPTIONAL_POINTER_BINDING(pipRenderStripIndexByState, s_zeroPipRenderStateLut),
-    OPTIONAL_POINTER_BINDING(pipRenderTileOffsetByState, s_zeroPipRenderStateLut)
+    OPTIONAL_POINTER_BINDING(pipRenderStripIndexByState, s_zeroPipRenderStateLut)
 };
 
 static const OptionalPointerBinding s_layoutBridgeBindings[] = {
@@ -4605,692 +4560,6 @@ static inline void invalidate_render_cache(GaugeLogic *logic)
    GaugeLaneInstance internals
    ============================================================================= */
 
-/* =============================================================================
-   Dynamic VRAM mode implementation
-   ============================================================================= */
-
-static void reset_dynamic_buffer_views(GaugeDynamic *dyn)
-{
-    if (!dyn)
-        return;
-
-    dyn->vramTileEmpty = NULL;
-    dyn->vramTileFullValue = NULL;
-    dyn->vramTileFullTrail = NULL;
-    dyn->vramTileBridge = NULL;
-    dyn->vramTilePipBase = NULL;
-    dyn->cachedFillIndexBridge = NULL;
-    dyn->cellCurrentTileIndex = NULL;
-    dyn->cellValid = NULL;
-    dyn->segmentCount = 0;
-    dyn->cellCount = 0;
-}
-
-static u8 alloc_dynamic_buffers_from_arena(GaugeDynamic *dyn,
-                                           u8 segmentCount,
-                                           u8 cellCount,
-                                           GaugeRuntimeArena *runtimeArena)
-{
-    reset_dynamic_buffer_views(dyn);
-    dyn->vramTileEmpty = (u16 *)gauge_runtime_arena_alloc(runtimeArena,
-                                                          (u16)(segmentCount * (u8)sizeof(u16)),
-                                                          2);
-    dyn->vramTileFullValue = (u16 *)gauge_runtime_arena_alloc(runtimeArena,
-                                                              (u16)(segmentCount * (u8)sizeof(u16)),
-                                                              2);
-    dyn->vramTileFullTrail = (u16 *)gauge_runtime_arena_alloc(runtimeArena,
-                                                              (u16)(segmentCount * (u8)sizeof(u16)),
-                                                              2);
-    dyn->vramTileBridge = (u16 *)gauge_runtime_arena_alloc(runtimeArena,
-                                                           (u16)(segmentCount * (u8)sizeof(u16)),
-                                                           2);
-    dyn->vramTilePipBase = (u16 *)gauge_runtime_arena_alloc(runtimeArena,
-                                                            (u16)(segmentCount * (u8)sizeof(u16)),
-                                                            2);
-    dyn->cachedFillIndexBridge = (u8 *)gauge_runtime_arena_alloc(runtimeArena,
-                                                                 segmentCount,
-                                                                 1);
-    dyn->cellCurrentTileIndex = (u16 *)gauge_runtime_arena_alloc(runtimeArena,
-                                                                 (u16)(cellCount * (u8)sizeof(u16)),
-                                                                 2);
-    dyn->cellValid = (u8 *)gauge_runtime_arena_alloc(runtimeArena,
-                                                     cellCount,
-                                                     1);
-    if (!dyn->vramTileEmpty || !dyn->vramTileFullValue || !dyn->vramTileFullTrail ||
-        !dyn->vramTileBridge || !dyn->vramTilePipBase || !dyn->cachedFillIndexBridge ||
-        !dyn->cellCurrentTileIndex || !dyn->cellValid)
-    {
-        reset_dynamic_buffer_views(dyn);
-        return 0;
-    }
-    dyn->segmentCount = segmentCount;
-    dyn->cellCount = cellCount;
-    return 1;
-}
-
-/**
- * Initialize dynamic mode VRAM allocation.
- *
- * VRAM layout (allocated sequentially from vramBase):
- *
- *   Per used segment (repeated for each segment with a body tileset):
- *   +-------------------+
- *   | Empty tile (0,0)  |  1 tile  - value=0, trail=0
- *   +-------------------+
- *   | Full value (8,8)  |  1 tile  - value=8, trail=8
- *   +-------------------+
- *   | Full trail (0,8)  |  1 tile  - value=0, trail=8  (only if trailEnabled)
- *   +-------------------+
- *
- *   Partial tiles (1 per GaugeLaneInstance, shared across all segments):
- *   +-------------------+
- *   | Partial value     |  1 tile  - streamed on demand (also "both" case)
- *   +-------------------+
- *   | Partial trail     |  1 tile  - streamed on demand (only if trailEnabled)
- *   +-------------------+
- *   | Partial END       |  1 tile  - cap tile (only if any segment has END)
- *   +-------------------+
- *   | Partial trail 2nd |  1 tile  - 2nd trail break (only if trail + END)
- *   +-------------------+
- *
- * Standard tiles are pre-loaded once at init (preload_dynamic_standard_tiles).
- * Partial tiles are streamed per-frame only when their content changes.
- *
- * @param dyn          Dynamic mode data to initialize
- * @param layout       Layout configuration (segments, tilesets)
- * @param vramBase     Base VRAM tile index
- * @param trailEnabled Whether trail rendering is active
- */
-static u8 init_dynamic_vram(GaugeDynamic *dyn,
-                            const GaugeLaneLayout *layout,
-                            u16 vramBase,
-                            u8 trailEnabled,
-                            GaugeRuntimeArena *runtimeArena)
-{
-    u16 nextVram = vramBase;
-    u8 hasEndTileset = 0;
-    u8 capStartEnabled = 0;
-    u8 capEndEnabled = 0;
-
-    if (!alloc_dynamic_buffers_from_arena(dyn, layout->segmentCount, layout->length, runtimeArena))
-        return 0;
-
-    /* Initialize cache to invalid */
-    for (u8 i = 0; i < dyn->segmentCount; i++)
-    {
-        dyn->vramTileEmpty[i] = 0;
-        dyn->vramTileFullValue[i] = 0;
-        dyn->vramTileFullTrail[i] = 0;
-        dyn->vramTileBridge[i] = 0;
-        dyn->vramTilePipBase[i] = 0;
-        dyn->cachedFillIndexBridge[i] = CACHE_INVALID_U8;
-    }
-
-    dyn->vramTileCapStart = 0;
-    dyn->vramTileCapEnd = 0;
-
-    dyn->loadedSegmentPartialValue = CACHE_INVALID_U8;
-    dyn->cachedFillIndexPartialValue = CACHE_INVALID_U8;
-    dyn->loadedSegmentPartialTrail = CACHE_INVALID_U8;
-    dyn->cachedFillIndexPartialTrail = CACHE_INVALID_U8;
-    dyn->loadedSegmentPartialEnd = CACHE_INVALID_U8;
-    dyn->cachedFillIndexPartialEnd = CACHE_INVALID_U8;
-    dyn->loadedSegmentPartialTrailSecond = CACHE_INVALID_U8;
-    dyn->cachedFillIndexPartialTrailSecond = CACHE_INVALID_U8;
-    dyn->cachedFillIndexCapStart = CACHE_INVALID_U8;
-    dyn->cachedFillIndexCapEnd = CACHE_INVALID_U8;
-    dyn->loadedCapStartUsesBreak = CACHE_INVALID_U8;
-    dyn->loadedCapStartUsesTrail = CACHE_INVALID_U8;
-
-    /* Initialize tilemap cache */
-    for (u8 i = 0; i < dyn->cellCount; i++)
-    {
-        dyn->cellCurrentTileIndex[i] = CACHE_INVALID_U16;
-    }
-
-    /* Determine which segments are used */
-    u8 segmentUsed[GAUGE_MAX_SEGMENTS] = {0};
-    for (u8 i = 0; i < layout->length; i++)
-    {
-        const u8 segmentId = layout->segmentIdByCell[i];
-        if (layout->tilesetBySegment[segmentId] || layout->gainTilesetBySegment[segmentId])
-        {
-            segmentUsed[segmentId] = 1;
-        }
-    }
-
-    /* Determine if any used segment has END tiles */
-    for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-    {
-        if (segmentUsed[segmentId] &&
-            (layout->tilesetEndBySegment[segmentId] || layout->gainTilesetEndBySegment[segmentId]))
-            hasEndTileset = 1;
-    }
-
-    /* Read cached cap flags */
-    capStartEnabled = layout->capStartEnabled;
-    capEndEnabled = layout->capEndEnabled;
-
-    /* Allocate standard tiles for each used segment */
-    for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-    {
-        if (!segmentUsed[segmentId])
-            continue;
-
-        /* Empty tile (0,0) */
-        dyn->vramTileEmpty[segmentId] = nextVram;
-        nextVram++;
-
-        /* Full value tile (8,8) */
-        dyn->vramTileFullValue[segmentId] = nextVram;
-        nextVram++;
-
-        /* Full trail tile (0,8) - only if trail enabled */
-        if (trailEnabled)
-        {
-            dyn->vramTileFullTrail[segmentId] = nextVram;
-            nextVram++;
-        }
-
-        /* Bridge tile (per segment) */
-        if (layout->tilesetBridgeBySegment[segmentId] || layout->gainTilesetBridgeBySegment[segmentId])
-        {
-            dyn->vramTileBridge[segmentId] = nextVram;
-            nextVram++;
-        }
-    }
-
-    /* Partial tiles (scalars - 1 per GaugeLaneInstance, streamed on demand) */
-    dyn->vramTilePartialValue = nextVram;  /* Also used for "both" case */
-    nextVram++;
-
-    if (trailEnabled)
-    {
-        dyn->vramTilePartialTrail = nextVram;
-        nextVram++;
-    }
-    else
-    {
-        /* If trail disabled, set to 0 (won't be used) */
-        dyn->vramTilePartialTrail = 0;
-    }
-
-    if (hasEndTileset)
-    {
-        dyn->vramTilePartialEnd = nextVram;
-        nextVram++;
-    }
-    else
-    {
-        dyn->vramTilePartialEnd = 0;
-    }
-
-    if (trailEnabled && hasEndTileset)
-    {
-        dyn->vramTilePartialTrailSecond = nextVram;
-        nextVram++;
-    }
-    else
-    {
-        dyn->vramTilePartialTrailSecond = 0;
-    }
-
-    /* Cap tiles (1 per lane if enabled) */
-    if (capStartEnabled)
-    {
-        dyn->vramTileCapStart = nextVram;
-        nextVram++;
-    }
-    if (capEndEnabled)
-    {
-        dyn->vramTileCapEnd = nextVram;
-        nextVram++;
-    }
-
-    return 1;
-}
-
-/**
- * Preload standard tiles for dynamic mode (called once at init).
- *
- * Uploads the 3 "static" tiles for each segment (empty, full value, full trail)
- * to their pre-allocated VRAM slots. These tiles never change at runtime.
- *
- * @param dyn          Dynamic VRAM data (contains VRAM tile indices)
- * @param layout       Layout with tileset pointers
- * @param trailEnabled 1 if trail effect is active (uploads full trail tiles)
- */
-static void preload_dynamic_standard_tiles(GaugeDynamic *dyn, const GaugeLaneLayout *layout, u8 trailEnabled)
-{
-    const u8 emptyIndex = STRIP_INDEX_EMPTY;
-    const u8 fullValueIndex = STRIP_INDEX_FULL;
-    const u8 fullTrailIndexBody = STRIP_INDEX_FULL_TRAIL;
-    const u8 fullTrailIndexTrail = s_trailTileIndexByValueTrail[0][8]; /* value=0, trail=8 */
-
-    for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-    {
-        const u32 *bodyStrip = select_base_strip(layout->tilesetBySegment[segmentId],
-                                                 layout->gainTilesetBySegment[segmentId],
-                                                 GAUGE_TRAIL_STATE_DAMAGE);
-        if (!bodyStrip)
-            continue;
-
-        /* Upload empty tile */
-        if (dyn->vramTileEmpty[segmentId] != 0)
-            upload_fill_tile(bodyStrip, emptyIndex, dyn->vramTileEmpty[segmentId], DMA_QUEUE);
-
-        /* Upload full value tile */
-        if (dyn->vramTileFullValue[segmentId] != 0)
-            upload_fill_tile(bodyStrip, fullValueIndex, dyn->vramTileFullValue[segmentId], DMA_QUEUE);
-
-        /* Upload full trail tile (only if trail enabled) */
-        if (trailEnabled && dyn->vramTileFullTrail[segmentId] != 0)
-        {
-            const u32 *trailStrip = select_base_strip(layout->tilesetTrailBySegment[segmentId],
-                                                      layout->gainTilesetTrailBySegment[segmentId],
-                                                      GAUGE_TRAIL_STATE_DAMAGE);
-            if (trailStrip)
-                upload_fill_tile(trailStrip, fullTrailIndexTrail, dyn->vramTileFullTrail[segmentId], DMA_QUEUE);
-            else
-                upload_fill_tile(bodyStrip, fullTrailIndexBody, dyn->vramTileFullTrail[segmentId], DMA_QUEUE);
-        }
-    }
-
-    /* Preload cap end tile (index 0 of END strip) if enabled */
-    if (dyn->vramTileCapEnd != 0)
-    {
-        const u8 cellEnd = layout->cellIndexByFillIndex[layout->length - 1];
-        const u8 endSegId = layout->segmentIdByCell[cellEnd];
-        const u32 *capEndStrip = select_base_strip(layout->tilesetCapEndBySegment[endSegId],
-                                                   layout->gainTilesetCapEndBySegment[endSegId],
-                                                   GAUGE_TRAIL_STATE_DAMAGE);
-        if (capEndStrip)
-            upload_fill_tile(capEndStrip, emptyIndex, dyn->vramTileCapEnd, DMA_QUEUE);
-    }
-}
-
-
-/**
- * Reset all dynamic VRAM caches to force re-upload on next render.
- *
- * Called when blink state or trail mode changes, since the cached tiles
- * may now be from the wrong tileset group (e.g., base vs blink-off).
- *
- * @param dyn  Dynamic VRAM data to reset
- */
-static void reset_dynamic_blink_cache(GaugeDynamic *dyn)
-{
-    dyn->loadedSegmentPartialValue = CACHE_INVALID_U8;
-    dyn->cachedFillIndexPartialValue = CACHE_INVALID_U8;
-    dyn->loadedSegmentPartialTrail = CACHE_INVALID_U8;
-    dyn->cachedFillIndexPartialTrail = CACHE_INVALID_U8;
-    dyn->loadedSegmentPartialEnd = CACHE_INVALID_U8;
-    dyn->cachedFillIndexPartialEnd = CACHE_INVALID_U8;
-    dyn->loadedSegmentPartialTrailSecond = CACHE_INVALID_U8;
-    dyn->cachedFillIndexPartialTrailSecond = CACHE_INVALID_U8;
-    dyn->cachedFillIndexCapStart = CACHE_INVALID_U8;
-    dyn->cachedFillIndexCapEnd = CACHE_INVALID_U8;
-    dyn->loadedCapStartUsesBreak = CACHE_INVALID_U8;
-    dyn->loadedCapStartUsesTrail = CACHE_INVALID_U8;
-
-    for (u8 i = 0; i < dyn->segmentCount; i++)
-    {
-        dyn->cachedFillIndexBridge[i] = CACHE_INVALID_U8;
-    }
-}
-
-/**
- * Reload the "full trail" standard tiles when blink state or trail mode changes.
- *
- * In dynamic mode, full trail tiles (value=0, trail=8) are pre-loaded once.
- * When blink toggles, they must be re-uploaded from the correct tileset
- * (normal or blink-off) so that TRAIL_FULL cells display correctly.
- *
- * @param dyn          Dynamic VRAM data
- * @param layout       Layout with tileset pointers
- * @param useBlinkOff  1 if blink-off tilesets should be used
- * @param trailMode    Current trail mode (DAMAGE or GAIN)
- */
-static void reload_dynamic_full_trail_tiles(GaugeDynamic *dyn,
-                                            const GaugeLaneLayout *layout,
-                                            u8 useBlinkOff,
-                                            u8 trailMode)
-{
-    const u8 fullTrailIndexBody = STRIP_INDEX_FULL_TRAIL;
-    const u8 fullTrailIndexTrail = s_trailTileIndexByValueTrail[0][8];
-
-    for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-    {
-        const u16 vramTile = dyn->vramTileFullTrail[segmentId];
-        if (vramTile == 0)
-            continue;
-
-        const u32 *blinkOffTrailStrip = select_blink_strip(
-            layout->blinkOffTilesetTrailBySegment[segmentId],
-            layout->gainBlinkOffTilesetTrailBySegment[segmentId],
-            trailMode);
-        const u32 *blinkOffBodyStrip = select_blink_strip(
-            layout->blinkOffTilesetBySegment[segmentId],
-            layout->gainBlinkOffTilesetBySegment[segmentId],
-            trailMode);
-
-        if (useBlinkOff && blinkOffTrailStrip)
-        {
-            upload_fill_tile(blinkOffTrailStrip,
-                             fullTrailIndexTrail, vramTile, DMA);
-        }
-        else if (useBlinkOff && blinkOffBodyStrip)
-        {
-            upload_fill_tile(blinkOffBodyStrip,
-                             fullTrailIndexBody, vramTile, DMA);
-        }
-        else
-        {
-            const u32 *trailStrip = select_base_strip(layout->tilesetTrailBySegment[segmentId],
-                                                      layout->gainTilesetTrailBySegment[segmentId],
-                                                      trailMode);
-            const u32 *bodyStrip = select_base_strip(layout->tilesetBySegment[segmentId],
-                                                     layout->gainTilesetBySegment[segmentId],
-                                                     trailMode);
-            if (trailStrip)
-                upload_fill_tile(trailStrip, fullTrailIndexTrail, vramTile, DMA);
-            else if (bodyStrip)
-                upload_fill_tile(bodyStrip, fullTrailIndexBody, vramTile, DMA);
-        }
-    }
-}
-
-/**
- * Reload full value/empty tiles when trail mode changes (dynamic mode).
- */
-static void reload_dynamic_full_body_tiles(GaugeDynamic *dyn,
-                                           const GaugeLaneLayout *layout,
-                                           u8 trailMode)
-{
-    const u8 fullValueIndex = STRIP_INDEX_FULL;
-    const u8 emptyIndex = STRIP_INDEX_EMPTY;
-
-    for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-    {
-        const u32 *bodyStrip = select_base_strip(layout->tilesetBySegment[segmentId],
-                                                 layout->gainTilesetBySegment[segmentId],
-                                                 trailMode);
-        if (!bodyStrip)
-            continue;
-
-        const u16 vramTileFull = dyn->vramTileFullValue[segmentId];
-        if (vramTileFull)
-            upload_fill_tile(bodyStrip, fullValueIndex, vramTileFull, DMA);
-
-        const u16 vramTileEmpty = dyn->vramTileEmpty[segmentId];
-        if (vramTileEmpty)
-            upload_fill_tile(bodyStrip, emptyIndex, vramTileEmpty, DMA);
-    }
-}
-
-/**
- * Initialize tilemap positions, cell validity, and write initial tilemap (all empty).
- *
- * Pre-computes tilemap X/Y coordinates and cell validity for each cell to avoid
- * per-frame recalculation. Then writes all cells as empty tiles to the WINDOW plane.
- *
- * @param lane  GaugeLaneInstance to initialize (must have layout and dyn set)
- */
-static void init_dynamic_tilemap(GaugeLaneInstance *lane)
-{
-    const GaugeLaneLayout *layout = lane->layout;
-    GaugeDynamic *dyn = &lane->dyn;
-    GaugeTilemapSpan tilemapSpan;
-
-    tilemap_span_reset(&tilemapSpan);
-
-    /* Pre-calculate tilemap positions and cell validity for each cell */
-    for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
-    {
-        compute_tile_xy(layout->orientation, lane->originX, lane->originY, cellIndex,
-                        &layout->tilemapPosByCell[cellIndex].x,
-                        &layout->tilemapPosByCell[cellIndex].y);
-
-        /* Pre-compute cell validity (avoids tileset NULL check in render loop) */
-        const u8 segmentId = layout->segmentIdByCell[cellIndex];
-        dyn->cellValid[cellIndex] = (layout->tilesetBySegment[segmentId] != NULL ||
-                                     layout->gainTilesetBySegment[segmentId] != NULL) ? 1 : 0;
-    }
-
-    /* Write initial tilemap (all empty tiles) */
-    const u16 attrBase = TILE_ATTR_FULL(layout->palette, layout->priority,
-                                        layout->verticalFlip, layout->horizontalFlip, 0);
-    for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
-    {
-        if (!dyn->cellValid[cellIndex])
-            continue;
-
-        const u8 segmentId = layout->segmentIdByCell[cellIndex];
-        const u16 vramTile = dyn->vramTileEmpty[segmentId];
-        tilemap_span_push(&tilemapSpan,
-                          layout->orientation,
-                          attrBase,
-                          layout->tilemapPosByCell[cellIndex].x,
-                          layout->tilemapPosByCell[cellIndex].y,
-                          vramTile);
-
-        /* Initialize cache to avoid redundant writes on first update */
-        dyn->cellCurrentTileIndex[cellIndex] = vramTile;
-    }
-
-    tilemap_span_flush(&tilemapSpan, layout->orientation);
-}
-
-/**
- * Compute tile position for one physical PIP render tile.
- *
- * Base position comes from fillIndex timeline.
- * Then a positive transverse shift is applied:
- * - horizontal gauge: Y += segmentOffsetTiles + row
- * - vertical gauge:   X += segmentOffsetTiles + row
- */
-static inline void compute_pip_render_xy(const GaugeLaneLayout *layout,
-                                         u16 originX,
-                                         u16 originY,
-                                         u8 fillIndex,
-                                         u8 row,
-                                         u16 *outX,
-                                         u16 *outY)
-{
-    const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
-    const u8 segmentId = layout->segmentIdByCell[cellIndex];
-    const u16 transverseShift = (u16)layout->pipOffsetBySegment[segmentId] + row;
-
-    compute_tile_xy(layout->orientation, originX, originY, cellIndex, outX, outY);
-    if (layout->orientation == GAUGE_ORIENT_HORIZONTAL)
-        *outY = (u16)(*outY + transverseShift);
-    else
-        *outX = (u16)(*outX + transverseShift);
-}
-
-/*
- * State-major PIP render LUT indexing.
- *
- * The first dimension is the resolved PIP state (EMPTY / VALUE / LOSS / GAIN /
- * BLINK_OFF). The second dimension is the physical render tile index.
- *
- * Example:
- *   lut[PIP_STATE_GAIN, renderIndex]
- * becomes
- *   lut[compute_pip_render_state_lut_index(PIP_STATE_GAIN, renderIndex)]
- */
-static inline u16 compute_pip_render_state_lut_index(u8 pipState, u8 renderIndex)
-{
-    return (u16)(((u16)pipState * GAUGE_PIP_MAX_RENDER_TILES) + renderIndex);
-}
-
-/**
- * Compute compact PIP strip index for SGDK row-major tilesets.
- *
- * Packing order is row -> state -> col:
- *   index = row * (sourceWidth * pipStateCount) + pipState * sourceWidth + sourceCol
- */
-static inline u8 compute_pip_strip_index(u8 sourceWidth,
-                                         u8 pipStateCount,
-                                         u8 pipState,
-                                         u8 row,
-                                         u8 sourceCol)
-{
-    const u16 rowStride = (u16)sourceWidth * pipStateCount;
-    const u16 index = (u16)row * rowStride + (u16)pipState * sourceWidth + sourceCol;
-    return (u8)index;
-}
-
-/**
- * Initialize dynamic PIP VRAM layout with shared slots per segment/state.
- *
- * Slot mapping per segment:
- *   base + state * (sourceWidth * sourceHeight) + sourceRow * sourceWidth + sourceCol
- * where state is derived from the compact PIP strip state order.
- *
- * Runtime then updates only tilemap indices. The local tile offset for each
- * renderIndex/state pair is precomputed at build time, so the hot path only
- * does state resolution + LUT lookup.
- */
-static u8 init_dynamic_pip_vram(GaugeLaneInstance *lane, GaugeRuntimeArena *runtimeArena)
-{
-    const GaugeLaneLayout *layout = lane->layout;
-    GaugeDynamic *dyn = &lane->dyn;
-    GaugeTilemapSpan tilemapSpan;
-    u16 nextVram = lane->vramBase;
-    const u8 renderCount = layout->pipRenderCount;
-
-    if (!alloc_dynamic_buffers_from_arena(dyn, layout->segmentCount, renderCount, runtimeArena))
-        return 0;
-
-    tilemap_span_reset(&tilemapSpan);
-
-    for (u8 segmentId = 0; segmentId < dyn->segmentCount; segmentId++)
-    {
-        dyn->vramTileEmpty[segmentId] = 0;
-        dyn->vramTileFullValue[segmentId] = 0;
-        dyn->vramTileFullTrail[segmentId] = 0;
-        dyn->vramTileBridge[segmentId] = 0;
-        dyn->vramTilePipBase[segmentId] = 0;
-        dyn->cachedFillIndexBridge[segmentId] = CACHE_INVALID_U8;
-    }
-
-    dyn->vramTileCapStart = 0;
-    dyn->vramTileCapEnd = 0;
-    dyn->vramTilePartialValue = 0;
-    dyn->vramTilePartialTrail = 0;
-    dyn->vramTilePartialEnd = 0;
-    dyn->vramTilePartialTrailSecond = 0;
-    dyn->loadedSegmentPartialValue = CACHE_INVALID_U8;
-    dyn->cachedFillIndexPartialValue = CACHE_INVALID_U8;
-    dyn->loadedSegmentPartialTrail = CACHE_INVALID_U8;
-    dyn->cachedFillIndexPartialTrail = CACHE_INVALID_U8;
-    dyn->loadedSegmentPartialEnd = CACHE_INVALID_U8;
-    dyn->cachedFillIndexPartialEnd = CACHE_INVALID_U8;
-    dyn->loadedSegmentPartialTrailSecond = CACHE_INVALID_U8;
-    dyn->cachedFillIndexPartialTrailSecond = CACHE_INVALID_U8;
-    dyn->cachedFillIndexCapStart = CACHE_INVALID_U8;
-    dyn->cachedFillIndexCapEnd = CACHE_INVALID_U8;
-    dyn->loadedCapStartUsesBreak = CACHE_INVALID_U8;
-    dyn->loadedCapStartUsesTrail = CACHE_INVALID_U8;
-
-    for (u8 renderIndex = 0; renderIndex < dyn->cellCount; renderIndex++)
-    {
-        dyn->cellCurrentTileIndex[renderIndex] = CACHE_INVALID_U16;
-        dyn->cellValid[renderIndex] = 0;
-    }
-
-    /* Preload all states for each segment using the compact strip layout. */
-    for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-    {
-        const u32 *pipStrip = layout->pipTilesetBySegment[segmentId];
-        if (!pipStrip)
-            continue;
-
-        u8 sourceWidth = layout->pipSourceWidthBySegment[segmentId];
-        if (sourceWidth == 0)
-            sourceWidth = 1;
-        u8 sourceHeight = layout->pipSourceHeightBySegment[segmentId];
-        if (sourceHeight == 0)
-            sourceHeight = 1;
-        if (sourceHeight > 4)
-            sourceHeight = 4;
-
-        u8 pipStateCount = layout->pipStateCountBySegment[segmentId];
-        if (pipStateCount < 2)
-            continue;
-
-        dyn->vramTilePipBase[segmentId] = nextVram;
-
-        for (u8 state = 0; state < pipStateCount; state++)
-        {
-            for (u8 row = 0; row < sourceHeight; row++)
-            {
-                const u8 stripIndex = compute_pip_strip_index(sourceWidth,
-                                                               pipStateCount,
-                                                               state,
-                                                               row,
-                                                               0);
-                const u32 *src = pipStrip + FILL_IDX_TO_OFFSET(stripIndex);
-                VDP_loadTileData(src, nextVram, sourceWidth, DMA_QUEUE);
-                nextVram = (u16)(nextVram + sourceWidth);
-            }
-        }
-    }
-
-    /* Initialize tilemap with EMPTY state for each render tile. */
-    for (u8 targetRow = 0; targetRow < 4; targetRow++)
-    {
-        for (u8 renderIndex = 0; renderIndex < renderCount; renderIndex++)
-        {
-            const u8 fillIndex = layout->pipRenderFillIndexByRenderIndex[renderIndex];
-            if (fillIndex == CACHE_INVALID_U8)
-                continue;
-
-            const u8 renderRow = layout->pipRenderRowByRenderIndex[renderIndex];
-            if (renderRow != targetRow)
-                continue;
-
-            const u8 extraHFlip = layout->pipRenderExtraHFlipByRenderIndex[renderIndex];
-            const u8 extraVFlip = layout->pipRenderExtraVFlipByRenderIndex[renderIndex];
-            const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
-            const u8 segmentId = layout->segmentIdByCell[cellIndex];
-            if (!layout->pipTilesetBySegment[segmentId] ||
-                layout->pipStateCountBySegment[segmentId] < 2)
-                continue;
-
-            const u16 pipBaseTile = dyn->vramTilePipBase[segmentId];
-            const u16 renderStateIndex = compute_pip_render_state_lut_index(PIP_STATE_EMPTY, renderIndex);
-            const u16 vramTile = (u16)(pipBaseTile + layout->pipRenderTileOffsetByState[renderStateIndex]);
-            const u16 attrBase = TILE_ATTR_FULL(layout->palette, layout->priority,
-                                                (u8)(layout->verticalFlip ^ extraVFlip),
-                                                (u8)(layout->horizontalFlip ^ extraHFlip),
-                                                0);
-
-            u16 x = 0;
-            u16 y = 0;
-            compute_pip_render_xy(layout, lane->originX, lane->originY, fillIndex, renderRow, &x, &y);
-            tilemap_span_push(&tilemapSpan, layout->orientation, attrBase, x, y, vramTile);
-
-            dyn->cellCurrentTileIndex[renderIndex] = vramTile;
-            dyn->cellValid[renderIndex] = 1;
-        }
-
-        tilemap_span_flush(&tilemapSpan, layout->orientation);
-    }
-
-    return 1;
-}
-
-/**
- * Initialize tilemap for PIP mode (one VRAM tile per rendered PIP tile).
- *
- * Allocates one VRAM tile per render tile, uploads the EMPTY state from each segment's
- * compact strip, and writes the initial tilemap. Cells are stored row-major so
- * runtime updates can batch contiguous uploads along the visible longitudinal axis.
- *
- * @param lane  GaugeLaneInstance to initialize (must have layout set)
- */
 static void write_tilemap_pip_init(GaugeLaneInstance *lane)
 {
     const GaugeLaneLayout *layout = lane->layout;
@@ -5369,7 +4638,7 @@ static void write_tilemap_pip_init(GaugeLaneInstance *lane)
  *
  * @param lane  GaugeLaneInstance to initialize (must have layout and vramBase set)
  */
-static void write_tilemap_fixed_init(GaugeLaneInstance *lane)
+static void write_tilemap_fill_init(GaugeLaneInstance *lane)
 {
     const GaugeLaneLayout *layout = lane->layout;
     GaugeTilemapSpan tilemapSpan;
@@ -5730,8 +4999,8 @@ static inline void apply_linkedLane_terminal_override_to_local(const LocalStripS
 {
     /* A linked lane terminal override only makes sense when the local skin
      * provides a dedicated END strip. Otherwise, forcing PARTIAL_END would
-     * fall back to BODY and can overwrite the shared dynamic PARTIAL_VALUE
-     * tile with a trail/end index. */
+     * fall back to BODY and replace the expected local body tile with a
+     * trail/end index. */
     if (!terminalOverrideActive || !isTerminalCell || !stripSet ||
         !stripSet->end || !resolved)
         return;
@@ -5743,99 +5012,6 @@ static inline void apply_linkedLane_terminal_override_to_local(const LocalStripS
     resolved->terminalOverrideApplied = 1;
     resolved->strip = resolve_local_strip_from_baseLane_type(
         stripSet, CELL_DECISION_PARTIAL_END, 0, 0);
-}
-
-static inline void apply_dynamic_constraints_to_local(const GaugeLaneInstance *lane,
-                                                      u8 segmentId,
-                                                      const u32 *fallbackBody,
-                                                      const u32 *fallbackTrail,
-                                                      CellDecisionType baseLaneType,
-                                                      u8 isLinkedLane,
-                                                      u8 isTerminalCell,
-                                                      u8 terminalOverrideActive,
-                                                      LocalResolvedDecision *resolved)
-{
-    if (lane->vramMode != GAUGE_VRAM_DYNAMIC)
-        return;
-
-    if (resolved->type == CELL_DECISION_BRIDGE &&
-        lane->dyn.vramTileBridge &&
-        lane->dyn.vramTileBridge[segmentId] == 0)
-    {
-        resolved->type = CELL_DECISION_STANDARD_FULL;
-        resolved->fillStripIndex = STRIP_INDEX_FULL;
-        resolved->strip = fallbackBody;
-    }
-    else if (resolved->type == CELL_DECISION_CAP_START && lane->dyn.vramTileCapStart == 0)
-    {
-        resolved->type = CELL_DECISION_PARTIAL_VALUE;
-        resolved->strip = fallbackBody;
-    }
-    else if (resolved->type == CELL_DECISION_CAP_END && lane->dyn.vramTileCapEnd == 0)
-    {
-        resolved->type = CELL_DECISION_PARTIAL_END;
-    }
-
-    /* Dynamic mode only has one PARTIAL_END VRAM slot.
-     * If terminal override is active on a linkedLane, avoid a second
-     * PARTIAL_END decision on non-terminal cells (would overwrite shared slot). */
-    if (terminalOverrideActive &&
-        isLinkedLane &&
-        !isTerminalCell &&
-        baseLaneType == CELL_DECISION_PARTIAL_END)
-    {
-        resolved->type = CELL_DECISION_PARTIAL_VALUE;
-        resolved->strip = fallbackBody;
-    }
-
-    if (resolved->type == CELL_DECISION_PARTIAL_END && lane->dyn.vramTilePartialEnd == 0)
-    {
-        resolved->type = CELL_DECISION_PARTIAL_VALUE;
-        resolved->strip = fallbackBody;
-    }
-
-    if (resolved->type == CELL_DECISION_PARTIAL_TRAIL2 &&
-        lane->dyn.vramTilePartialTrailSecond == 0)
-    {
-        if (lane->dyn.vramTilePartialTrail != 0)
-        {
-            resolved->type = CELL_DECISION_PARTIAL_TRAIL;
-            resolved->strip = fallbackTrail ? fallbackTrail : fallbackBody;
-        }
-        else
-        {
-            resolved->type = CELL_DECISION_PARTIAL_VALUE;
-            resolved->strip = fallbackBody;
-        }
-    }
-
-    if (resolved->type == CELL_DECISION_PARTIAL_TRAIL &&
-        lane->dyn.vramTilePartialTrail == 0)
-    {
-        resolved->type = CELL_DECISION_PARTIAL_VALUE;
-        resolved->strip = fallbackBody;
-    }
-
-    if (resolved->type == CELL_DECISION_STANDARD_TRAIL &&
-        lane->dyn.vramTileFullTrail &&
-        lane->dyn.vramTileFullTrail[segmentId] == 0)
-    {
-        if (lane->dyn.vramTilePartialTrail != 0)
-        {
-            resolved->type = CELL_DECISION_PARTIAL_TRAIL;
-            resolved->strip = fallbackTrail ? fallbackTrail : fallbackBody;
-            resolved->fillStripIndex = (resolved->strip == fallbackTrail &&
-                                        fallbackTrail != fallbackBody)
-                ? s_trailTileIndexByValueTrail[0][8]
-                : STRIP_INDEX_FULL_TRAIL;
-        }
-        else
-        {
-            resolved->type = CELL_DECISION_PARTIAL_VALUE;
-            resolved->strip = fallbackBody;
-            resolved->fillStripIndex = STRIP_INDEX_FULL_TRAIL;
-        }
-    }
 }
 
 static inline void clamp_local_decision_index(const u32 *bodyStrip,
@@ -5892,10 +5068,6 @@ static void resolve_local_decision_for_lane(const GaugeLaneInstance *lane,
         resolved->strip = fallbackBody;
         resolved->type = CELL_DECISION_PARTIAL_VALUE;
     }
-
-    apply_dynamic_constraints_to_local(lane, segmentId, fallbackBody, fallbackTrail,
-                                       baseLaneType, isLinkedLane, isTerminalCell,
-                                       terminalOverrideActive, resolved);
     clamp_local_decision_index(fallbackBody, fallbackTrail, resolved);
 }
 
@@ -6017,7 +5189,7 @@ static inline void resolve_fill_lane_cell_decision(GaugeLaneInstance *lane,
 }
 
 /**
- * Process fixed mode: stream tiles for all cells via DMA.
+ * Process fill mode: stream tiles for all cells via DMA.
  *
  * Each cell has its own dedicated VRAM tile. When the gauge value changes,
  * only the affected cells get new tile data DMA'd from ROM strips.
@@ -6037,12 +5209,12 @@ static inline void resolve_fill_lane_cell_decision(GaugeLaneInstance *lane,
  *
  * Cost: ~200 cycles per cell (DMA setup dominant), ~50 cycles for trivial cells
  */
-static void process_fixed_mode(GaugeLaneInstance *lane,
-                               u16 valuePixels,
-                               u16 trailPixelsRendered,
-                               u16 trailPixelsActual,
-                               u8 blinkOffActive,
-                               u8 trailMode)
+static void process_fill_mode(GaugeLaneInstance *lane,
+                              u16 valuePixels,
+                              u16 trailPixelsRendered,
+                              u16 trailPixelsActual,
+                              u8 blinkOffActive,
+                              u8 trailMode)
 {
     (void)trailPixelsActual;
     (void)blinkOffActive;
@@ -6103,213 +5275,6 @@ static void process_fixed_mode(GaugeLaneInstance *lane,
     if (traceEnabled)
         trace_emit_recorded_cells(layout, traceByCell);
 #endif
-}
-
-/**
- * Process dynamic mode -- Tilemap-based rendering algorithm.
- *
- * Uses baseLane-cached strip decision metadata (type/index + flags), resolves
- * local strips for this lane, then routes to the appropriate dynamic VRAM slot.
- * Standard tiles are pre-loaded; partial/cap/bridge tiles are streamed on demand.
- *
- * @param lane               Lane to process
- * @param valuePixels          Current value fill in pixels
- * @param trailPixelsRendered  Current trail fill in pixels (after blink)
- * @param trailPixelsActual    Current trail fill in pixels (before blink, used for bridges)
- * @param blinkOffActive       1 if blink-off rendering is active this frame
- * @param blinkOnChanged       1 if blink phase toggled this frame
- * @param trailMode            Current trail mode (DAMAGE/GAIN/NONE)
- * @param trailModeChanged     1 if trail mode changed this frame
- *
- * Cost: ~50 cycles for trivial cells, ~300-500 cycles for break zone cells
- */
-static void process_dynamic_mode(GaugeLaneInstance *lane,
-                                 u16 valuePixels,
-                                 u16 trailPixelsRendered,
-                                 u16 trailPixelsActual,
-                                 u8 blinkOffActive,
-                                 u8 blinkOnChanged,
-                                 u8 trailMode,
-                                 u8 trailModeChanged)
-{
-    (void)trailPixelsActual;
-    GaugeDynamic *dyn = &lane->dyn;
-    const GaugeLaneLayout *layout = lane->layout;
-    GaugeTilemapSpan tilemapSpan;
-    FillLaneResolveContext resolveContext;
-    if (!init_fill_lane_resolve_context(lane,
-                                        valuePixels,
-                                        trailPixelsRendered,
-                                        trailMode,
-                                        &resolveContext))
-        return;
-
-    tilemap_span_reset(&tilemapSpan);
-
-    /* Pre-compute tilemap attribute base (without tile index) */
-    const u16 attrBase = TILE_ATTR_FULL(layout->palette, layout->priority,
-                                        layout->verticalFlip, layout->horizontalFlip, 0);
-
-    /* Dynamic mode caches tile data in VRAM. When blink toggles or trail mode
-     * changes, the cached standard tiles (full/empty/trail) may now come from
-     * a different tileset (normal vs blink-off, damage vs gain). We must:
-     * 1. Invalidate partial tile caches (forces re-upload on next use)
-     * 2. Re-upload full body tiles if trail mode changed (DAMAGE<->GAIN)
-     * 3. Re-upload full trail tiles with the correct tileset variant */
-    const u8 layoutHasBlink = (trailMode == GAUGE_TRAIL_STATE_GAIN)
-                             ? layout->hasGainBlinkOff : layout->hasBlinkOff;
-    if ((blinkOnChanged && layoutHasBlink) || trailModeChanged)
-    {
-        reset_dynamic_blink_cache(dyn);
-        if (trailModeChanged)
-            reload_dynamic_full_body_tiles(dyn, layout, trailMode);
-        reload_dynamic_full_trail_tiles(dyn, layout, blinkOffActive, trailMode);
-    }
-
-    /* Forward iteration required: dynamic mode shares partial VRAM tiles across cells.
-     * With countdown, a lower-index cell could overwrite partial tile data needed by a
-     * higher-index cell that was processed first. Forward order ensures the last writer
-     * (highest fillIndex) wins, which matches the original design assumption.
-     * NOTE: countdown is safe for fixed mode (each cell has its own VRAM tile). */
-    for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
-    {
-        /* Skip invalid cells (pre-computed in init_dynamic_tilemap) */
-        if (!dyn->cellValid[cellIndex])
-            continue;
-
-        FillLaneCellDecision cellDecision;
-        resolve_fill_lane_cell_decision(lane, &resolveContext, cellIndex, &cellDecision);
-
-#if GAUGE_ENABLE_TRACE
-        if (s_traceContext.active)
-            trace_emit_cell_line(cellIndex,
-                                 cellDecision.segmentId,
-                                 cellDecision.baseLaneType,
-                                 cellDecision.baseLaneIdx,
-                                 cellDecision.terminalOverrideApplied,
-                                 &cellDecision.decision);
-#endif
-
-        /* === VRAM routing: map decision type to VRAM slot + cache === */
-        u16 vramTile = 0;
-        u8 needsUpload = 0;
-
-        switch (cellDecision.decision.type)
-        {
-        case CELL_DECISION_CAP_END:
-            vramTile = dyn->vramTileCapEnd;
-            if (dyn->cachedFillIndexCapEnd != cellDecision.decision.fillStripIndex)
-            {
-                needsUpload = 1;
-                dyn->cachedFillIndexCapEnd = cellDecision.decision.fillStripIndex;
-            }
-            break;
-
-        case CELL_DECISION_CAP_START:
-            vramTile = dyn->vramTileCapStart;
-            if (dyn->cachedFillIndexCapStart != cellDecision.decision.fillStripIndex ||
-                dyn->loadedCapStartUsesBreak != cellDecision.decision.capStartUsesBreak ||
-                dyn->loadedCapStartUsesTrail != cellDecision.decision.capStartUsesTrail)
-            {
-                needsUpload = 1;
-                dyn->cachedFillIndexCapStart = cellDecision.decision.fillStripIndex;
-                dyn->loadedCapStartUsesBreak = cellDecision.decision.capStartUsesBreak;
-                dyn->loadedCapStartUsesTrail = cellDecision.decision.capStartUsesTrail;
-            }
-            break;
-
-        case CELL_DECISION_BRIDGE:
-        {
-            const u16 vramTileBridge = dyn->vramTileBridge[cellDecision.segmentId];
-            if (vramTileBridge == 0)
-                continue;  /* No VRAM bridge allocated -> skip */
-            vramTile = vramTileBridge;
-            if (dyn->cachedFillIndexBridge[cellDecision.segmentId] != cellDecision.decision.fillStripIndex)
-            {
-                needsUpload = 1;
-                dyn->cachedFillIndexBridge[cellDecision.segmentId] = cellDecision.decision.fillStripIndex;
-            }
-            break;
-        }
-
-        case CELL_DECISION_STANDARD_FULL:
-            vramTile = dyn->vramTileFullValue[cellDecision.segmentId];
-            break;
-
-        case CELL_DECISION_STANDARD_EMPTY:
-            vramTile = dyn->vramTileEmpty[cellDecision.segmentId];
-            break;
-
-        case CELL_DECISION_STANDARD_TRAIL:
-            vramTile = dyn->vramTileFullTrail[cellDecision.segmentId];
-            break;
-
-        case CELL_DECISION_PARTIAL_END:
-            vramTile = dyn->vramTilePartialEnd;
-            if (dyn->loadedSegmentPartialEnd != cellDecision.segmentId ||
-                dyn->cachedFillIndexPartialEnd != cellDecision.decision.fillStripIndex)
-            {
-                needsUpload = 1;
-                dyn->loadedSegmentPartialEnd = cellDecision.segmentId;
-                dyn->cachedFillIndexPartialEnd = cellDecision.decision.fillStripIndex;
-            }
-            break;
-
-        case CELL_DECISION_PARTIAL_TRAIL:
-            vramTile = dyn->vramTilePartialTrail;
-            if (dyn->loadedSegmentPartialTrail != cellDecision.segmentId ||
-                dyn->cachedFillIndexPartialTrail != cellDecision.decision.fillStripIndex)
-            {
-                needsUpload = 1;
-                dyn->loadedSegmentPartialTrail = cellDecision.segmentId;
-                dyn->cachedFillIndexPartialTrail = cellDecision.decision.fillStripIndex;
-            }
-            break;
-
-        case CELL_DECISION_PARTIAL_TRAIL2:
-            vramTile = dyn->vramTilePartialTrailSecond;
-            if (dyn->loadedSegmentPartialTrailSecond != cellDecision.segmentId ||
-                dyn->cachedFillIndexPartialTrailSecond != cellDecision.decision.fillStripIndex)
-            {
-                needsUpload = 1;
-                dyn->loadedSegmentPartialTrailSecond = cellDecision.segmentId;
-                dyn->cachedFillIndexPartialTrailSecond = cellDecision.decision.fillStripIndex;
-            }
-            break;
-
-        case CELL_DECISION_PARTIAL_VALUE:
-            vramTile = dyn->vramTilePartialValue;
-            if (dyn->loadedSegmentPartialValue != cellDecision.segmentId ||
-                dyn->cachedFillIndexPartialValue != cellDecision.decision.fillStripIndex)
-            {
-                needsUpload = 1;
-                dyn->loadedSegmentPartialValue = cellDecision.segmentId;
-                dyn->cachedFillIndexPartialValue = cellDecision.decision.fillStripIndex;
-            }
-            break;
-        }
-
-        /* Upload partial tile if needed */
-        if (needsUpload && cellDecision.decision.strip)
-            upload_fill_tile(cellDecision.decision.strip,
-                             cellDecision.decision.fillStripIndex,
-                             vramTile,
-                             DMA);
-
-        /* Update tilemap only if tile changed (change detection optimization) */
-        if (dyn->cellCurrentTileIndex[cellIndex] != vramTile)
-        {
-            tilemap_span_push(&tilemapSpan,
-                              layout->orientation,
-                              attrBase,
-                              layout->tilemapPosByCell[cellIndex].x,
-                              layout->tilemapPosByCell[cellIndex].y,
-                              vramTile);
-            dyn->cellCurrentTileIndex[cellIndex] = vramTile;
-        }
-    }
-
-    tilemap_span_flush(&tilemapSpan, layout->orientation);
 }
 
 /**
@@ -6455,9 +5420,7 @@ static inline void resolve_pip_render_state(const Gauge *gauge,
  * For each cell, computes its PIP state (VALUE/EMPTY/LOSS/GAIN/BLINK_OFF),
  * then selects the corresponding tile from precomputed render LUTs.
  *
- * - Fixed mode: per-cell streaming (upload on demand).
- * - Dynamic mode: preloaded shared slots per segment/state/local tile;
- *   runtime mostly updates tilemap indices only.
+ * Uses the fixed VRAM path only: one uploaded tile per rendered PIP tile.
  */
 static void process_pip_mode(GaugeLaneInstance *lane,
                              u16 valuePixels,
@@ -6474,89 +5437,6 @@ static void process_pip_mode(GaugeLaneInstance *lane,
     const Gauge *gauge = lane->gauge;
     if (!gauge)
         return;
-
-    if (lane->vramMode == GAUGE_VRAM_DYNAMIC)
-    {
-        GaugeDynamic *dyn = &lane->dyn;
-        GaugeTilemapSpan tilemapSpan;
-
-        tilemap_span_reset(&tilemapSpan);
-
-        for (u8 targetRow = 0; targetRow < 4; targetRow++)
-        {
-            for (u8 renderIndex = 0; renderIndex < layout->pipRenderCount; renderIndex++)
-            {
-                if (!dyn->cellValid[renderIndex])
-                    continue;
-
-                const u8 fillIndex = layout->pipRenderFillIndexByRenderIndex[renderIndex];
-                if (fillIndex == CACHE_INVALID_U8)
-                    continue;
-
-                const u8 renderRow = layout->pipRenderRowByRenderIndex[renderIndex];
-                if (renderRow != targetRow)
-                    continue;
-
-                const u8 extraHFlip = layout->pipRenderExtraHFlipByRenderIndex[renderIndex];
-                const u8 extraVFlip = layout->pipRenderExtraVFlipByRenderIndex[renderIndex];
-                const u8 cellIndex = layout->cellIndexByFillIndex[fillIndex];
-                const u8 segmentId = layout->segmentIdByCell[cellIndex];
-                const u16 pipBaseTile = dyn->vramTilePipBase[segmentId];
-                PipResolvedRenderState renderState;
-                resolve_pip_render_state(gauge,
-                                         lane,
-                                         layout,
-                                         cellIndex,
-                                         segmentId,
-                                         renderIndex,
-                                         trailMode,
-                                         &renderState);
-                if (renderState.stateCount < 2)
-                    continue;
-
-                const u8 stripIndex = layout->pipRenderStripIndexByState[renderState.renderStateIndex];
-                const u16 desiredTile =
-                    (u16)(pipBaseTile + layout->pipRenderTileOffsetByState[renderState.renderStateIndex]);
-                const u8 changed = (dyn->cellCurrentTileIndex[renderIndex] != desiredTile);
-
-                if (changed)
-                {
-                    u16 x = 0;
-                    u16 y = 0;
-                    const u16 attrBase = TILE_ATTR_FULL(layout->palette, layout->priority,
-                                                        (u8)(layout->verticalFlip ^ extraVFlip),
-                                                        (u8)(layout->horizontalFlip ^ extraHFlip),
-                                                        0);
-                    compute_pip_render_xy(layout, lane->originX, lane->originY, fillIndex, renderRow, &x, &y);
-                    tilemap_span_push(&tilemapSpan,
-                                      layout->orientation,
-                                      attrBase,
-                                      x,
-                                      y,
-                                      desiredTile);
-                    dyn->cellCurrentTileIndex[renderIndex] = desiredTile;
-                }
-
-#if GAUGE_ENABLE_TRACE
-                trace_emit_pip_cell_line(cellIndex,
-                                         segmentId,
-                                         renderIndex,
-                                         1,
-                                         layout->pipTilesetBySegment[segmentId],
-                                         stripIndex,
-                                         desiredTile,
-                                         renderState.requestedState,
-                                         renderState.resolvedState,
-                                         renderState.stateCount,
-                                         changed);
-#endif
-            }
-
-            tilemap_span_flush(&tilemapSpan, layout->orientation);
-        }
-
-        return;
-    }
 
     GaugeTileUploadSpan uploadSpan;
     u8 currentRow = CACHE_INVALID_U8;
@@ -6610,7 +5490,6 @@ static void process_pip_mode(GaugeLaneInstance *lane,
         trace_emit_pip_cell_line(cellIndex,
                                  segmentId,
                                  renderIndex,
-                                 0,
                                  pipStrip,
                                  stripIndex,
                                  cell->vramTileIndex,
@@ -6629,32 +5508,19 @@ static void process_pip_mode(GaugeLaneInstance *lane,
    Render/update dispatchers
    ============================================================================= */
 
-static void render_lane_fill_dynamic(GaugeLaneInstance *lane,
-                                     u16 valuePixels,
-                                     u16 trailPixelsRendered,
-                                     u16 trailPixelsActual,
-                                     u8 blinkOffActive,
-                                     u8 blinkOnChanged,
-                                     u8 trailMode,
-                                     u8 trailModeChanged)
-{
-    process_dynamic_mode(lane, valuePixels, trailPixelsRendered, trailPixelsActual,
-                         blinkOffActive, blinkOnChanged, trailMode, trailModeChanged);
-}
-
-static void render_lane_fill_fixed(GaugeLaneInstance *lane,
-                                   u16 valuePixels,
-                                   u16 trailPixelsRendered,
-                                   u16 trailPixelsActual,
-                                   u8 blinkOffActive,
-                                   u8 blinkOnChanged,
-                                   u8 trailMode,
-                                   u8 trailModeChanged)
+static void render_lane_fill(GaugeLaneInstance *lane,
+                             u16 valuePixels,
+                             u16 trailPixelsRendered,
+                             u16 trailPixelsActual,
+                             u8 blinkOffActive,
+                             u8 blinkOnChanged,
+                             u8 trailMode,
+                             u8 trailModeChanged)
 {
     (void)blinkOnChanged;
     (void)trailModeChanged;
-    process_fixed_mode(lane, valuePixels, trailPixelsRendered, trailPixelsActual,
-                       blinkOffActive, trailMode);
+    process_fill_mode(lane, valuePixels, trailPixelsRendered, trailPixelsActual,
+                      blinkOffActive, trailMode);
 }
 
 static void render_lane_pip(GaugeLaneInstance *lane,
@@ -6673,18 +5539,14 @@ static void render_lane_pip(GaugeLaneInstance *lane,
 }
 
 /**
- * Select the correct render handler based on value mode and VRAM mode.
- *
- * Returns one of 3 handlers: fill_dynamic, fill_fixed, or pip (shared).
+ * Select the correct render handler based on value mode.
  */
-static GaugeLaneRenderHandler *resolve_lane_render_handler(GaugeValueMode valueMode,
-                                                           GaugeVramMode vramMode)
+static GaugeLaneRenderHandler *resolve_lane_render_handler(GaugeValueMode valueMode)
 {
     if (valueMode == GAUGE_VALUE_MODE_PIP)
         return render_lane_pip;
 
-    return (vramMode == GAUGE_VRAM_DYNAMIC) ? render_lane_fill_dynamic
-                                            : render_lane_fill_fixed;
+    return render_lane_fill;
 }
 
 static void gauge_tick_and_render_fill(Gauge *gauge);
@@ -6707,12 +5569,12 @@ static GaugeTickAndRenderHandler *resolve_tick_and_render_handler(GaugeValueMode
  * Initialize a GaugeLaneInstance with all parameters.
  */
 static u8 GaugeLaneInstance_initInternal(GaugeLaneInstance *lane,
-                                 const Gauge *gauge,
-                                 GaugeLaneLayout *layout,
-                                 u16 originX, u16 originY,
-                                 u16 vramBase,
-                                 GaugeVramMode vramMode,
-                                 GaugeRuntimeArena *runtimeArena)
+                                         const Gauge *gauge,
+                                         GaugeLaneLayout *layout,
+                                         u16 originX,
+                                         u16 originY,
+                                         u16 vramBase,
+                                         GaugeRuntimeArena *runtimeArena)
 {
     if (!lane || !gauge || !layout || !runtimeArena || layout->length == 0)
         return 0;
@@ -6720,71 +5582,33 @@ static u8 GaugeLaneInstance_initInternal(GaugeLaneInstance *lane,
     lane->originX = originX;
     lane->originY = originY;
     lane->vramBase = vramBase;
-    lane->vramMode = vramMode;
-    lane->renderHandler = resolve_lane_render_handler(gauge->valueMode, vramMode);
+    lane->renderHandler = resolve_lane_render_handler(gauge->valueMode);
     lane->gauge = gauge;
     lane->layout = layout;
     lane->cells = NULL;
     lane->cellCount = 0;
-    lane->dyn.segmentCount = 0;
-    lane->dyn.cellCount = 0;
 
     GaugeLaneLayout_retain(layout);
 
-    if (vramMode == GAUGE_VRAM_FIXED)
-    {
-        const u8 streamCellCapacity = gauge_compute_stream_cell_capacity(gauge->valueMode, layout);
+    const u8 streamCellCapacity = gauge_compute_stream_cell_capacity(gauge->valueMode, layout);
 
-        lane->cells = (GaugeStreamCell *)gauge_runtime_arena_alloc(
-            runtimeArena,
-            (u16)(streamCellCapacity * (u8)sizeof(GaugeStreamCell)),
-            2);
-        if (!lane->cells)
-        {
-            GaugeLaneLayout_release(layout);
-            return 0;
-        }
+    lane->cells = (GaugeStreamCell *)gauge_runtime_arena_alloc(
+        runtimeArena,
+        (u16)(streamCellCapacity * (u8)sizeof(GaugeStreamCell)),
+        2);
+    if (!lane->cells)
+    {
+        GaugeLaneLayout_release(layout);
+        return 0;
     }
 
     if (gauge->valueMode == GAUGE_VALUE_MODE_PIP)
     {
-        if (lane->vramMode == GAUGE_VRAM_DYNAMIC)
-        {
-            if (!init_dynamic_pip_vram(lane, runtimeArena))
-            {
-                GaugeLaneLayout_release(layout);
-                return 0;
-            }
-        }
-        else
-        {
-            write_tilemap_pip_init(lane);
-        }
+        write_tilemap_pip_init(lane);
         return 1;
     }
 
-    /* Initialize based on VRAM mode */
-    if (lane->vramMode == GAUGE_VRAM_DYNAMIC)
-    {
-        /* Dynamic mode initialization */
-        if (!init_dynamic_vram(&lane->dyn,
-                               lane->layout,
-                               lane->vramBase,
-                               gauge->logic.trailEnabled,
-                               runtimeArena))
-        {
-            GaugeLaneLayout_release(layout);
-            return 0;
-        }
-        preload_dynamic_standard_tiles(&lane->dyn, lane->layout, gauge->logic.trailEnabled);
-        init_dynamic_tilemap(lane);
-    }
-    else
-    {
-        /* Fixed mode */
-        write_tilemap_fixed_init(lane);
-    }
-
+    write_tilemap_fill_init(lane);
     return 1;
 }
 
@@ -6800,7 +5624,6 @@ static void GaugeLaneInstance_releaseInternal(GaugeLaneInstance *lane)
     }
 
     lane->cells = NULL;
-    reset_dynamic_buffer_views(&lane->dyn);
     lane->cellCount = 0;
 }
 
@@ -6824,7 +5647,6 @@ static u8 gauge_compute_stream_cell_capacity(GaugeValueMode valueMode,
 
 static u16 gauge_compute_runtime_arena_size(GaugeLaneLayout * const *builtLayouts,
                                             u8 laneCount,
-                                            GaugeVramMode vramMode,
                                             GaugeValueMode valueMode,
                                             u16 maxFillPixels)
 {
@@ -6851,31 +5673,9 @@ static u16 gauge_compute_runtime_arena_size(GaugeLaneLayout * const *builtLayout
         if (!layout)
             continue;
 
-        if (vramMode == GAUGE_VRAM_FIXED)
-        {
-            const u8 streamCellCapacity = gauge_compute_stream_cell_capacity(valueMode, layout);
-            totalBytes = gauge_runtime_arena_align(totalBytes, 2);
-            totalBytes = (u16)(totalBytes + (u16)(streamCellCapacity * (u8)sizeof(GaugeStreamCell)));
-            continue;
-        }
-
-        const u8 segmentCount = layout->segmentCount;
-        const u16 cellCount = gauge_compute_stream_cell_capacity(valueMode, layout);
-
-        for (u8 segmentArray = 0; segmentArray < 5; segmentArray++)
-        {
-            totalBytes = gauge_runtime_arena_align(totalBytes, 2);
-            totalBytes = (u16)(totalBytes + (u16)(segmentCount * (u8)sizeof(u16)));
-        }
-
-        totalBytes = gauge_runtime_arena_align(totalBytes, 1);
-        totalBytes = (u16)(totalBytes + segmentCount);
-
         totalBytes = gauge_runtime_arena_align(totalBytes, 2);
-        totalBytes = (u16)(totalBytes + (u16)(cellCount * (u8)sizeof(u16)));
-
-        totalBytes = gauge_runtime_arena_align(totalBytes, 1);
-        totalBytes = (u16)(totalBytes + cellCount);
+        totalBytes = (u16)(totalBytes + (u16)(gauge_compute_stream_cell_capacity(valueMode, layout) *
+                                              (u8)sizeof(GaugeStreamCell)));
     }
 
     return totalBytes;
@@ -7368,11 +6168,6 @@ static u8 resolve_lane_palette(const GaugeDefinition *definition,
         return sanitize_palette_index(lane->palette);
 
     return sanitize_palette_index(definition->palette);
-}
-
-static inline u8 sanitize_vram_mode(u8 vramMode)
-{
-    return (vramMode == GAUGE_VRAM_FIXED) ? GAUGE_VRAM_FIXED : GAUGE_VRAM_DYNAMIC;
 }
 
 static u8 resolve_pip_strip_geometry_from_skin(const GaugePipSkin *skin,
@@ -8326,118 +7121,31 @@ static void gauge_tick_and_render_pip(Gauge *gauge)
    ============================================================================= */
 
 /**
- * Compute how many VRAM tiles are needed for a layout.
+ * Compute how many VRAM tiles are needed for a layout in fixed-only mode.
  *
- * VRAM budget depends on mode:
- * - PIP fixed:   1 tile per rendered PIP tile (height-expanded)
- * - PIP dynamic: shared slots per segment (sourceWidth * sourceHeight * stateCount)
- * - Fixed:   1 tile per cell with a valid tileset
- * - Dynamic: 3 standard tiles per unique segment (empty/full/fullTrail) +
- *            partial tiles (value/trail/end/trailSecond) + bridge + cap tiles
+ * VRAM budget:
+ * - PIP:  1 tile per rendered physical PIP tile (height-expanded)
+ * - FILL: 1 tile per cell with a valid tileset
  *
  * @return Number of VRAM tiles required
  */
 static u16 compute_vram_size_for_layout(const GaugeLaneLayout *layout,
-                                        GaugeVramMode vramMode,
                                         u8 trailEnabled,
                                         GaugeValueMode valueMode)
 {
+    (void)trailEnabled;
+
     if (valueMode == GAUGE_VALUE_MODE_PIP)
-    {
-        if (vramMode == GAUGE_VRAM_DYNAMIC)
-        {
-            /* Dynamic PIP mode: shared slots per segment/state/localTile. */
-            u16 count = 0;
-            for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-            {
-                if (!layout->pipTilesetBySegment[segmentId])
-                    continue;
-
-                u8 sourceWidth = layout->pipSourceWidthBySegment[segmentId];
-                if (sourceWidth == 0)
-                    sourceWidth = 1;
-                u8 sourceHeight = layout->pipSourceHeightBySegment[segmentId];
-                if (sourceHeight == 0)
-                    sourceHeight = 1;
-                if (sourceHeight > 4)
-                    sourceHeight = 4;
-
-                const u8 pipStateCount = layout->pipStateCountBySegment[segmentId];
-                if (pipStateCount < 2)
-                    continue;
-
-                count = (u16)(count + ((u16)sourceWidth * sourceHeight * pipStateCount));
-            }
-            return count;
-        }
-
-        /* Fixed PIP mode: one tile per rendered physical tile (height-expanded). */
         return layout->pipRenderCount;
-    }
 
-    if (vramMode == GAUGE_VRAM_FIXED)
+    u16 count = 0;
+    for (u8 i = 0; i < layout->length; i++)
     {
-        /* Fixed: one VRAM tile per cell with valid tileset */
-        u16 count = 0;
-        for (u8 i = 0; i < layout->length; i++)
-        {
-            const u8 segmentId = layout->segmentIdByCell[i];
-            if (layout->tilesetBySegment[segmentId] || layout->gainTilesetBySegment[segmentId])
-                count++;
-        }
-        return count;
+        const u8 segmentId = layout->segmentIdByCell[i];
+        if (layout->tilesetBySegment[segmentId] || layout->gainTilesetBySegment[segmentId])
+            count++;
     }
 
-    /* Dynamic: count unique segments used + partial tiles */
-    u8 segmentUsed[GAUGE_MAX_SEGMENTS] = {0};
-    u8 segmentCount = 0;
-    u8 hasEndTileset = 0;
-    u8 bridgeCount = 0;
-    u8 capStartEnabled = 0;
-    u8 capEndEnabled = 0;
-
-    for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
-    {
-        const u8 segmentId = layout->segmentIdByCell[cellIndex];
-        if ((layout->tilesetBySegment[segmentId] || layout->gainTilesetBySegment[segmentId]) &&
-            !segmentUsed[segmentId])
-        {
-            segmentUsed[segmentId] = 1;
-            segmentCount++;
-        }
-    }
-
-    for (u8 segmentId = 0; segmentId < layout->segmentCount; segmentId++)
-    {
-        if (segmentUsed[segmentId] &&
-            (layout->tilesetEndBySegment[segmentId] || layout->gainTilesetEndBySegment[segmentId]))
-            hasEndTileset = 1;
-        if (segmentUsed[segmentId] &&
-            (layout->tilesetBridgeBySegment[segmentId] || layout->gainTilesetBridgeBySegment[segmentId]))
-            bridgeCount++;
-    }
-
-    capStartEnabled = layout->capStartEnabled;
-    capEndEnabled = layout->capEndEnabled;
-
-    /* Layout per segment:
-     * - 1 empty tile (0,0)
-     * - 1 full value tile (8,8)
-     * - 1 full trail tile (0,8) - only if trail enabled
-     *
-     * Partial tiles (scalars - 1 per GaugeLaneInstance):
-     * - 1 partial value tile (also used for "both" case)
-     * - 1 partial trail tile (only if trail enabled)
-     * - 1 partial END tile (only if any segment has END)
-     * - 1 partial trail second-break tile (only if trail enabled + END)
-     */
-    u16 tilesPerSegment = trailEnabled ? 3 : 2;  /* empty + full value + (full trail if trail) */
-    u16 partialTiles = 1;                        /* partial value */
-    if (trailEnabled) partialTiles++;
-    if (hasEndTileset) partialTiles++;
-    if (trailEnabled && hasEndTileset) partialTiles++;
-    const u16 capTiles = (u16)(capStartEnabled + capEndEnabled);
-
-    return (u16)(segmentCount * tilesPerSegment + partialTiles + bridgeCount + capTiles);
+    return count;
 }
 

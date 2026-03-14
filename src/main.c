@@ -7,7 +7,6 @@
    ============================================================================= */
 
 #define GAUGE_VRAM_BASE            TILE_USER_INDEX
-#define DEMO_GAUGE_VRAM_MODE       GAUGE_VRAM_FIXED
 
 #define DEMO_SCREEN_COUNT          4
 #define DEMO_MAX_CASES_PER_SCREEN  6
@@ -73,14 +72,6 @@ static Sprite *g_cursorSprite = NULL;
 
 static const char s_blankLine[] = "                                        ";
 static const char s_separator[] = "----------------------------------------";
-
-/* -----------------------------------------------------------------------------
-   Small helpers
-   ----------------------------------------------------------------------------- */
-static const char *getVramModeName(void)
-{
-    return (DEMO_GAUGE_VRAM_MODE == GAUGE_VRAM_FIXED) ? "FIXED" : "DYNAMIC";
-}
 
 static u8 buildGaugeFromDefinition(Gauge *gauge,
                                    const GaugeDefinition *definition,
@@ -359,7 +350,6 @@ static const GaugeDefinition g_screen1BasicSingleDefinition = {
     .mode = GAUGE_MODE_FILL,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 4,
     .originY = 8,
     .maxValue = 96,
@@ -381,7 +371,6 @@ static const GaugeDefinition g_screen1BasicTwoLanesDefinition = {
     .mode = GAUGE_MODE_FILL,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 4,
     .originY = 21,
     .maxValue = 96,
@@ -409,7 +398,6 @@ static const GaugeDefinition g_screen1BasicMirrorDefinition = {
     .mode = GAUGE_MODE_FILL,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_REVERSE,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 24,
     .originY = 8,
     .maxValue = 96,
@@ -434,7 +422,6 @@ static const GaugeDefinition g_screen1PaletteLanesDefinition = {
     .mode = GAUGE_MODE_FILL,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 24,
     .originY = 21,
     .maxValue = 96,
@@ -476,7 +463,6 @@ static const GaugeDefinition g_screen1GainDefinition = {
     .mode = GAUGE_MODE_FILL,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 4,
     .originY = 14,
     .maxValue = 96,
@@ -504,7 +490,6 @@ static const GaugeDefinition g_screen1BlinkOffDefinition = {
     .mode = GAUGE_MODE_FILL,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 24,
     .originY = 14,
     .maxValue = 96,
@@ -594,7 +579,6 @@ static const GaugeDefinition g_screen2BevelDefinition = {
     .mode = GAUGE_MODE_FILL,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 3,
     .originY = 8,
     .maxValue = 96,
@@ -616,7 +600,6 @@ static const GaugeDefinition g_screen2BridgeDefinition = {
     .mode = GAUGE_MODE_FILL,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 22,
     .originY = 8,
     .maxValue = 100,
@@ -648,7 +631,6 @@ static const GaugeDefinition g_screen2CapsLeftDefinition = {
     .mode = GAUGE_MODE_FILL,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 3,
     .originY = 14,
     .maxValue = 96,
@@ -677,7 +659,6 @@ static const GaugeDefinition g_screen2CapsRightDefinition = {
     .mode = GAUGE_MODE_FILL,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_REVERSE,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 23,
     .originY = 14,
     .maxValue = 96,
@@ -707,7 +688,6 @@ static const GaugeDefinition g_screen2LowerBridgeDefinition = {
     .mode = GAUGE_MODE_FILL,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 22,
     .originY = 20,
     .maxValue = 96,
@@ -741,7 +721,6 @@ static const GaugeDefinition g_screen2ThreeLanesDefinition = {
     .mode = GAUGE_MODE_FILL,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 3,
     .originY = 20,
     .maxValue = 96,
@@ -838,7 +817,6 @@ static const GaugeDefinition g_screen3VerticalSingleDefinition = {
     .mode = GAUGE_MODE_FILL,
     .orientation = GAUGE_ORIENT_VERTICAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 6,
     .originY = 24,
     .maxValue = 96,
@@ -866,7 +844,6 @@ static const GaugeDefinition g_screen3VerticalTwoLanesDefinition = {
     .mode = GAUGE_MODE_FILL,
     .orientation = GAUGE_ORIENT_VERTICAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 14,
     .originY = 24,
     .maxValue = 96,
@@ -894,7 +871,6 @@ static const GaugeDefinition g_screen3VerticalThreeLanesDefinition = {
     .mode = GAUGE_MODE_FILL,
     .orientation = GAUGE_ORIENT_VERTICAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 22,
     .originY = 24,
     .maxValue = 96,
@@ -936,7 +912,6 @@ static const GaugeDefinition g_screen3VerticalMirrorDefinition = {
     .mode = GAUGE_MODE_FILL,
     .orientation = GAUGE_ORIENT_VERTICAL,
     .fillDirection = GAUGE_FILL_REVERSE,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 32,
     .originY = 24,
     .maxValue = 96,
@@ -1009,7 +984,6 @@ static const GaugeDefinition g_screen4PipBasicDefinition = {
     .mode = GAUGE_MODE_PIP,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 4,
     .originY = 14,
     .maxValue = 6,
@@ -1034,7 +1008,6 @@ static const GaugeDefinition g_screen4PipQuarterDefinition = {
     .mode = GAUGE_MODE_PIP,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 4,
     .originY = 17,
     .maxValue = 6,
@@ -1059,7 +1032,6 @@ static const GaugeDefinition g_screen4MiniPipTwoLanesDefinition = {
     .mode = GAUGE_MODE_PIP,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 4,
     .originY = 21,
     .maxValue = 6,
@@ -1090,7 +1062,6 @@ static const GaugeDefinition g_screen4PipSingleTileDefinition = {
     .mode = GAUGE_MODE_PIP,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 4,
     .originY = 11,
     .maxValue = 12,
@@ -1112,7 +1083,6 @@ static const GaugeDefinition g_screen4VerticalPipDefinition = {
     .mode = GAUGE_MODE_PIP,
     .orientation = GAUGE_ORIENT_VERTICAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .vramMode = DEMO_GAUGE_VRAM_MODE,
     .originX = 29,
     .originY = 19,
     .maxValue = 8,
@@ -1242,10 +1212,8 @@ static void updateHudDynamic(void)
     clearHudLine(5);
     VDP_drawText("Screen:", 1, 3);
     VDP_drawText("Selected:", 1, 4);
-    VDP_drawText("VRAM mode:", 1, 5);
     VDP_drawText(screen->title, 9, 3);
     VDP_drawText(selectedLabel, 11, 4);
-    VDP_drawText(getVramModeName(), 12, 5);
 }
 
 static void updateCursorSprite(void)

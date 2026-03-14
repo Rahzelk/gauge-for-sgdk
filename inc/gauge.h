@@ -15,6 +15,13 @@
    - Segment : contiguous stretch of a lane sharing one skin
    - Cell    : one 8x8 tile inside a segment
 
+   Fixed-only note:
+   - The former DYNAMIC VRAM strategy was removed from the module.
+   - In practice it added a lot of complexity for gains that stayed too small
+     and too dependent on the exact gauge layout.
+   - The module now exposes a single implicit VRAM strategy based on the
+     former FIXED behavior.
+
    Fill authoring contract:
    - BODY, END and BRIDGE strips use 45 tiles each.
    - TRAIL strips use 64 tiles.
@@ -81,12 +88,6 @@ typedef enum
     GAUGE_FILL_FORWARD = 0,
     GAUGE_FILL_REVERSE = 1
 } GaugeFillDirection;
-
-typedef enum
-{
-    GAUGE_VRAM_FIXED   = 0,
-    GAUGE_VRAM_DYNAMIC = 1
-} GaugeVramMode;
 
 typedef enum
 {
@@ -240,7 +241,6 @@ typedef struct
     GaugeMode mode;                        /* FILL or PIP */
     GaugeOrientation orientation;          /* Horizontal or vertical gauge */
     GaugeFillDirection fillDirection;      /* Forward or reverse fill order */
-    GaugeVramMode vramMode;                /* Fixed or dynamic VRAM strategy */
     u16 originX;                           /* Tilemap origin X */
     u16 originY;                           /* Tilemap origin Y (bottom tile for vertical) */
     u16 maxValue;                          /* 0 = auto-derive from built base lane */
