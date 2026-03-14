@@ -363,6 +363,10 @@ static u8 build_lane_plan(const GaugeDefinition *definition,
 static u8 build_layout_from_lane_plan(const GaugeDefinition *definition,
                                       const GaugeBuildLanePlan *lanePlan,
                                       GaugeLaneLayout **outLayout);
+static u8 init_layout_from_lane_plan(const GaugeDefinition *definition,
+                                     const GaugeBuildLanePlan *lanePlan,
+                                     GaugeLaneLayout *layout,
+                                     const u32 * const *bodyTilesets);
 static void release_built_layouts(GaugeLaneLayout **builtLayouts);
 static inline u8 gauge_layout_has_bridge(const GaugeLaneLayout *layout);
 static u16 compute_pip_total_pixels(const GaugeLaneLayout *layout);
@@ -377,9 +381,9 @@ static u16 gauge_compute_runtime_arena_size(GaugeLaneLayout * const *builtLayout
                                             u8 laneCount,
                                             GaugeValueMode valueMode,
                                             u16 maxFillPixels);
+static void GaugeLaneLayout_applyFillDirection(GaugeLaneLayout *layout,
+                                               GaugeFillDirection fillDirection);
 static void GaugeLaneLayout_setFillOffset(GaugeLaneLayout *layout, u16 fillOffsetPixels);
-static void GaugeLaneLayout_setFillForward(GaugeLaneLayout *layout);
-static void GaugeLaneLayout_setFillReverse(GaugeLaneLayout *layout);
 static void GaugeLaneLayout_retain(GaugeLaneLayout *layout);
 static void GaugeLaneLayout_release(GaugeLaneLayout *layout);
 static u8 GaugeLaneInstance_initInternal(GaugeLaneInstance *lane,
@@ -2976,18 +2980,10 @@ static inline u8 segment_flag_array_has_any(const u8 *flagsBySegment,
 /* Layout lazy-allocation helpers (defined later in GaugeLaneLayout section). */
 static u8 layout_ensure_segment_tileset_storage(const u32 ***segmentTilesetsBySegment,
                                                 u8 segmentCount);
-static u8 layout_ensure_segment_flag_storage(u8 **segmentFlags,
-                                             u8 segmentCount,
-                                             const u8 *defaultView,
-                                             u8 defaultValue);
-static u8 layout_ensure_cell_flag_storage(u8 **cellFlags,
-                                          u8 cellCount,
-                                          const u8 *defaultView,
-                                          u8 defaultValue);
-static u8 layout_ensure_byte_lut_storage(u8 **lut,
-                                         u16 byteCount,
-                                         const u8 *defaultView,
-                                         u8 defaultValue);
+static u8 layout_ensure_optional_bytes(u8 **bytes,
+                                       u16 byteCount,
+                                       const u8 *defaultView,
+                                       u8 defaultValue);
 static void layout_free_optional_ptr(void **ptr,
                                      const void *defaultViewA,
                                      const void *defaultViewB,
@@ -2997,11 +2993,11 @@ static void layout_reset_pip_runtime_views(GaugeLaneLayout *layout);
 static u8 layout_sync_optional_segment_tilesets_by_usage(u8 hasAny,
                                                           const u32 ***segmentTilesetsBySegment,
                                                           u8 segmentCount);
-static u8 layout_sync_optional_segment_flags_by_usage(u8 hasAny,
-                                                       u8 **segmentFlags,
-                                                       u8 segmentCount,
-                                                       const u8 *defaultView,
-                                                       u8 defaultValue);
+static u8 layout_sync_optional_bytes_by_usage(u8 hasAny,
+                                              u8 **bytes,
+                                              u16 byteCount,
+                                              const u8 *defaultView,
+                                              u8 defaultValue);
 static void layout_copy_segment_tilesets(const u32 **destinationTilesets,
                                          const u32 * const *sourceTilesets,
                                          u8 segmentCount);
@@ -3025,7 +3021,7 @@ static void layout_copy_segment_tilesets(const u32 **destinationTilesets,
  *                          ^   ^
  *                   break(2)  bridge(3)
  *
- * Called by GaugeLaneLayout_setFillForward/Reverse after fill order is set.
+ * Called after fill order is refreshed.
  */
 static void build_bridge_luts(GaugeLaneLayout *layout)
 {
@@ -3040,29 +3036,26 @@ static void build_bridge_luts(GaugeLaneLayout *layout)
         return;
     }
 
-    if (!layout_ensure_cell_flag_storage(&layout->bridgeEndByFillIndex,
-                                         layout->length,
-                                         s_zeroCellFlags,
-                                         0) ||
-        !layout_ensure_cell_flag_storage(&layout->bridgeBreakByFillIndex,
-                                         layout->length,
-                                         s_zeroCellFlags,
-                                         0) ||
-        !layout_ensure_cell_flag_storage(&layout->bridgeBreakBoundaryByFillIndex,
-                                         layout->length,
-                                         s_zeroCellFlags,
-                                         0))
+    if (!layout_ensure_optional_bytes(&layout->bridgeEndByFillIndex,
+                                      layout->length,
+                                      s_zeroCellFlags,
+                                      0) ||
+        !layout_ensure_optional_bytes(&layout->bridgeBreakByFillIndex,
+                                      layout->length,
+                                      s_zeroCellFlags,
+                                      0) ||
+        !layout_ensure_optional_bytes(&layout->bridgeBreakBoundaryByFillIndex,
+                                      layout->length,
+                                      s_zeroCellFlags,
+                                      0))
     {
         layout_reset_bridge_views(layout);
         return;
     }
 
-    for (u8 i = 0; i < layout->length; i++)
-    {
-        layout->bridgeEndByFillIndex[i] = 0;
-        layout->bridgeBreakByFillIndex[i] = 0;
-        layout->bridgeBreakBoundaryByFillIndex[i] = 0;
-    }
+    memset(layout->bridgeEndByFillIndex, 0, layout->length);
+    memset(layout->bridgeBreakByFillIndex, 0, layout->length);
+    memset(layout->bridgeBreakBoundaryByFillIndex, 0, layout->length);
 
     /* Scan adjacent cell pairs looking for segment boundaries.
      * At each boundary we mark:
@@ -3236,38 +3229,38 @@ static void build_pip_luts(GaugeLaneLayout *layout)
         return;
     }
 
-    if (!layout_ensure_cell_flag_storage(&layout->pipIndexByFillIndex,
-                                         layout->length,
-                                         s_invalidCellIndexes,
-                                         CACHE_INVALID_U8) ||
-        !layout_ensure_cell_flag_storage(&layout->pipLocalTileByFillIndex,
-                                         layout->length,
-                                         s_zeroCellFlags,
-                                         0) ||
-        !layout_ensure_cell_flag_storage(&layout->pipWidthByPipIndex,
-                                         layout->length,
-                                         s_oneCellFlags,
-                                         1) ||
-        !layout_ensure_cell_flag_storage(&layout->pipRenderFillIndexByRenderIndex,
-                                         maxRenderCount,
-                                         s_invalidCellIndexes,
-                                         CACHE_INVALID_U8) ||
-        !layout_ensure_cell_flag_storage(&layout->pipRenderRowByRenderIndex,
-                                         maxRenderCount,
-                                         s_zeroCellFlags,
-                                         0) ||
-        !layout_ensure_cell_flag_storage(&layout->pipRenderExtraHFlipByRenderIndex,
-                                         maxRenderCount,
-                                         s_zeroCellFlags,
-                                         0) ||
-        !layout_ensure_cell_flag_storage(&layout->pipRenderExtraVFlipByRenderIndex,
-                                         maxRenderCount,
-                                         s_zeroCellFlags,
-                                         0) ||
-        !layout_ensure_byte_lut_storage(&layout->pipRenderStripIndexByState,
-                                        GAUGE_PIP_RENDER_STATE_LUT_SIZE,
-                                        s_zeroPipRenderStateLut,
-                                        0))
+    if (!layout_ensure_optional_bytes(&layout->pipIndexByFillIndex,
+                                      layout->length,
+                                      s_invalidCellIndexes,
+                                      CACHE_INVALID_U8) ||
+        !layout_ensure_optional_bytes(&layout->pipLocalTileByFillIndex,
+                                      layout->length,
+                                      s_zeroCellFlags,
+                                      0) ||
+        !layout_ensure_optional_bytes(&layout->pipWidthByPipIndex,
+                                      layout->length,
+                                      s_oneCellFlags,
+                                      1) ||
+        !layout_ensure_optional_bytes(&layout->pipRenderFillIndexByRenderIndex,
+                                      maxRenderCount,
+                                      s_invalidCellIndexes,
+                                      CACHE_INVALID_U8) ||
+        !layout_ensure_optional_bytes(&layout->pipRenderRowByRenderIndex,
+                                      maxRenderCount,
+                                      s_zeroCellFlags,
+                                      0) ||
+        !layout_ensure_optional_bytes(&layout->pipRenderExtraHFlipByRenderIndex,
+                                      maxRenderCount,
+                                      s_zeroCellFlags,
+                                      0) ||
+        !layout_ensure_optional_bytes(&layout->pipRenderExtraVFlipByRenderIndex,
+                                      maxRenderCount,
+                                      s_zeroCellFlags,
+                                      0) ||
+        !layout_ensure_optional_bytes(&layout->pipRenderStripIndexByState,
+                                      GAUGE_PIP_RENDER_STATE_LUT_SIZE,
+                                      s_zeroPipRenderStateLut,
+                                      0))
     {
         layout_reset_pip_runtime_views(layout);
         return;
@@ -3276,19 +3269,13 @@ static void build_pip_luts(GaugeLaneLayout *layout)
     layout->pipCount = 0;
     layout->pipRenderCount = 0;
 
-    for (u8 i = 0; i < layout->length; i++)
-    {
-        layout->pipIndexByFillIndex[i] = CACHE_INVALID_U8;
-        layout->pipLocalTileByFillIndex[i] = 0;
-        layout->pipWidthByPipIndex[i] = 1;
-    }
-    for (u8 i = 0; i < maxRenderCount; i++)
-    {
-        layout->pipRenderFillIndexByRenderIndex[i] = CACHE_INVALID_U8;
-        layout->pipRenderRowByRenderIndex[i] = 0;
-        layout->pipRenderExtraHFlipByRenderIndex[i] = 0;
-        layout->pipRenderExtraVFlipByRenderIndex[i] = 0;
-    }
+    memset(layout->pipIndexByFillIndex, CACHE_INVALID_U8, layout->length);
+    memset(layout->pipLocalTileByFillIndex, 0, layout->length);
+    memset(layout->pipWidthByPipIndex, 1, layout->length);
+    memset(layout->pipRenderFillIndexByRenderIndex, CACHE_INVALID_U8, maxRenderCount);
+    memset(layout->pipRenderRowByRenderIndex, 0, maxRenderCount);
+    memset(layout->pipRenderExtraHFlipByRenderIndex, 0, maxRenderCount);
+    memset(layout->pipRenderExtraVFlipByRenderIndex, 0, maxRenderCount);
     memset(layout->pipRenderStripIndexByState, 0, GAUGE_PIP_RENDER_STATE_LUT_SIZE);
 
     u8 fillIndex = 0;
@@ -3450,71 +3437,26 @@ static u8 layout_ensure_segment_tileset_storage(const u32 ***segmentTilesetsBySe
     return 1;
 }
 
-static u8 layout_ensure_segment_flag_storage(u8 **segmentFlags,
-                                             u8 segmentCount,
-                                             const u8 *defaultView,
-                                             u8 defaultValue)
+static u8 layout_ensure_optional_bytes(u8 **bytes,
+                                       u16 byteCount,
+                                       const u8 *defaultView,
+                                       u8 defaultValue)
 {
-    if (!segmentFlags)
+    if (!bytes)
         return 0;
 
-    if (*segmentFlags != NULL && *segmentFlags != defaultView)
+    if (*bytes != NULL && *bytes != defaultView)
         return 1;
 
-    u8 *allocatedFlags = (u8 *)gauge_alloc_bytes((u16)segmentCount);
-    if (!allocatedFlags)
+    u8 *allocatedBytes = (u8 *)gauge_alloc_bytes(byteCount);
+    if (!allocatedBytes)
     {
-        *segmentFlags = (u8 *)defaultView;
+        *bytes = (u8 *)defaultView;
         return 0;
     }
 
-    *segmentFlags = allocatedFlags;
-
-    if (defaultValue == 0)
-    {
-        memset(*segmentFlags, 0, segmentCount);
-    }
-    else
-    {
-        for (u8 i = 0; i < segmentCount; i++)
-            (*segmentFlags)[i] = defaultValue;
-    }
-    return 1;
-}
-
-static u8 layout_ensure_cell_flag_storage(u8 **cellFlags,
-                                          u8 cellCount,
-                                          const u8 *defaultView,
-                                          u8 defaultValue)
-{
-    if (!cellFlags)
-        return 0;
-
-    if (*cellFlags != NULL && *cellFlags != defaultView)
-        return 1;
-
-    u8 *allocatedFlags = (u8 *)gauge_alloc_bytes((u16)cellCount);
-    if (!allocatedFlags)
-    {
-        *cellFlags = (u8 *)defaultView;
-        return 0;
-    }
-
-    *cellFlags = allocatedFlags;
-
-    if (defaultValue == 0)
-    {
-        memset(*cellFlags, 0, cellCount);
-    }
-    else if (defaultValue == CACHE_INVALID_U8)
-    {
-        memset(*cellFlags, CACHE_INVALID_U8, cellCount);
-    }
-    else
-    {
-        for (u8 i = 0; i < cellCount; i++)
-            (*cellFlags)[i] = defaultValue;
-    }
+    *bytes = allocatedBytes;
+    memset(*bytes, defaultValue, byteCount);
     return 1;
 }
 
@@ -3541,28 +3483,25 @@ static u8 layout_sync_optional_segment_tilesets_by_usage(u8 hasAny,
     return 1;
 }
 
-static u8 layout_sync_optional_segment_flags_by_usage(u8 hasAny,
-                                                       u8 **segmentFlags,
-                                                       u8 segmentCount,
-                                                       const u8 *defaultView,
-                                                       u8 defaultValue)
+static u8 layout_sync_optional_bytes_by_usage(u8 hasAny,
+                                              u8 **bytes,
+                                              u16 byteCount,
+                                              const u8 *defaultView,
+                                              u8 defaultValue)
 {
-    if (!segmentFlags)
+    if (!bytes)
         return 0;
 
     if (!hasAny)
     {
-        layout_free_optional_ptr((void **)segmentFlags, defaultView, NULL, NULL);
-        *segmentFlags = (u8 *)defaultView;
+        layout_free_optional_ptr((void **)bytes, defaultView, NULL, NULL);
+        *bytes = (u8 *)defaultView;
         return 1;
     }
 
-    if (!layout_ensure_segment_flag_storage(segmentFlags,
-                                            segmentCount,
-                                            defaultView,
-                                            defaultValue))
+    if (!layout_ensure_optional_bytes(bytes, byteCount, defaultView, defaultValue))
     {
-        *segmentFlags = (u8 *)defaultView;
+        *bytes = (u8 *)defaultView;
         return 0;
     }
 
@@ -3758,24 +3697,26 @@ static void layout_free_optional_pointer_bindings(GaugeLaneLayout *layout,
     }
 }
 
+static void layout_reset_optional_pointer_group(GaugeLaneLayout *layout,
+                                                const OptionalPointerBinding *bindings,
+                                                u16 bindingCount)
+{
+    layout_free_optional_pointer_bindings(layout, bindings, bindingCount);
+    layout_set_optional_pointer_defaults(layout, bindings, bindingCount);
+}
+
 static void layout_reset_bridge_views(GaugeLaneLayout *layout)
 {
-    layout_free_optional_pointer_bindings(layout,
-                                          s_layoutBridgeBindings,
-                                          GAUGE_ARRAY_LEN(s_layoutBridgeBindings));
-    layout_set_optional_pointer_defaults(layout,
-                                         s_layoutBridgeBindings,
-                                         GAUGE_ARRAY_LEN(s_layoutBridgeBindings));
+    layout_reset_optional_pointer_group(layout,
+                                        s_layoutBridgeBindings,
+                                        GAUGE_ARRAY_LEN(s_layoutBridgeBindings));
 }
 
 static void layout_reset_pip_runtime_views(GaugeLaneLayout *layout)
 {
-    layout_free_optional_pointer_bindings(layout,
-                                          s_layoutPipRuntimeBindings,
-                                          GAUGE_ARRAY_LEN(s_layoutPipRuntimeBindings));
-    layout_set_optional_pointer_defaults(layout,
-                                         s_layoutPipRuntimeBindings,
-                                         GAUGE_ARRAY_LEN(s_layoutPipRuntimeBindings));
+    layout_reset_optional_pointer_group(layout,
+                                        s_layoutPipRuntimeBindings,
+                                        GAUGE_ARRAY_LEN(s_layoutPipRuntimeBindings));
     layout->pipCount = 0;
     layout->pipRenderCount = 0;
 }
@@ -3806,6 +3747,19 @@ static void layout_zero_optional_flags(GaugeLaneLayout *layout)
     layout->hasGainBlinkOff = 0;
     layout->capStartEnabled = 0;
     layout->capEndEnabled = 0;
+}
+
+static void layout_reset_core_views(GaugeLaneLayout *layout, u8 length, u8 segmentCount)
+{
+    layout->length = length;
+    layout->segmentCount = segmentCount;
+    layout->pipCount = 0;
+    layout->pipRenderCount = 0;
+    layout->segmentIdByCell = layout->segmentIdByCellStorage;
+    layout->fillIndexByCell = layout->fillIndexByCellStorage;
+    layout->cellIndexByFillIndex = layout->cellIndexByFillIndexStorage;
+    layout->tilemapPosByCell = layout->tilemapPosByCellStorage;
+    layout->tilesetBySegment = layout->tilesetBySegmentStorage;
 }
 
 static void layout_set_optional_views_to_defaults(GaugeLaneLayout *layout)
@@ -3864,15 +3818,7 @@ static void layout_free_buffers(GaugeLaneLayout *layout)
                                           s_layoutOptionalPointerBindings,
                                           GAUGE_ARRAY_LEN(s_layoutOptionalPointerBindings));
 
-    layout->length = 0;
-    layout->segmentCount = 0;
-    layout->pipCount = 0;
-    layout->pipRenderCount = 0;
-    layout->segmentIdByCell = layout->segmentIdByCellStorage;
-    layout->fillIndexByCell = layout->fillIndexByCellStorage;
-    layout->cellIndexByFillIndex = layout->cellIndexByFillIndexStorage;
-    layout->tilemapPosByCell = layout->tilemapPosByCellStorage;
-    layout->tilesetBySegment = layout->tilesetBySegmentStorage;
+    layout_reset_core_views(layout, 0, 0);
     layout_set_optional_views_to_defaults(layout);
     layout_zero_optional_flags(layout);
 }
@@ -3882,15 +3828,7 @@ static u8 layout_alloc_buffers(GaugeLaneLayout *layout, u8 length, u8 segmentCou
     if (!layout || length > GAUGE_MAX_LENGTH || segmentCount > GAUGE_MAX_SEGMENTS)
         return 0;
 
-    layout->length = length;
-    layout->segmentCount = segmentCount;
-    layout->pipCount = 0;
-    layout->pipRenderCount = 0;
-    layout->segmentIdByCell = layout->segmentIdByCellStorage;
-    layout->fillIndexByCell = layout->fillIndexByCellStorage;
-    layout->cellIndexByFillIndex = layout->cellIndexByFillIndexStorage;
-    layout->tilemapPosByCell = layout->tilemapPosByCellStorage;
-    layout->tilesetBySegment = layout->tilesetBySegmentStorage;
+    layout_reset_core_views(layout, length, segmentCount);
     memset(layout->segmentIdByCellStorage, 0, sizeof(layout->segmentIdByCellStorage));
     memset(layout->fillIndexByCellStorage, 0, sizeof(layout->fillIndexByCellStorage));
     memset(layout->cellIndexByFillIndexStorage, 0, sizeof(layout->cellIndexByFillIndexStorage));
@@ -3981,10 +3919,7 @@ static void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
     }
 
     /* Set fill direction */
-    if (fillDirection == GAUGE_FILL_REVERSE)
-        GaugeLaneLayout_setFillReverse(layout);
-    else
-        GaugeLaneLayout_setFillForward(layout);
+    GaugeLaneLayout_applyFillDirection(layout, fillDirection);
 
     /* Set visual properties */
     layout->orientation = orientation;
@@ -3997,16 +3932,19 @@ static void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
     layout_zero_optional_flags(layout);
 }
 
-/** Set fill direction to forward: cell 0 fills first (left-to-right / bottom-to-top). */
-static void GaugeLaneLayout_setFillForward(GaugeLaneLayout *layout)
+static void GaugeLaneLayout_applyFillDirection(GaugeLaneLayout *layout,
+                                               GaugeFillDirection fillDirection)
 {
     if (!layout)
         return;
 
     for (u8 c = 0; c < layout->length; c++)
     {
-        layout->fillIndexByCell[c] = c;
-        layout->cellIndexByFillIndex[c] = c;
+        const u8 fillIndex = (fillDirection == GAUGE_FILL_REVERSE)
+            ? (u8)(layout->length - 1 - c)
+            : c;
+        layout->fillIndexByCell[c] = fillIndex;
+        layout->cellIndexByFillIndex[fillIndex] = c;
     }
 
     build_bridge_luts(layout);
@@ -4020,23 +3958,6 @@ static void GaugeLaneLayout_setFillOffset(GaugeLaneLayout *layout, u16 fillOffse
         return;
 
     layout->fillOffset = fillOffsetPixels;
-}
-
-/** Set fill direction to reverse: last cell fills first (right-to-left / top-to-bottom). */
-static void GaugeLaneLayout_setFillReverse(GaugeLaneLayout *layout)
-{
-    if (!layout)
-        return;
-
-    for (u8 c = 0; c < layout->length; c++)
-    {
-        const u8 fillIdx = (u8)(layout->length - 1 - c);
-        layout->fillIndexByCell[c] = fillIdx;
-        layout->cellIndexByFillIndex[fillIdx] = c;
-    }
-
-    build_bridge_luts(layout);
-    build_pip_luts(layout);
 }
 
 static void GaugeLaneLayout_retain(GaugeLaneLayout *layout)
@@ -4134,7 +4055,7 @@ static void sync_base_allocations(GaugeLaneLayout *layout,
                                                f,
                                                LAYOUT_TILESET_SLOT_MASK_ALL);
 
-    layout_sync_optional_segment_flags_by_usage(hasCapEndFlags,
+    layout_sync_optional_bytes_by_usage(hasCapEndFlags,
         &layout->capEndBySegment, sc, s_zeroSegmentFlags, 0);
 }
 
@@ -4767,72 +4688,86 @@ typedef struct
     LocalStripSet blinkBySegment[GAUGE_MAX_SEGMENTS];
 } LocalStripCache;
 
+static inline const u32 *layout_get_group_slot_strip(const GaugeLaneLayout *layout,
+                                                     LayoutTilesetGroupId group,
+                                                     LayoutTilesetSlot slot,
+                                                     u8 segmentId)
+{
+    const LayoutBinding *binding = layout_get_binding(group, slot);
+    if (!layout || !binding)
+        return NULL;
+
+    const u32 * const *view =
+        *(const u32 * const * const *)((const u8 *)layout + binding->memberOffset);
+    return view ? view[segmentId] : NULL;
+}
+
+static inline const u32 *resolve_layout_mode_strip(const GaugeLaneLayout *layout,
+                                                   LayoutTilesetGroupId normalGroup,
+                                                   LayoutTilesetGroupId gainGroup,
+                                                   LayoutTilesetSlot slot,
+                                                   u8 segmentId,
+                                                   u8 trailMode,
+                                                   u8 blinkVariant)
+{
+    const u32 *normalStrip = layout_get_group_slot_strip(layout, normalGroup, slot, segmentId);
+    const u32 *gainStrip = layout_get_group_slot_strip(layout, gainGroup, slot, segmentId);
+
+    return blinkVariant
+        ? select_blink_strip(normalStrip, gainStrip, trailMode)
+        : select_base_strip(normalStrip, gainStrip, trailMode);
+}
+
 static inline void build_local_strip_set(const GaugeLaneLayout *layout,
                                          u8 segmentId,
                                          u8 trailMode,
                                          u8 useBlinkVariant,
                                          LocalStripSet *set)
 {
-    set->body = select_base_strip(layout->tilesetBySegment[segmentId],
-                                  layout->gainTilesetBySegment[segmentId],
-                                  trailMode);
-    set->end = select_base_strip(layout->tilesetEndBySegment[segmentId],
-                                 layout->gainTilesetEndBySegment[segmentId],
-                                 trailMode);
-    set->trail = select_base_strip(layout->tilesetTrailBySegment[segmentId],
-                                   layout->gainTilesetTrailBySegment[segmentId],
-                                   trailMode);
-    set->bridge = select_base_strip(layout->tilesetBridgeBySegment[segmentId],
-                                    layout->gainTilesetBridgeBySegment[segmentId],
-                                    trailMode);
-    set->capStart = select_base_strip(layout->tilesetCapStartBySegment[segmentId],
-                                      layout->gainTilesetCapStartBySegment[segmentId],
-                                      trailMode);
-    set->capStartBreak = select_base_strip(layout->tilesetCapStartBreakBySegment[segmentId],
-                                           layout->gainTilesetCapStartBreakBySegment[segmentId],
-                                           trailMode);
-    set->capStartTrail = select_base_strip(layout->tilesetCapStartTrailBySegment[segmentId],
-                                           layout->gainTilesetCapStartTrailBySegment[segmentId],
-                                           trailMode);
-    set->capEnd = select_base_strip(layout->tilesetCapEndBySegment[segmentId],
-                                    layout->gainTilesetCapEndBySegment[segmentId],
-                                    trailMode);
+    static const LayoutTilesetSlot s_localStripSlots[] = {
+        LAYOUT_TILESET_SLOT_BODY,
+        LAYOUT_TILESET_SLOT_END,
+        LAYOUT_TILESET_SLOT_TRAIL,
+        LAYOUT_TILESET_SLOT_BRIDGE,
+        LAYOUT_TILESET_SLOT_CAP_START,
+        LAYOUT_TILESET_SLOT_CAP_START_BREAK,
+        LAYOUT_TILESET_SLOT_CAP_START_TRAIL,
+        LAYOUT_TILESET_SLOT_CAP_END
+    };
+    const u32 **slotTargets[] = {
+        &set->body,
+        &set->end,
+        &set->trail,
+        &set->bridge,
+        &set->capStart,
+        &set->capStartBreak,
+        &set->capStartTrail,
+        &set->capEnd
+    };
 
-    if (useBlinkVariant)
+    for (u8 slotIndex = 0; slotIndex < GAUGE_ARRAY_LEN(s_localStripSlots); slotIndex++)
     {
-        const u32 *blinkBody = select_blink_strip(layout->blinkOffTilesetBySegment[segmentId],
-                                                  layout->gainBlinkOffTilesetBySegment[segmentId],
-                                                  trailMode);
-        const u32 *blinkEnd = select_blink_strip(layout->blinkOffTilesetEndBySegment[segmentId],
-                                                 layout->gainBlinkOffTilesetEndBySegment[segmentId],
-                                                 trailMode);
-        const u32 *blinkTrail = select_blink_strip(layout->blinkOffTilesetTrailBySegment[segmentId],
-                                                   layout->gainBlinkOffTilesetTrailBySegment[segmentId],
-                                                   trailMode);
-        const u32 *blinkBridge = select_blink_strip(layout->blinkOffTilesetBridgeBySegment[segmentId],
-                                                    layout->gainBlinkOffTilesetBridgeBySegment[segmentId],
-                                                    trailMode);
-        const u32 *blinkCapStart = select_blink_strip(layout->blinkOffTilesetCapStartBySegment[segmentId],
-                                                      layout->gainBlinkOffTilesetCapStartBySegment[segmentId],
-                                                      trailMode);
-        const u32 *blinkCapStartBreak = select_blink_strip(layout->blinkOffTilesetCapStartBreakBySegment[segmentId],
-                                                           layout->gainBlinkOffTilesetCapStartBreakBySegment[segmentId],
-                                                           trailMode);
-        const u32 *blinkCapStartTrail = select_blink_strip(layout->blinkOffTilesetCapStartTrailBySegment[segmentId],
-                                                           layout->gainBlinkOffTilesetCapStartTrailBySegment[segmentId],
-                                                           trailMode);
-        const u32 *blinkCapEnd = select_blink_strip(layout->blinkOffTilesetCapEndBySegment[segmentId],
-                                                    layout->gainBlinkOffTilesetCapEndBySegment[segmentId],
-                                                    trailMode);
+        const LayoutTilesetSlot slot = s_localStripSlots[slotIndex];
+        *slotTargets[slotIndex] = resolve_layout_mode_strip(layout,
+                                                            LAYOUT_TILESET_GROUP_BASE,
+                                                            LAYOUT_TILESET_GROUP_GAIN,
+                                                            slot,
+                                                            segmentId,
+                                                            trailMode,
+                                                            0);
 
-        if (blinkBody) set->body = blinkBody;
-        if (blinkEnd) set->end = blinkEnd;
-        if (blinkTrail) set->trail = blinkTrail;
-        if (blinkBridge) set->bridge = blinkBridge;
-        if (blinkCapStart) set->capStart = blinkCapStart;
-        if (blinkCapStartBreak) set->capStartBreak = blinkCapStartBreak;
-        if (blinkCapStartTrail) set->capStartTrail = blinkCapStartTrail;
-        if (blinkCapEnd) set->capEnd = blinkCapEnd;
+        if (!useBlinkVariant)
+            continue;
+
+        const u32 *blinkStrip = resolve_layout_mode_strip(layout,
+                                                          LAYOUT_TILESET_GROUP_BLINK,
+                                                          LAYOUT_TILESET_GROUP_GAIN_BLINK,
+                                                          slot,
+                                                          segmentId,
+                                                          trailMode,
+                                                          1);
+        if (blinkStrip)
+            *slotTargets[slotIndex] = blinkStrip;
     }
 
     set->valid = 1;
@@ -4894,11 +4829,6 @@ static inline const u32 *resolve_local_strip_from_baseLane_type(const LocalStrip
     }
 }
 
-static inline const u32 *resolve_local_body_strip(const LocalStripSet *stripSet)
-{
-    return stripSet->body;
-}
-
 static inline u8 compute_linkedLane_terminal_end_index(const GaugeLaneLayout *layout,
                                                       u16 currentValuePixels,
                                                       u16 trailPixelsRendered,
@@ -4928,68 +4858,11 @@ static inline u8 compute_linkedLane_terminal_end_index(const GaugeLaneLayout *la
     return 1;
 }
 
-static inline u8 compute_linkedLane_terminal_override(const GaugeLaneLayout *layout,
-                                                     u16 currentValuePixels,
-                                                     u16 trailPixelsRendered,
-                                                     u8 *forcedStripIndex)
-{
-    if (!layout || !layout->endOverrideEnabled || layout->length == 0)
-        return 0;
-
-    /* For shortened linked lanes, keep a stable local END shape on the
-     * terminal cell based on what is actually rendered this frame. Using the
-     * visible trail extent avoids showing a fake END during blink-off frames
-     * where the trail is intentionally hidden. */
-
-    return compute_linkedLane_terminal_end_index(
-        layout, currentValuePixels, trailPixelsRendered, forcedStripIndex);
-}
-
 typedef struct
 {
     u8 terminalOverrideActive;
     u8 terminalForcedIndex;
 } LinkedLaneTerminalOverrideContext;
-
-static inline void prepare_linkedLane_terminal_override(const Gauge *gauge,
-                                                       GaugeLaneInstance *lane,
-                                                       const GaugeLaneLayout *layout,
-                                                       u8 isLinkedLane,
-                                                       u16 valuePixels,
-                                                       u16 trailPixelsRendered,
-                                                       LinkedLaneTerminalOverrideContext *ctx)
-{
-    if (!ctx)
-        return;
-
-    ctx->terminalOverrideActive = 0;
-    ctx->terminalForcedIndex = STRIP_INDEX_FULL;
-
-    if (!gauge || !lane || !layout || !isLinkedLane ||
-        !layout->endOverrideEnabled || layout->length == 0)
-    {
-        return;
-    }
-
-    ctx->terminalOverrideActive = compute_linkedLane_terminal_override(
-        layout, valuePixels, trailPixelsRendered, &ctx->terminalForcedIndex);
-}
-
-static inline void project_baseLane_decision_to_local(const LocalStripSet *stripSet,
-                                                     CellDecisionType baseLaneType,
-                                                     u8 baseLaneIdx,
-                                                     u8 capStartUsesBreak,
-                                                     u8 capStartUsesTrail,
-                                                     LocalResolvedDecision *resolved)
-{
-    resolved->type = baseLaneType;
-    resolved->fillStripIndex = baseLaneIdx;
-    resolved->capStartUsesBreak = capStartUsesBreak;
-    resolved->capStartUsesTrail = capStartUsesTrail;
-    resolved->terminalOverrideApplied = 0;
-    resolved->strip = resolve_local_strip_from_baseLane_type(
-        stripSet, baseLaneType, capStartUsesBreak, capStartUsesTrail);
-}
 
 static inline void apply_linkedLane_terminal_override_to_local(const LocalStripSet *stripSet,
                                                               u8 isTerminalCell,
@@ -5044,7 +4917,7 @@ static void resolve_local_decision_for_lane(const GaugeLaneInstance *lane,
     const GaugeLaneLayout *layout = lane->layout;
     const LocalStripSet *stripSet = get_local_strip_set(
         layout, segmentId, trailMode, useBlinkVariant, stripCache);
-    const u32 *fallbackBody = resolve_local_body_strip(stripSet);
+    const u32 *fallbackBody = stripSet->body;
     const u32 *fallbackTrail = resolve_local_strip_from_baseLane_type(
         stripSet, CELL_DECISION_PARTIAL_TRAIL, 0, 0);
 
@@ -5057,8 +4930,13 @@ static void resolve_local_decision_for_lane(const GaugeLaneInstance *lane,
 
     const u8 terminalFillIndex = (u8)(layout->length - 1);
     const u8 isTerminalCell = (cellFillIndex == terminalFillIndex) ? 1 : 0;
-    project_baseLane_decision_to_local(stripSet, baseLaneType, baseLaneIdx,
-                                     capStartUsesBreak, capStartUsesTrail, resolved);
+    resolved->type = baseLaneType;
+    resolved->fillStripIndex = baseLaneIdx;
+    resolved->capStartUsesBreak = capStartUsesBreak;
+    resolved->capStartUsesTrail = capStartUsesTrail;
+    resolved->terminalOverrideApplied = 0;
+    resolved->strip = resolve_local_strip_from_baseLane_type(
+        stripSet, baseLaneType, capStartUsesBreak, capStartUsesTrail);
     apply_linkedLane_terminal_override_to_local(stripSet, isTerminalCell,
                                                 terminalOverrideActive, terminalForcedIndex,
                                                 resolved);
@@ -5129,14 +5007,21 @@ static inline u8 init_fill_lane_resolve_context(GaugeLaneInstance *lane,
     out->layout = lane->layout;
     out->trailMode = trailMode;
     out->isLinkedLane = (lane != gauge_get_baseLane_instance(gauge)) ? 1 : 0;
+    out->terminalCtx.terminalOverrideActive = 0;
+    out->terminalCtx.terminalForcedIndex = STRIP_INDEX_FULL;
     memset(&out->stripCache, 0, sizeof(out->stripCache));
-    prepare_linkedLane_terminal_override(gauge,
-                                         lane,
-                                         lane->layout,
-                                         out->isLinkedLane,
-                                         valuePixels,
-                                         trailPixelsRendered,
-                                         &out->terminalCtx);
+
+    if (out->isLinkedLane &&
+        lane->layout &&
+        lane->layout->endOverrideEnabled &&
+        lane->layout->length != 0)
+    {
+        out->terminalCtx.terminalOverrideActive = compute_linkedLane_terminal_end_index(
+            lane->layout,
+            valuePixels,
+            trailPixelsRendered,
+            &out->terminalCtx.terminalForcedIndex);
+    }
     return 1;
 }
 
@@ -5937,42 +5822,6 @@ static u8 gauge_is_zeroed(const Gauge *gauge)
     return 1;
 }
 
-static u8 layout_ensure_byte_lut_storage(u8 **lut,
-                                         u16 byteCount,
-                                         const u8 *defaultView,
-                                         u8 defaultValue)
-{
-    if (!lut)
-        return 0;
-
-    if (*lut != NULL && *lut != defaultView)
-        return 1;
-
-    u8 *allocatedBytes = (u8 *)gauge_alloc_bytes(byteCount);
-    if (!allocatedBytes)
-    {
-        *lut = (u8 *)defaultView;
-        return 0;
-    }
-
-    *lut = allocatedBytes;
-
-    if (defaultValue == 0)
-    {
-        memset(*lut, 0, byteCount);
-    }
-    else if (defaultValue == CACHE_INVALID_U8)
-    {
-        memset(*lut, CACHE_INVALID_U8, byteCount);
-    }
-    else
-    {
-        for (u16 i = 0; i < byteCount; i++)
-            (*lut)[i] = defaultValue;
-    }
-    return 1;
-}
-
 static u16 reproject_trail_pixels_by_ratio(u16 oldTrailPixels,
                                            u16 oldMaxFillPixels,
                                            u16 newMaxFillPixels)
@@ -6436,55 +6285,15 @@ static void populate_layout_tileset_group_from_fill_assets(GaugeLaneLayout *layo
     assign_layout_tileset_group_slot(layout, group, LAYOUT_TILESET_SLOT_CAP_START_TRAIL, segmentId, capStartTrail);
 }
 
-static u8 build_fill_layout_direct(const GaugeDefinition *definition,
-                                   const GaugeBuildLanePlan *lanePlan,
-                                   GaugeLaneLayout *layout)
+static u8 init_layout_from_lane_plan(const GaugeDefinition *definition,
+                                     const GaugeBuildLanePlan *lanePlan,
+                                     GaugeLaneLayout *layout,
+                                     const u32 * const *bodyTilesets)
 {
-    const u8 segmentCount = lanePlan->segmentCount;
-    const u32 *baseBodyTilesets[GAUGE_MAX_SEGMENTS] = {0};
-    SkinSetUsageFlags baseFlags;
-    SkinSetUsageFlags gainFlags;
-    SkinSetUsageFlags blinkFlags;
-    SkinSetUsageFlags gainBlinkFlags;
-    const u8 capEndFlags = definition->fixedEndCap ? 1 : 0;
-    typedef struct
-    {
-        LayoutTilesetGroupId group;
-        SkinSetUsageFlags *usageFlags;
-    } FillTilesetGroupUsage;
-    const FillTilesetGroupUsage fillTilesetGroups[4] = {
-        { LAYOUT_TILESET_GROUP_BASE, &baseFlags },
-        { LAYOUT_TILESET_GROUP_GAIN, &gainFlags },
-        { LAYOUT_TILESET_GROUP_BLINK, &blinkFlags },
-        { LAYOUT_TILESET_GROUP_GAIN_BLINK, &gainBlinkFlags }
-    };
-
-    memset(&baseFlags, 0, sizeof(baseFlags));
-    memset(&gainFlags, 0, sizeof(gainFlags));
-    memset(&blinkFlags, 0, sizeof(blinkFlags));
-    memset(&gainBlinkFlags, 0, sizeof(gainBlinkFlags));
-
-    for (u8 segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++)
-    {
-        const GaugeSegment *segment = &lanePlan->lane->segments[segmentIndex];
-        if (!segment->skin || !segment->skin->fill.normal.body)
-            return 0;
-
-        baseBodyTilesets[segmentIndex] = segment->skin->fill.normal.body->tiles;
-        for (u8 groupIndex = 0; groupIndex < 4; groupIndex++)
-        {
-            scan_fill_assets_usage(resolve_fill_assets_for_group(&segment->skin->fill,
-                                                                 fillTilesetGroups[groupIndex].group),
-                                   definition->fixedStartCap,
-                                   definition->fixedEndCap,
-                                   fillTilesetGroups[groupIndex].usageFlags);
-        }
-    }
-
     GaugeLaneLayout_initEx(layout,
                            lanePlan->length,
                            definition->fillDirection,
-                           baseBodyTilesets,
+                           bodyTilesets,
                            NULL,
                            NULL,
                            NULL,
@@ -6495,15 +6304,46 @@ static u8 build_fill_layout_direct(const GaugeDefinition *definition,
                            definition->verticalFlip,
                            definition->horizontalFlip);
 
-    if (layout->length == 0 || layout->segmentCount == 0)
+    return (layout->length != 0 && layout->segmentCount != 0) ? 1 : 0;
+}
+
+static u8 build_fill_layout_direct(const GaugeDefinition *definition,
+                                   const GaugeBuildLanePlan *lanePlan,
+                                   GaugeLaneLayout *layout)
+{
+    const u8 segmentCount = lanePlan->segmentCount;
+    const u32 *baseBodyTilesets[GAUGE_MAX_SEGMENTS] = {0};
+    SkinSetUsageFlags groupUsage[GAUGE_ARRAY_LEN(s_fillTilesetGroups)];
+    const u8 capEndFlags = definition->fixedEndCap ? 1 : 0;
+
+    memset(groupUsage, 0, sizeof(groupUsage));
+
+    for (u8 segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++)
+    {
+        const GaugeSegment *segment = &lanePlan->lane->segments[segmentIndex];
+        if (!segment->skin || !segment->skin->fill.normal.body)
+            return 0;
+
+        baseBodyTilesets[segmentIndex] = segment->skin->fill.normal.body->tiles;
+        for (u8 groupIndex = 0; groupIndex < GAUGE_ARRAY_LEN(s_fillTilesetGroups); groupIndex++)
+        {
+            scan_fill_assets_usage(resolve_fill_assets_for_group(&segment->skin->fill,
+                                                                 s_fillTilesetGroups[groupIndex]),
+                                   definition->fixedStartCap,
+                                   definition->fixedEndCap,
+                                   &groupUsage[groupIndex]);
+        }
+    }
+
+    if (!init_layout_from_lane_plan(definition, lanePlan, layout, baseBodyTilesets))
         return 0;
 
-    sync_base_allocations(layout, &baseFlags, capEndFlags);
-    for (u8 groupIndex = 1; groupIndex < 4; groupIndex++)
+    sync_base_allocations(layout, &groupUsage[0], capEndFlags);
+    for (u8 groupIndex = 1; groupIndex < GAUGE_ARRAY_LEN(s_fillTilesetGroups); groupIndex++)
     {
         sync_layout_tileset_group_slots_from_usage(layout,
-                                                   fillTilesetGroups[groupIndex].group,
-                                                   fillTilesetGroups[groupIndex].usageFlags,
+                                                   s_fillTilesetGroups[groupIndex],
+                                                   &groupUsage[groupIndex],
                                                    LAYOUT_TILESET_SLOT_MASK_ALL);
     }
 
@@ -6511,7 +6351,7 @@ static u8 build_fill_layout_direct(const GaugeDefinition *definition,
     {
         const GaugeFillSkin *skin = &lanePlan->lane->segments[segmentIndex].skin->fill;
 
-        for (u8 groupIndex = 0; groupIndex < 4; groupIndex++)
+        for (u8 groupIndex = 0; groupIndex < GAUGE_ARRAY_LEN(s_fillTilesetGroups); groupIndex++)
         {
             populate_layout_tileset_group_from_fill_assets(layout,
                                                            s_fillTilesetGroups[groupIndex],
@@ -6552,21 +6392,7 @@ static u8 build_pip_layout_direct(const GaugeDefinition *definition,
 
     memset(resolvedStyles, 0, sizeof(resolvedStyles));
 
-    GaugeLaneLayout_initEx(layout,
-                           lanePlan->length,
-                           definition->fillDirection,
-                           NULL,
-                           NULL,
-                           NULL,
-                           NULL,
-                           lanePlan->segmentIdByCell,
-                           definition->orientation,
-                           lanePlan->palette,
-                           definition->priority,
-                           definition->verticalFlip,
-                           definition->horizontalFlip);
-
-    if (layout->length == 0 || layout->segmentCount == 0)
+    if (!init_layout_from_lane_plan(definition, lanePlan, layout, NULL))
         return 0;
 
     for (u8 segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++)
@@ -6607,43 +6433,43 @@ static u8 build_pip_layout_direct(const GaugeDefinition *definition,
         hasPipStyles,
         &layout->pipTilesetBySegment,
         layout->segmentCount);
-    layout_sync_optional_segment_flags_by_usage(
+    layout_sync_optional_bytes_by_usage(
         hasPipStyles && hasCustomWidths,
         &layout->pipWidthBySegment,
         layout->segmentCount,
         s_oneSegmentFlags,
         1);
-    layout_sync_optional_segment_flags_by_usage(
+    layout_sync_optional_bytes_by_usage(
         hasPipStyles && hasCustomHeights,
         &layout->pipHeightBySegment,
         layout->segmentCount,
         s_oneSegmentFlags,
         1);
-    layout_sync_optional_segment_flags_by_usage(
+    layout_sync_optional_bytes_by_usage(
         hasPipStyles,
         &layout->pipStateCountBySegment,
         layout->segmentCount,
         s_zeroSegmentFlags,
         0);
-    layout_sync_optional_segment_flags_by_usage(
+    layout_sync_optional_bytes_by_usage(
         hasPipStyles && hasCustomCoverage,
         &layout->pipStripCoverageBySegment,
         layout->segmentCount,
         s_zeroSegmentFlags,
         GAUGE_STRIP_COVERAGE_FULL);
-    layout_sync_optional_segment_flags_by_usage(
+    layout_sync_optional_bytes_by_usage(
         hasPipStyles && hasCustomHalfAxis,
         &layout->pipHalfAxisBySegment,
         layout->segmentCount,
         s_zeroSegmentFlags,
         PIP_HALF_AXIS_HORIZONTAL);
-    layout_sync_optional_segment_flags_by_usage(
+    layout_sync_optional_bytes_by_usage(
         hasPipStyles && hasCustomSourceWidths,
         &layout->pipSourceWidthBySegment,
         layout->segmentCount,
         s_oneSegmentFlags,
         1);
-    layout_sync_optional_segment_flags_by_usage(
+    layout_sync_optional_bytes_by_usage(
         hasPipStyles && hasCustomSourceHeights,
         &layout->pipSourceHeightBySegment,
         layout->segmentCount,
