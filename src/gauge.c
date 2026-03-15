@@ -379,7 +379,6 @@ static inline u8 gauge_layout_has_bridge(const GaugeLaneLayout *layout);
 static u16 compute_pip_total_pixels(const GaugeLaneLayout *layout);
 static u16 clamp_max_value_to_capacity(u16 maxValue);
 static u16 compute_vram_size_for_layout(const GaugeLaneLayout *layout,
-                                        u8 trailEnabled,
                                         GaugeValueMode valueMode);
 static GaugeTickAndRenderHandler *resolve_tick_and_render_handler(GaugeValueMode valueMode);
 static u8 gauge_compute_stream_cell_capacity(GaugeValueMode valueMode,
@@ -634,7 +633,6 @@ u8 Gauge_init(Gauge *gauge,
     for (u8 laneIndex = 0; laneIndex < laneCount; laneIndex++)
     {
         const u16 vramSize = compute_vram_size_for_layout(builtLayouts[laneIndex],
-                                                          gauge->logic.trailEnabled,
                                                           valueMode);
         GaugeLaneInstance *lane = &laneStorage[laneIndex];
 
@@ -5710,11 +5708,8 @@ static u16 gauge_compute_runtime_arena_size(GaugeLaneLayout * const *builtLayout
  * @return Number of VRAM tiles required
  */
 static u16 compute_vram_size_for_layout(const GaugeLaneLayout *layout,
-                                        u8 trailEnabled,
                                         GaugeValueMode valueMode)
 {
-    (void)trailEnabled;
-
     if (valueMode == GAUGE_VALUE_MODE_PIP)
         return layout->pipRenderCount;
 
