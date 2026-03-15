@@ -254,7 +254,7 @@ typedef struct
  * Typical flow:
  * 1. author segment skins
  * 2. describe lanes and their segments
- * 3. call Gauge_build()
+ * 3. call Gauge_init() on a fresh or released Gauge object
  * 4. drive the runtime with Gauge_update()/Gauge_setValue()/Gauge_decrease()/Gauge_increase()
  */
 typedef struct
@@ -278,10 +278,12 @@ typedef struct
 /* -----------------------------------------------------------------------------
    Public Functions
    ----------------------------------------------------------------------------- */
-/* Build a fresh gauge from a declarative definition and a base VRAM tile index. */
-u8 Gauge_build(Gauge *gauge,
-               const GaugeDefinition *definition,
-               u16 vramBase);
+/* Initialize and build a gauge from a declarative definition and a base VRAM tile index.
+ * This function expects either a fresh Gauge object or one that was previously
+ * released with Gauge_release(). */
+u8 Gauge_init(Gauge *gauge,
+              const GaugeDefinition *definition,
+              u16 vramBase);
 
 /* Tick animations/state and render the gauge. Call once per frame. */
 void Gauge_update(Gauge *gauge);
@@ -293,7 +295,7 @@ void Gauge_setValue(Gauge *gauge, u16 newValue);
 void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
 /* Increase the value and optionally start hold/blink timing. */
 void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
-/* Release all runtime allocations and zero the Gauge object. */
+/* Release all runtime allocations and reset the Gauge object to its init state. */
 void Gauge_release(Gauge *gauge);
 /* Read the current logical value. */
 u16 Gauge_getValue(const Gauge *gauge);

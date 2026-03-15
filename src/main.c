@@ -79,9 +79,10 @@ static u8 buildGaugeFromDefinition(Gauge *gauge,
 {
     const u16 vramBase = *nextVram;
 
-    if (!Gauge_build(gauge, definition, vramBase))
+    if (!Gauge_init(gauge, definition, vramBase))
         return 0;
 
+    DMA_flushQueue();
     *nextVram = (u16)(vramBase + gauge->vramNextOffset);
     return 1;
 }

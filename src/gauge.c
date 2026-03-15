@@ -347,7 +347,6 @@ typedef struct
 static GaugeBuildScratch s_buildScratch;
 
 /* Public API uses internal helpers implemented later in the file. */
-static u8 gauge_is_zeroed(const Gauge *gauge);
 static inline u8 sanitize_value_mode(u8 mode);
 static inline u8 sanitize_orientation(u8 orientation);
 static inline u8 sanitize_fill_direction(u8 fillDirection);
@@ -428,15 +427,14 @@ static void gauge_apply_behavior_from_definition(Gauge *gauge,
    Public API
    ============================================================================= */
 
-u8 Gauge_build(Gauge *gauge,
-               const GaugeDefinition *definition,
-               u16 vramBase)
+u8 Gauge_init(Gauge *gauge,
+              const GaugeDefinition *definition,
+              u16 vramBase)
 {
     if (!gauge || !definition)
         return 0;
-    if (!gauge_is_zeroed(gauge))
-        return 0;
 
+    memset(gauge, 0, sizeof(*gauge));
     memset(&s_buildScratch, 0, sizeof(s_buildScratch));
     GaugeDefinition *sanitized = &s_buildScratch.sanitizedDefinition;
     *sanitized = *definition;
@@ -649,8 +647,6 @@ u8 Gauge_build(Gauge *gauge,
     }
 
     build_base_lane_projection_maps(gauge);
-
-    DMA_flushQueue();
 
     return 1;
 }
@@ -925,7 +921,7 @@ static inline u8 clamp_to_tile_size(s16 v)
  * Convert gauge value to pixel position.
  * Uses LUT if available, otherwise returns value directly (1:1 mapping).
  *
- * The LUT is generated during Gauge_build() and rebuilt in place by
+ * The LUT is generated during Gauge_init() and rebuilt in place by
  * Gauge_setMaxValue() when the logical scale changes.
  */
 static inline u16 value_to_pixels(const GaugeLogic *logic, u16 value)
@@ -3931,7 +3927,7 @@ static void GaugeLogic_initWithAnim(GaugeLogic *logic,
     logic->lastBlinkOn = CACHE_INVALID_U8;
     logic->needUpdate = 1;
 
-    /* Disabled by default; Gauge_build() later applies GaugeDefinition.behavior. */
+    /* Disabled by default; Gauge_init() later applies GaugeDefinition.behavior. */
     logic->trailPixels = logic->valuePixels;
     logic->holdFramesRemaining = 0;
     logic->blinkFramesRemaining = 0;
@@ -4409,19 +4405,25 @@ static void gauge_build_baseLane_fill_decisions(Gauge *gauge,
         return;
 
     const GaugeLaneLayout *baseLaneLayout = baseLane->layout;
+    const u32 *bodyStripBySegment[GAUGE_MAX_SEGMENTS];
     FillLoopContext ctx;
     init_fill_loop_context(baseLaneLayout, valuePixels, trailPixelsRendered,
                            trailPixelsActual, blinkOffActive, trailMode, &ctx);
     gauge_clear_baseLane_fill_decisions(gauge);
 
+    for (u8 segmentId = 0; segmentId < baseLaneLayout->segmentCount; segmentId++)
+    {
+        bodyStripBySegment[segmentId] = select_base_strip(
+            baseLaneLayout->tilesetBySegment[segmentId],
+            baseLaneLayout->gainTilesetBySegment[segmentId],
+            trailMode);
+    }
+
     for (u8 cellIndex = 0; cellIndex < baseLaneLayout->length; cellIndex++)
     {
         const u8 fillIndex = baseLaneLayout->fillIndexByCell[cellIndex];
         const u8 segmentId = baseLaneLayout->segmentIdByCell[cellIndex];
-        const u32 *bodyStrip = select_base_strip(
-            baseLaneLayout->tilesetBySegment[segmentId],
-            baseLaneLayout->gainTilesetBySegment[segmentId],
-            trailMode);
+        const u32 *bodyStrip = bodyStripBySegment[segmentId];
 
         CellDecision decision;
         compute_cell_decision(baseLaneLayout, &ctx, cellIndex, fillIndex,
@@ -5469,7 +5471,7 @@ static void gauge_tick_and_render_fill(Gauge *gauge)
  * Quantize a pixel position to the nearest PIP step boundary.
  *
  * Fast path:
- *   direct lookup in the inverse PIP LUT built at Gauge_build() time
+ *   direct lookup in the inverse PIP LUT built at Gauge_init() time
  *
  * Defensive fallback:
  *   scan the direct valueToPixelsLUT if the inverse LUT is unavailable
@@ -5787,7 +5789,7 @@ static void fill_pip_value_lut(u16 *dest, u16 maxValue, const GaugeLaneLayout *l
  *
  * dest[pixels] = largest quantized pip boundary <= pixels
  *
- * The build cost is paid once at Gauge_build() time, then again only when
+ * The build cost is paid once at Gauge_init() time, then again only when
  * Gauge_setMaxValue() changes the direct PIP LUT.
  */
 static void fill_pip_pixels_to_quantized_pixels_lut(u16 *dest,
@@ -5949,17 +5951,6 @@ static void gauge_apply_behavior_from_definition(Gauge *gauge,
     gauge->logicTickHandler = resolve_logic_tick_handler(trailMode);
     apply_configured_trail_mode_state(logic, 0);
     invalidate_render_cache(logic);
-}
-
-static u8 gauge_is_zeroed(const Gauge *gauge)
-{
-    const u8 *rawGauge = (const u8 *)gauge;
-    for (u16 byteIndex = 0; byteIndex < (u16)sizeof(*gauge); byteIndex++)
-    {
-        if (rawGauge[byteIndex] != 0)
-            return 0;
-    }
-    return 1;
 }
 
 static u16 reproject_trail_pixels_by_ratio(u16 oldTrailPixels,
