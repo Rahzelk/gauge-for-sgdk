@@ -6081,12 +6081,65 @@ static inline u8 sanitize_palette_index(u8 palette)
     return (u8)(palette & 3);
 }
 
+static u8 lane_has_segment_holes(const GaugeLane *lane)
+{
+    if (!lane)
+        return 0;
+
+    u8 foundEmptySegment = 0;
+    for (u8 segmentIndex = 0; segmentIndex < GAUGE_MAX_SEGMENTS; segmentIndex++)
+    {
+        const GaugeSegment *segment = &lane->segments[segmentIndex];
+        const u8 segmentPresent = (segment->cells != 0 && segment->skin != NULL) ? 1 : 0;
+        const u8 segmentEmpty = (segment->cells == 0 && segment->skin == NULL) ? 1 : 0;
+
+        if (!segmentPresent && !segmentEmpty)
+            return 0;
+
+        if (segmentEmpty)
+        {
+            foundEmptySegment = 1;
+            continue;
+        }
+
+        if (foundEmptySegment)
+            return 1;
+    }
+
+    return 0;
+}
+
+static u8 validate_lane_segments(const GaugeLane *lane)
+{
+    if (!lane)
+        return 0;
+
+    for (u8 segmentIndex = 0; segmentIndex < GAUGE_MAX_SEGMENTS; segmentIndex++)
+    {
+        const GaugeSegment *segment = &lane->segments[segmentIndex];
+        const u8 cellsPresent = (segment->cells != 0) ? 1 : 0;
+        const u8 skinPresent = (segment->skin != NULL) ? 1 : 0;
+
+        if (cellsPresent != skinPresent)
+            return 0;
+    }
+
+    return lane_has_segment_holes(lane) ? 0 : 1;
+}
+
 static u8 definition_lane_is_empty(const GaugeLane *lane)
 {
     if (!lane)
         return 1;
 
-    return (lane->segments[0].cells == 0 || lane->segments[0].skin == NULL) ? 1 : 0;
+    for (u8 segmentIndex = 0; segmentIndex < GAUGE_MAX_SEGMENTS; segmentIndex++)
+    {
+        const GaugeSegment *segment = &lane->segments[segmentIndex];
+        if (segment->cells != 0 || segment->skin != NULL)
+            return 0;
+    }
+
+    return 1;
 }
 
 static u8 compute_segment_display_cells(GaugeMode mode,
@@ -6173,6 +6226,9 @@ static u8 find_baseLane_index(const GaugeDefinition *definition,
     for (u8 laneIndex = 0; laneIndex < GAUGE_MAX_LANES; laneIndex++)
     {
         const GaugeLane *lane = &definition->lanes[laneIndex];
+        if (!validate_lane_segments(lane))
+            return 0;
+
         if (definition_lane_is_empty(lane))
             continue;
 
@@ -6807,6 +6863,9 @@ static u8 build_lane_plan(const GaugeDefinition *definition,
                           GaugeBuildLanePlan *outPlan)
 {
     if (!definition || !lane || !baseLane || !outPlan)
+        return 0;
+
+    if (!validate_lane_segments(lane))
         return 0;
 
     memset(outPlan, 0, sizeof(*outPlan));
