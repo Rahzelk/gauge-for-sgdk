@@ -4450,8 +4450,10 @@ typedef struct
 
 typedef struct
 {
-    LocalStripSet normalBySegment[GAUGE_MAX_SEGMENTS];
-    LocalStripSet blinkBySegment[GAUGE_MAX_SEGMENTS];
+    u8 cachedNormalSegmentId;
+    u8 cachedBlinkSegmentId;
+    LocalStripSet normalSet;
+    LocalStripSet blinkSet;
 } LocalStripCache;
 
 static inline const u32 *layout_get_group_slot_strip(const GaugeLaneLayout *layout,
@@ -4545,12 +4547,16 @@ static inline const LocalStripSet *get_local_strip_set(const GaugeLaneLayout *la
                                                        u8 useBlinkVariant,
                                                        LocalStripCache *cache)
 {
-    LocalStripSet *set = useBlinkVariant
-        ? &cache->blinkBySegment[segmentId]
-        : &cache->normalBySegment[segmentId];
+    LocalStripSet *set = useBlinkVariant ? &cache->blinkSet : &cache->normalSet;
+    u8 *cachedSegmentId = useBlinkVariant
+        ? &cache->cachedBlinkSegmentId
+        : &cache->cachedNormalSegmentId;
 
-    if (!set->valid)
+    if (!set->valid || *cachedSegmentId != segmentId)
+    {
         build_local_strip_set(layout, segmentId, trailMode, useBlinkVariant, set);
+        *cachedSegmentId = segmentId;
+    }
 
     return set;
 }
@@ -4694,7 +4700,10 @@ static inline u8 init_fill_lane_resolve_context(GaugeLaneInstance *lane,
     out->terminalFillIndex = lane->layout ? (u8)(lane->layout->length - 1) : 0;
     out->terminalCtx.terminalOverrideActive = 0;
     out->terminalCtx.terminalForcedIndex = STRIP_INDEX_FULL;
-    memset(&out->stripCache, 0, sizeof(out->stripCache));
+    out->stripCache.cachedNormalSegmentId = CACHE_INVALID_U8;
+    out->stripCache.cachedBlinkSegmentId = CACHE_INVALID_U8;
+    out->stripCache.normalSet.valid = 0;
+    out->stripCache.blinkSet.valid = 0;
 
     if (lane != gauge_get_baseLane_instance(gauge) &&
         lane->layout &&
