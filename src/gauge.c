@@ -5849,9 +5849,7 @@ static void build_base_lane_projection_maps(Gauge *gauge)
             const u16 samplePixel = (u16)(layout->fillOffset +
                                           FILL_IDX_TO_OFFSET(localFillIndex) + 4);
             u8 dummyPx;
-            u8 mappedFillIndex = compute_fill_index_and_px(baseLaneLayout, samplePixel, &dummyPx);
-            if (mappedFillIndex >= baseLaneLayout->length)
-                mappedFillIndex = (u8)(baseLaneLayout->length - 1);
+            const u8 mappedFillIndex = compute_fill_index_and_px(baseLaneLayout, samplePixel, &dummyPx);
             lane->baseLaneFillIndexByCell[cellIndex] = mappedFillIndex;
         }
 
@@ -6135,6 +6133,29 @@ static u16 compute_lane_display_cells(const GaugeDefinition *definition,
     return totalCells;
 }
 
+static u8 validate_lane_window_against_base(const GaugeDefinition *definition,
+                                            const GaugeLane *baseLane,
+                                            const GaugeLane *lane)
+{
+    if (!definition || !baseLane || !lane)
+        return 0;
+
+    const u16 baseLaneCells = compute_lane_display_cells(definition, baseLane);
+    const u16 laneCells = compute_lane_display_cells(definition, lane);
+    const u16 firstValueCell = lane->firstValueCell;
+
+    if (baseLaneCells == 0 || laneCells == 0)
+        return 0;
+
+    if (firstValueCell > baseLaneCells)
+        return 0;
+
+    if ((u32)firstValueCell + (u32)laneCells > baseLaneCells)
+        return 0;
+
+    return 1;
+}
+
 static s16 compute_lane_origin_axis(u16 base, s8 offset)
 {
     return (s16)base + (s16)offset;
@@ -6170,12 +6191,17 @@ static u8 find_baseLane_index(const GaugeDefinition *definition,
     return 1;
 }
 
-static u16 compute_fill_offset_pixels_for_lane(const GaugeDefinition *definition,
-                                               const GaugeLane *baseLane,
-                                               u8 firstValueCell)
+static u8 compute_fill_offset_pixels_for_lane(const GaugeDefinition *definition,
+                                              const GaugeLane *baseLane,
+                                              u8 firstValueCell,
+                                              u16 *outOffset)
 {
-    if (!definition || !baseLane || firstValueCell == 0)
+    if (!definition || !baseLane || !outOffset)
         return 0;
+
+    *outOffset = 0;
+    if (firstValueCell == 0)
+        return 1;
 
     u8 remainingCells = firstValueCell;
     u16 displayCellsBefore = 0;
@@ -6213,7 +6239,11 @@ static u16 compute_fill_offset_pixels_for_lane(const GaugeDefinition *definition
         }
     }
 
-    return (u16)(displayCellsBefore << TILE_TO_PIXEL_SHIFT);
+    if (remainingCells != 0)
+        return 0;
+
+    *outOffset = (u16)(displayCellsBefore << TILE_TO_PIXEL_SHIFT);
+    return 1;
 }
 
 static u8 resolve_lane_palette(const GaugeDefinition *definition,
@@ -6790,9 +6820,18 @@ static u8 build_lane_plan(const GaugeDefinition *definition,
     outPlan->laneIndex = laneIndex;
     outPlan->originX = (u16)originX;
     outPlan->originY = (u16)originY;
-    outPlan->fillOffset = compute_fill_offset_pixels_for_lane(definition,
-                                                              baseLane,
-                                                              lane->firstValueCell);
+
+    if (!validate_lane_window_against_base(definition, baseLane, lane))
+        return 0;
+
+    if (!compute_fill_offset_pixels_for_lane(definition,
+                                             baseLane,
+                                             lane->firstValueCell,
+                                             &outPlan->fillOffset))
+    {
+        return 0;
+    }
+
     outPlan->palette = resolve_lane_palette(definition, lane);
 
     if (!build_segment_id_by_cell_from_lane(definition->mode,
