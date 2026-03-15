@@ -303,10 +303,18 @@ typedef struct
     u16 vramTileIndex;
     u8 cachedFillIndex;
     u8 cellIndex;
+} GaugeFillStreamCell;
+
+typedef struct
+{
+    const u32 *cachedStrip;
+    u16 vramTileIndex;
+    u8 cachedFillIndex;
+    u8 cellIndex;
     u8 pipFillIndex;
     u8 pipRow;
     u8 pipRenderIndex;
-} GaugeStreamCell;
+} GaugePipStreamCell;
 
 struct GaugeLaneInstance
 {
@@ -320,7 +328,7 @@ struct GaugeLaneInstance
     const GaugeLaneLayout *layout;
     u8 baseLaneFillIndexByCell[GAUGE_MAX_LENGTH];
 
-    GaugeStreamCell *cells;
+    void *cells;
     u8 cellCount;
 };
 
@@ -376,6 +384,7 @@ static u16 compute_vram_size_for_layout(const GaugeLaneLayout *layout,
 static GaugeTickAndRenderHandler *resolve_tick_and_render_handler(GaugeValueMode valueMode);
 static u8 gauge_compute_stream_cell_capacity(GaugeValueMode valueMode,
                                              const GaugeLaneLayout *layout);
+static u8 gauge_compute_stream_cell_size(GaugeValueMode valueMode);
 static u16 gauge_compute_runtime_arena_size(GaugeLaneLayout * const *builtLayouts,
                                             u8 laneCount,
                                             GaugeValueMode valueMode,
@@ -4245,6 +4254,7 @@ static inline void invalidate_render_cache(GaugeLogic *logic)
 static void write_tilemap_pip_init(GaugeLaneInstance *lane)
 {
     const GaugeLaneLayout *layout = lane->layout;
+    GaugePipStreamCell *cells = (GaugePipStreamCell *)lane->cells;
     GaugeTilemapSpan tilemapSpan;
     GaugeTileUploadSpan uploadSpan;
 
@@ -4295,13 +4305,13 @@ static void write_tilemap_pip_init(GaugeLaneInstance *lane)
 
             tile_upload_span_push(&uploadSpan, pipStrip, vramTile, stripIndex);
 
-            lane->cells[lane->cellCount].vramTileIndex = vramTile;
-            lane->cells[lane->cellCount].cachedStrip = pipStrip;
-            lane->cells[lane->cellCount].cachedFillIndex = stripIndex;
-            lane->cells[lane->cellCount].cellIndex = cellIndex;
-            lane->cells[lane->cellCount].pipFillIndex = fillIndex;
-            lane->cells[lane->cellCount].pipRow = renderRow;
-            lane->cells[lane->cellCount].pipRenderIndex = renderIndex;
+            cells[lane->cellCount].vramTileIndex = vramTile;
+            cells[lane->cellCount].cachedStrip = pipStrip;
+            cells[lane->cellCount].cachedFillIndex = stripIndex;
+            cells[lane->cellCount].cellIndex = cellIndex;
+            cells[lane->cellCount].pipFillIndex = fillIndex;
+            cells[lane->cellCount].pipRow = renderRow;
+            cells[lane->cellCount].pipRenderIndex = renderIndex;
             lane->cellCount++;
         }
 
@@ -4323,6 +4333,7 @@ static void write_tilemap_pip_init(GaugeLaneInstance *lane)
 static void write_tilemap_fill_init(GaugeLaneInstance *lane)
 {
     const GaugeLaneLayout *layout = lane->layout;
+    GaugeFillStreamCell *cells = (GaugeFillStreamCell *)lane->cells;
     GaugeTilemapSpan tilemapSpan;
 
     tilemap_span_reset(&tilemapSpan);
@@ -4353,13 +4364,10 @@ static void write_tilemap_fill_init(GaugeLaneInstance *lane)
                           y,
                           vramTile);
 
-        lane->cells[lane->cellCount].vramTileIndex = vramTile;
-        lane->cells[lane->cellCount].cachedStrip = NULL;
-        lane->cells[lane->cellCount].cachedFillIndex = CACHE_INVALID_U8;
-        lane->cells[lane->cellCount].cellIndex = cellIndex;
-        lane->cells[lane->cellCount].pipFillIndex = CACHE_INVALID_U8;
-        lane->cells[lane->cellCount].pipRow = 0;
-        lane->cells[lane->cellCount].pipRenderIndex = CACHE_INVALID_U8;
+        cells[lane->cellCount].vramTileIndex = vramTile;
+        cells[lane->cellCount].cachedStrip = NULL;
+        cells[lane->cellCount].cachedFillIndex = CACHE_INVALID_U8;
+        cells[lane->cellCount].cellIndex = cellIndex;
         lane->cellCount++;
 
     }
@@ -4837,6 +4845,7 @@ static void process_fill_mode(GaugeLaneInstance *lane,
     (void)blinkOnChanged;
     (void)trailModeChanged;
     const GaugeLaneLayout *layout = lane->layout;
+    GaugeFillStreamCell *cells = (GaugeFillStreamCell *)lane->cells;
     GaugeTileUploadSpan uploadSpan;
     FillLaneResolveContext resolveContext;
     if (!init_fill_lane_resolve_context(lane,
@@ -4858,7 +4867,7 @@ static void process_fill_mode(GaugeLaneInstance *lane,
 
     for (u8 i = 0; i < lane->cellCount; i++)
     {
-        GaugeStreamCell *cell = &lane->cells[i];
+        GaugeFillStreamCell *cell = &cells[i];
         const u8 cellIndex = cell->cellIndex;
         FillLaneCellDecision cellDecision;
         resolve_fill_lane_cell_decision(lane, &resolveContext, cellIndex, &cellDecision);
@@ -5087,6 +5096,7 @@ static void process_pip_mode(GaugeLaneInstance *lane,
     (void)blinkOnChanged;
     (void)trailModeChanged;
     const GaugeLaneLayout *layout = lane->layout;
+    GaugePipStreamCell *cells = (GaugePipStreamCell *)lane->cells;
     const Gauge *gauge = lane->gauge;
     if (!gauge)
         return;
@@ -5098,7 +5108,7 @@ static void process_pip_mode(GaugeLaneInstance *lane,
 
     for (u8 i = 0; i < lane->cellCount; i++)
     {
-        GaugeStreamCell *cell = &lane->cells[i];
+        GaugePipStreamCell *cell = &cells[i];
         const u8 cellIndex = cell->cellIndex;
         const u8 segmentId = layout->segmentIdByCell[cellIndex];
         const u32 *pipStrip = layout->pipTilesetBySegment[segmentId];
@@ -5591,10 +5601,11 @@ static u8 GaugeLaneInstance_initInternal(GaugeLaneInstance *lane,
     GaugeLaneLayout_retain(layout);
 
     const u8 streamCellCapacity = gauge_compute_stream_cell_capacity(gauge->valueMode, layout);
+    const u8 streamCellSize = gauge_compute_stream_cell_size(gauge->valueMode);
 
-    lane->cells = (GaugeStreamCell *)gauge_runtime_arena_alloc(
+    lane->cells = gauge_runtime_arena_alloc(
         runtimeArena,
-        (u16)(streamCellCapacity * (u8)sizeof(GaugeStreamCell)),
+        (u16)(streamCellCapacity * streamCellSize),
         2);
     if (!lane->cells)
     {
@@ -5645,6 +5656,14 @@ static u8 gauge_compute_stream_cell_capacity(GaugeValueMode valueMode,
     return layout->length;
 }
 
+static u8 gauge_compute_stream_cell_size(GaugeValueMode valueMode)
+{
+    if (valueMode == GAUGE_VALUE_MODE_PIP)
+        return (u8)sizeof(GaugePipStreamCell);
+
+    return (u8)sizeof(GaugeFillStreamCell);
+}
+
 static u16 gauge_compute_runtime_arena_size(GaugeLaneLayout * const *builtLayouts,
                                             u8 laneCount,
                                             GaugeValueMode valueMode,
@@ -5675,7 +5694,7 @@ static u16 gauge_compute_runtime_arena_size(GaugeLaneLayout * const *builtLayout
 
         totalBytes = gauge_runtime_arena_align(totalBytes, 2);
         totalBytes = (u16)(totalBytes + (u16)(gauge_compute_stream_cell_capacity(valueMode, layout) *
-                                              (u8)sizeof(GaugeStreamCell)));
+                                              gauge_compute_stream_cell_size(valueMode)));
     }
 
     return totalBytes;
