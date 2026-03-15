@@ -16,11 +16,32 @@
    - Cell    : one 8x8 tile inside a segment
 
    Fixed-only note:
-   - The former DYNAMIC VRAM strategy was removed from the module.
-   - In practice it added a lot of complexity for gains that stayed too small
-     and too dependent on the exact gauge layout.
-   - The module now exposes a single implicit VRAM strategy based on the
-     former FIXED behavior.
+   - Older revisions also had a dynamic VRAM path built around a smaller shared
+     tile pool and more frequent tilemap updates.
+   - In practice its tradeoff was too dependent on the exact lane/segment
+     layout to justify keeping two rendering pipelines.
+   - The figures below are static estimates taken from the representative demo
+     gauges in this repository. They are useful for comparison, but they are
+     not emulator-instrumented timings.
+   - Representative comparisons:
+       Screen 1 / simple fill   : FIXED 12 tiles, ~700-1000 cycles/frame
+                                  DYNAMIC 5 tiles, ~850-1250 cycles/frame
+       Screen 2 / bridges       : FIXED 12 tiles, ~1000-1400 cycles/frame
+                                  DYNAMIC 15 tiles, ~1300-1900 cycles/frame
+       Screen 3 / vertical gain : FIXED 12 tiles, ~750-1050 cycles/frame
+                                  DYNAMIC 5 tiles, ~950-1350 cycles/frame
+       Screen 4 / PIP basic     : FIXED 12 tiles, ~700-1000 cycles/frame
+                                  DYNAMIC 10 tiles, ~750-1050 cycles/frame
+   - Representative tilemap pressure:
+       Screen 1 / Blink off     : FIXED runtime tilemap writes = 0
+                                  DYNAMIC normal frame         = 0-2 cells
+                                  DYNAMIC blink switch         = 0
+                                  DYNAMIC trail switch         = 1-12 cells
+   - In short, dynamic could reduce VRAM on some simple gauges, but it was not
+     a general CPU win, it could lose VRAM on bridge-heavy layouts, and it
+     added more VDP/tilemap complexity and more opportunities for glitches.
+   - The module therefore keeps a single implicit VRAM strategy matching the
+     old fixed tile-per-cell behavior.
 
    Fill authoring contract:
    - BODY, END and BRIDGE strips use 45 tiles each.
@@ -34,8 +55,8 @@
    - GaugePipSkin::tileset stores the compact states for one segment style.
    - Minimum state order is: EMPTY, VALUE.
    - Optional extra states extend that order with: LOSS, GAIN, BLINK_OFF.
-   - coverage describes whether the source art authors a full, half, or quarter
-     pip surface before the runtime expands it.
+   - coverage describes whether the authored source art covers a full, half, or
+     quarter pip surface before runtime expansion.
 
    Runtime visual states:
    - normal    : base rendering family
@@ -43,7 +64,7 @@
    - blink-off : alternate visuals used during OFF blink frames
 
    The public section below is the preferred integration surface. Everything
-   after it exists only for runtime compatibility and static allocation.
+   after it stays visible only for direct Gauge allocation and compatibility.
    ============================================================================= */
 
 /* -----------------------------------------------------------------------------
@@ -257,7 +278,7 @@ typedef struct
 /* -----------------------------------------------------------------------------
    Public Functions
    ----------------------------------------------------------------------------- */
-/* Build a fresh gauge from a declarative definition and a VRAM base tile. */
+/* Build a fresh gauge from a declarative definition and a base VRAM tile index. */
 u8 Gauge_build(Gauge *gauge,
                const GaugeDefinition *definition,
                u16 vramBase);
@@ -281,11 +302,11 @@ u16 Gauge_getValue(const Gauge *gauge);
    Runtime Compatibility Layout
    =============================================================================
 
-   This block stays in the header only because:
-   - callers allocate Gauge objects directly (`static Gauge myGauge;`)
-   - existing code reads a few runtime fields directly
+   This block stays in the header because callers still allocate Gauge objects
+   directly (`static Gauge myGauge;`) and some existing code still reads a few
+   runtime fields.
 
-   Preferred integration remains: GaugeDefinition + public functions.
+   Preferred integration remains: GaugeDefinition plus the public functions.
 
    Compatibility fields intentionally preserved:
    - gauge->logic.maxValue
@@ -302,7 +323,8 @@ typedef struct GaugeLaneInstance GaugeLaneInstance;
  *
  * Compatibility note:
  * - maxValue remains directly readable
- * - all other fields are runtime internals and should not be manipulated by game code
+ * - the remaining fields are runtime internals and should not be manipulated
+ *   by game code
  */
 struct GaugeLogic
 {

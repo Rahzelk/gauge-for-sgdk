@@ -1752,14 +1752,9 @@ static inline u8 layout_has_blink_off_mode(const GaugeLaneLayout *layout, u8 tra
    Unified cell decision types
    =============================================================================
 
-   These types and helpers factor the cell rendering DECISION (which strip and
-   tile index to use) out of the fill renderer.
-
-   The decision is fixed-only:
-   - Each cell selects a ROM strip and a tile index.
-   - The fixed renderer then uploads that tile to the lane-owned VRAM slot.
-
-   This eliminates ~320 lines of duplicated classification logic.
+   These types and helpers keep the fill classification step separate from the
+   tile upload step. Each cell resolves to one ROM strip and one tile index,
+   then the fixed renderer uploads that tile into the lane-owned VRAM slot.
    ============================================================================= */
 
 /**
@@ -5190,6 +5185,370 @@ static GaugeTickAndRenderHandler *resolve_tick_and_render_handler(GaugeValueMode
         : gauge_tick_and_render_fill;
 }
 
+/**
+ * FILL-mode update path: tick logic, prepare one frame state, then render all lanes.
+ *
+ * Execution flow:
+ * 1. logicTickHandler() advances value animation and trail state
+ * 2. frame preparation derives rendered value/trail pixels and blink state
+ * 3. change detection compares against the last rendered frame
+ * 4. if nothing changed, return after the cache check
+ * 5. otherwise rebuild base-lane decisions and render every lane
+ *
+ * The render cache starts invalid so the first Gauge_update() always renders.
+ * When trail is disabled, trailPixelsRendered naturally matches valuePixels.
+ *
+ * Cost: ~20 cycles (early return) to ~2000+ cycles (full render with DMA)
+ */
+
+/* --- Shared tick-and-render helpers (fill & pip) --- */
+
+/** Blink and trail mode state, computed once per tick. */
+typedef struct {
+    u8 blinkOn;
+    u8 blinkOffActive;
+    u8 blinkOnChanged;
+    u8 useValueBlinkRendering;
+    u8 trailMode;
+    u8 trailModeChanged;
+} BlinkState;
+
+/**
+ * Compute blink and trail mode state from the current logic timers.
+ * Shared by the fill and pip tick-and-render paths.
+ */
+static inline BlinkState compute_blink_state(const GaugeLogic *logic)
+{
+    BlinkState s;
+    const u8 activeBlinkShift =
+        (logic->activeTrailState == GAUGE_TRAIL_STATE_GAIN &&
+         logic->configuredGainMode == GAUGE_GAIN_MODE_FOLLOW)
+        ? logic->gainBlinkShift
+        : logic->blinkShift;
+    const u8 criticalModeActive =
+        logic->modeUsesCriticalThreshold ? is_critical_mode_active(logic) : 0;
+
+    s.blinkOn = 1;
+    if (logic->blinkFramesRemaining > 0)
+    {
+        /* Toggle blink on/off at a rate controlled by blinkShift.
+         * blinkTimer increments each frame; shifting right by blinkShift
+         * divides by 2^blinkShift, so bit 0 of the result toggles every
+         * 2^blinkShift frames. blinkShift=1 -> every 2 frames,
+         * blinkShift=2 -> every 4 frames, etc. */
+        s.blinkOn = (u8)(((logic->blinkTimer >> activeBlinkShift) & 1) == 0);
+    }
+    s.blinkOnChanged = (logic->lastBlinkOn != s.blinkOn);
+
+    s.useValueBlinkRendering =
+        (logic->activeTrailState != GAUGE_TRAIL_STATE_GAIN &&
+         logic->modeUsesValueBlink &&
+         criticalModeActive) ? 1 : 0;
+
+    s.trailMode = logic->activeTrailState;
+    if (s.useValueBlinkRendering)
+        s.trailMode = GAUGE_TRAIL_STATE_DAMAGE;
+    s.trailModeChanged = (logic->lastActiveTrailState != s.trailMode);
+    s.blinkOffActive = ((logic->trailEnabled || s.useValueBlinkRendering) &&
+                        logic->blinkFramesRemaining > 0 &&
+                        s.blinkOn == 0);
+    return s;
+}
+
+static inline u8 compute_pip_blink_off_active(const GaugeLogic *logic,
+                                              const BlinkState *blinkState)
+{
+    if (!logic || !blinkState || !blinkState->blinkOffActive)
+        return 0;
+
+    if (blinkState->trailMode == GAUGE_TRAIL_STATE_GAIN)
+        return (logic->configuredGainMode == GAUGE_GAIN_MODE_FOLLOW) ? 1 : 0;
+
+    if (blinkState->useValueBlinkRendering)
+        return 0;
+
+    if (blinkState->trailMode == GAUGE_TRAIL_STATE_DAMAGE)
+        return (logic->configuredTrailMode == GAUGE_TRAIL_MODE_FOLLOW) ? 1 : 0;
+
+    return 0;
+}
+
+typedef struct
+{
+    BlinkState blinkState;
+    u16 valuePixelsRaw;
+    u16 trailPixelsRaw;
+    u16 valuePixels;
+    u16 trailPixelsRendered;
+    u16 trailPixelsActual;
+    u16 valueTargetForEarlyReturn;
+    u8 blinkOffActive;
+} GaugeRenderFrame;
+
+static inline u8 gauge_prepare_frame_common(Gauge *gauge,
+                                            GaugeRenderFrame *frame)
+{
+    GaugeLogic *logic = &gauge->logic;
+
+    if (!logic->needUpdate)
+        return 0;
+
+    if (gauge->logicTickHandler)
+        gauge->logicTickHandler(logic);
+
+    frame->valuePixelsRaw = logic->valuePixels;
+    frame->trailPixelsRaw = logic->trailPixels;
+    if (frame->trailPixelsRaw < frame->valuePixelsRaw)
+        frame->trailPixelsRaw = frame->valuePixelsRaw;
+
+    frame->blinkState = compute_blink_state(logic);
+    return 1;
+}
+
+/* Emit one frame trace, then dispatch the prepared frame to every lane. */
+static void gauge_render_prepared_frame(Gauge *gauge,
+                                        const GaugeRenderFrame *frame)
+{
+#if GAUGE_ENABLE_TRACE
+    s_traceContext.active = 0;
+    s_traceContext.laneIndex = 0;
+    if (gauge && gauge->debugMode)
+    {
+        s_traceContext.active = 1;
+        kprintf(
+            "GAUGE_TRACE FRAME valuePixels=%u trailRendered=%u trailActual=%u trailMode=%s state=%s\n",
+            (unsigned int)frame->valuePixels,
+            (unsigned int)frame->trailPixelsRendered,
+            (unsigned int)frame->trailPixelsActual,
+            trace_text_lookup(s_trailModeText,
+                              GAUGE_ARRAY_LEN(s_trailModeText),
+                              frame->blinkState.trailMode,
+                              "NONE"),
+            render_state_to_text(frame->blinkState.trailMode,
+                                 frame->blinkOffActive,
+                                 frame->valuePixels,
+                                 frame->trailPixelsRendered)
+        );
+    }
+#endif
+
+    u8 laneIndex = gauge->laneCount;
+    while (laneIndex--)
+    {
+        GaugeLaneInstance *lane = gauge->lanes[laneIndex];
+        if (!lane)
+            continue;
+#if GAUGE_ENABLE_TRACE
+        s_traceContext.laneIndex = laneIndex;
+#endif
+        lane->renderHandler(lane,
+                            frame->valuePixels,
+                            frame->trailPixelsRendered,
+                            frame->trailPixelsActual,
+                            frame->blinkOffActive,
+                            frame->blinkState.blinkOnChanged,
+                            frame->blinkState.trailMode,
+                            frame->blinkState.trailModeChanged);
+    }
+
+#if GAUGE_ENABLE_TRACE
+    s_traceContext.active = 0;
+    s_traceContext.laneIndex = 0;
+#endif
+}
+
+/**
+ * Update the render cache, decide whether the frame can be skipped, and mark
+ * the gauge idle once the animated state has converged.
+ */
+static inline u8 update_render_cache_and_check(
+    GaugeLogic *logic,
+    u16 valuePixels, u16 trailPixelsRendered,
+    const BlinkState *bs,
+    u16 valueTargetForEarlyReturn,
+    u16 valueForIdle, u16 trailForIdle)
+{
+    const u8 criticalModeActive =
+        logic->modeUsesCriticalThreshold ? is_critical_mode_active(logic) : 0;
+
+    if (logic->lastValuePixels == valuePixels &&
+        logic->lastTrailPixelsRendered == trailPixelsRendered &&
+        logic->lastBlinkOn == bs->blinkOn &&
+        valueTargetForEarlyReturn == valuePixels &&
+        !bs->trailModeChanged)
+    {
+        return 1;
+    }
+
+    logic->lastValuePixels = valuePixels;
+    logic->lastTrailPixelsRendered = trailPixelsRendered;
+    logic->lastBlinkOn = bs->blinkOn;
+    logic->lastActiveTrailState = bs->trailMode;
+
+    /* When timed work is finished and the rendered state reached its target,
+     * the next Gauge_update() may return immediately through needUpdate. */
+    if (!criticalModeActive &&
+        valueForIdle == logic->valueTargetPixels &&
+        logic->holdFramesRemaining == 0 &&
+        logic->blinkFramesRemaining == 0)
+    {
+        if (logic->modeKeepsStaticTrail)
+        {
+            logic->needUpdate = 0;
+        }
+        else if (trailForIdle == valueForIdle &&
+                 logic->activeTrailState == GAUGE_TRAIL_STATE_NONE)
+        {
+            logic->needUpdate = 0;
+        }
+    }
+
+    return 0;
+}
+
+static inline void gauge_prepare_fill_frame(const GaugeLogic *logic,
+                                            GaugeRenderFrame *frame)
+{
+    const BlinkState *blinkState = &frame->blinkState;
+
+    frame->valuePixels = frame->valuePixelsRaw;
+    frame->trailPixelsRendered = blinkState->blinkOn
+        ? frame->trailPixelsRaw
+        : frame->valuePixelsRaw;
+    frame->trailPixelsActual = frame->trailPixelsRaw;
+    frame->valueTargetForEarlyReturn = logic->valueTargetPixels;
+    frame->blinkOffActive = blinkState->blinkOffActive;
+
+    if (blinkState->useValueBlinkRendering && !blinkState->blinkOn)
+    {
+        frame->valuePixels = 0;
+        frame->trailPixelsRendered = frame->valuePixelsRaw;
+        frame->trailPixelsActual = frame->valuePixelsRaw;
+        frame->valueTargetForEarlyReturn = 0;
+    }
+}
+
+static void gauge_tick_and_render_fill(Gauge *gauge)
+{
+    GaugeRenderFrame frame;
+    GaugeLogic *logic = &gauge->logic;
+
+    if (!gauge_prepare_frame_common(gauge, &frame))
+        return;
+
+    gauge_prepare_fill_frame(logic, &frame);
+
+    if (update_render_cache_and_check(logic,
+                                      frame.valuePixels,
+                                      frame.trailPixelsRendered,
+                                      &frame.blinkState,
+                                      frame.valueTargetForEarlyReturn,
+                                      frame.valuePixelsRaw,
+                                      frame.trailPixelsRaw))
+        return;
+
+    gauge_build_baseLane_fill_decisions(gauge,
+                                        frame.valuePixels,
+                                        frame.trailPixelsRendered,
+                                        frame.trailPixelsActual,
+                                        frame.blinkOffActive,
+                                        frame.blinkState.trailMode);
+    gauge_render_prepared_frame(gauge, &frame);
+}
+
+/**
+ * Quantize a pixel position to the nearest PIP step boundary.
+ *
+ * Fast path:
+ *   direct lookup in the inverse PIP LUT built at Gauge_build() time
+ *
+ * Defensive fallback:
+ *   scan the direct valueToPixelsLUT if the inverse LUT is unavailable
+ */
+static inline u16 quantize_pixels_to_pip_step(const GaugeLogic *logic, u16 pixels)
+{
+    if (pixels >= logic->maxFillPixels)
+        return logic->maxFillPixels;
+
+    if (logic->pixelsToQuantizedPixelsLUT)
+        return logic->pixelsToQuantizedPixelsLUT[pixels];
+
+    const u16 *lut = logic->valueToPixelsLUT;
+    if (!lut)
+    {
+        /* Defensive fallback: quantize to the previous tile boundary. */
+        return (u16)((pixels >> TILE_TO_PIXEL_SHIFT) << TILE_TO_PIXEL_SHIFT);
+    }
+
+    u16 value = 0;
+    while (value < logic->maxValue && lut[value + 1] <= pixels)
+        value++;
+
+    return lut[value];
+}
+
+static inline void gauge_prepare_pip_frame(const GaugeLogic *logic,
+                                           GaugeRenderFrame *frame)
+{
+    const BlinkState *blinkState = &frame->blinkState;
+    const u16 valuePixelsQuantized =
+        quantize_pixels_to_pip_step(logic, frame->valuePixelsRaw);
+    u16 trailPixels =
+        quantize_pixels_to_pip_step(logic, frame->trailPixelsRaw);
+
+    if (trailPixels < valuePixelsQuantized)
+        trailPixels = valuePixelsQuantized;
+
+    frame->valuePixels = valuePixelsQuantized;
+    frame->trailPixelsRendered = blinkState->blinkOn
+        ? trailPixels
+        : valuePixelsQuantized;
+    frame->trailPixelsActual = trailPixels;
+    frame->valueTargetForEarlyReturn =
+        quantize_pixels_to_pip_step(logic, logic->valueTargetPixels);
+    frame->blinkOffActive = compute_pip_blink_off_active(logic, blinkState);
+
+    if (blinkState->useValueBlinkRendering && blinkState->blinkOn)
+    {
+        frame->valuePixels = 0;
+        frame->trailPixelsRendered = valuePixelsQuantized;
+        frame->trailPixelsActual = valuePixelsQuantized;
+        frame->valueTargetForEarlyReturn = 0;
+    }
+}
+
+/**
+ * PIP-mode update path: tick logic, quantize the frame state to pip boundaries,
+ * then render all lanes.
+ */
+static void gauge_tick_and_render_pip(Gauge *gauge)
+{
+    GaugeRenderFrame frame;
+    GaugeLogic *logic = &gauge->logic;
+
+    if (!gauge_prepare_frame_common(gauge, &frame))
+        return;
+
+    gauge_prepare_pip_frame(logic, &frame);
+
+    if (update_render_cache_and_check(logic,
+                                      frame.valuePixels,
+                                      frame.trailPixelsRendered,
+                                      &frame.blinkState,
+                                      frame.valueTargetForEarlyReturn,
+                                      frame.valuePixelsRaw,
+                                      frame.trailPixelsRaw))
+        return;
+
+    gauge_build_baseLane_pip_states(gauge,
+                                    frame.valuePixels,
+                                    frame.trailPixelsRendered,
+                                    frame.trailPixelsActual,
+                                    frame.blinkOffActive,
+                                    frame.blinkState.trailMode);
+    gauge_render_prepared_frame(gauge, &frame);
+}
+
 
 /* =============================================================================
    GaugeLaneInstance initialization (internal)
@@ -6481,386 +6840,6 @@ static u8 build_layout_from_lane_plan(const GaugeDefinition *definition,
 
     *outLayout = layout;
     return 1;
-}
-
-/**
- * FILL-mode update path: tick logic + render all lanes.
- * Call once per frame in the game loop.
- *
- * Execution flow:
- * 1. logicTickHandler() - advance value animation + trail mode state
- * 2. Compute render state (valuePixels, trailPixelsRendered, blinkOn)
- * 3. Change detection: compare against lastValuePixels, lastTrailPixelsRendered,
- *    lastBlinkOn, and check if value animation is still converging
- * 4. If nothing changed -> early return (zero CPU cost after initial comparison)
- * 5. If changed -> render all lanes via lane->renderHandler
- *
- * The change detection cache (lastValuePixels, lastTrailPixelsRendered, lastBlinkOn)
- * is initialized to CACHE_INVALID_U16/U8 to force the first render.
- *
- * When trail is disabled, trailPixelsRendered == valuePixels naturally
- * (enforced by logic tick), so the blink/trail paths are no-ops.
- *
- * Cost: ~20 cycles (early return) to ~2000+ cycles (full render with DMA)
- */
-
-/* --- Shared tick-and-render helpers (fill & pip) --- */
-
-/** Blink and trail mode state, computed once per tick. */
-typedef struct {
-    u8 blinkOn;
-    u8 blinkOffActive;
-    u8 blinkOnChanged;
-    u8 useValueBlinkRendering;
-    u8 trailMode;
-    u8 trailModeChanged;
-} BlinkState;
-
-/**
- * Compute blink and trail mode state from logic timer state.
- * Shared between gauge_tick_and_render_fill() and gauge_tick_and_render_pip().
- */
-static inline BlinkState compute_blink_state(const GaugeLogic *logic)
-{
-    BlinkState s;
-    const u8 activeBlinkShift =
-        (logic->activeTrailState == GAUGE_TRAIL_STATE_GAIN &&
-         logic->configuredGainMode == GAUGE_GAIN_MODE_FOLLOW)
-        ? logic->gainBlinkShift
-        : logic->blinkShift;
-    const u8 criticalModeActive =
-        logic->modeUsesCriticalThreshold ? is_critical_mode_active(logic) : 0;
-
-    s.blinkOn = 1;
-    if (logic->blinkFramesRemaining > 0)
-    {
-        /* Toggle blink on/off at a rate controlled by blinkShift.
-         * blinkTimer increments each frame; shifting right by blinkShift
-         * divides by 2^blinkShift, so bit 0 of the result toggles every
-         * 2^blinkShift frames.  blinkShift=1 -> toggle every 2 frames,
-         * blinkShift=2 -> every 4 frames, etc. */
-        s.blinkOn = (u8)(((logic->blinkTimer >> activeBlinkShift) & 1) == 0);
-    }
-    s.blinkOnChanged = (logic->lastBlinkOn != s.blinkOn);
-
-    s.useValueBlinkRendering =
-        (logic->activeTrailState != GAUGE_TRAIL_STATE_GAIN &&
-         logic->modeUsesValueBlink &&
-         criticalModeActive) ? 1 : 0;
-
-    s.trailMode = logic->activeTrailState;
-    if (s.useValueBlinkRendering)
-        s.trailMode = GAUGE_TRAIL_STATE_DAMAGE;
-    s.trailModeChanged = (logic->lastActiveTrailState != s.trailMode);
-    s.blinkOffActive = ((logic->trailEnabled || s.useValueBlinkRendering) &&
-                        logic->blinkFramesRemaining > 0 &&
-                        s.blinkOn == 0);
-    return s;
-}
-
-static inline u8 compute_pip_blink_off_active(const GaugeLogic *logic,
-                                              const BlinkState *blinkState)
-{
-    if (!logic || !blinkState || !blinkState->blinkOffActive)
-        return 0;
-
-    if (blinkState->trailMode == GAUGE_TRAIL_STATE_GAIN)
-        return (logic->configuredGainMode == GAUGE_GAIN_MODE_FOLLOW) ? 1 : 0;
-
-    if (blinkState->useValueBlinkRendering)
-        return 0;
-
-    if (blinkState->trailMode == GAUGE_TRAIL_STATE_DAMAGE)
-        return (logic->configuredTrailMode == GAUGE_TRAIL_MODE_FOLLOW) ? 1 : 0;
-
-    return 0;
-}
-
-typedef struct
-{
-    BlinkState blinkState;
-    u16 valuePixelsRaw;
-    u16 trailPixelsRaw;
-    u16 valuePixels;
-    u16 trailPixelsRendered;
-    u16 trailPixelsActual;
-    u16 valueTargetForEarlyReturn;
-    u8 blinkOffActive;
-} GaugeRenderFrame;
-
-static inline u8 gauge_prepare_frame_common(Gauge *gauge,
-                                            GaugeRenderFrame *frame)
-{
-    GaugeLogic *logic = &gauge->logic;
-
-    if (!logic->needUpdate)
-        return 0;
-
-    if (gauge->logicTickHandler)
-        gauge->logicTickHandler(logic);
-
-    frame->valuePixelsRaw = logic->valuePixels;
-    frame->trailPixelsRaw = logic->trailPixels;
-    if (frame->trailPixelsRaw < frame->valuePixelsRaw)
-        frame->trailPixelsRaw = frame->valuePixelsRaw;
-
-    frame->blinkState = compute_blink_state(logic);
-    return 1;
-}
-
-static void gauge_render_prepared_frame(Gauge *gauge,
-                                        const GaugeRenderFrame *frame)
-{
-#if GAUGE_ENABLE_TRACE
-    s_traceContext.active = 0;
-    s_traceContext.laneIndex = 0;
-    if (gauge && gauge->debugMode)
-    {
-        s_traceContext.active = 1;
-        kprintf(
-            "GAUGE_TRACE FRAME valuePixels=%u trailRendered=%u trailActual=%u trailMode=%s state=%s\n",
-            (unsigned int)frame->valuePixels,
-            (unsigned int)frame->trailPixelsRendered,
-            (unsigned int)frame->trailPixelsActual,
-            trace_text_lookup(s_trailModeText,
-                              GAUGE_ARRAY_LEN(s_trailModeText),
-                              frame->blinkState.trailMode,
-                              "NONE"),
-            render_state_to_text(frame->blinkState.trailMode,
-                                 frame->blinkOffActive,
-                                 frame->valuePixels,
-                                 frame->trailPixelsRendered)
-        );
-    }
-#endif
-
-    u8 laneIndex = gauge->laneCount;
-    while (laneIndex--)
-    {
-        GaugeLaneInstance *lane = gauge->lanes[laneIndex];
-        if (!lane)
-            continue;
-#if GAUGE_ENABLE_TRACE
-        s_traceContext.laneIndex = laneIndex;
-#endif
-        lane->renderHandler(lane,
-                            frame->valuePixels,
-                            frame->trailPixelsRendered,
-                            frame->trailPixelsActual,
-                            frame->blinkOffActive,
-                            frame->blinkState.blinkOnChanged,
-                            frame->blinkState.trailMode,
-                            frame->blinkState.trailModeChanged);
-    }
-
-#if GAUGE_ENABLE_TRACE
-    s_traceContext.active = 0;
-    s_traceContext.laneIndex = 0;
-#endif
-}
-
-/**
- * Update render cache, check for early return, and detect idle state.
- *
- * @param valueTargetForEarlyReturn  Quantized target for pip, logic->valueTargetPixels for fill.
- * @param valueForIdle               Raw valuePixels for pip idle detect, valuePixels for fill.
- * @param trailForIdle               Raw trailPixels for pip idle detect, trailPixels for fill.
- * @return 1 if nothing changed (caller should return early), 0 if render needed.
- */
-static inline u8 update_render_cache_and_check(
-    GaugeLogic *logic,
-    u16 valuePixels, u16 trailPixelsRendered,
-    const BlinkState *bs,
-    u16 valueTargetForEarlyReturn,
-    u16 valueForIdle, u16 trailForIdle)
-{
-    const u8 criticalModeActive =
-        logic->modeUsesCriticalThreshold ? is_critical_mode_active(logic) : 0;
-
-    if (logic->lastValuePixels == valuePixels &&
-        logic->lastTrailPixelsRendered == trailPixelsRendered &&
-        logic->lastBlinkOn == bs->blinkOn &&
-        valueTargetForEarlyReturn == valuePixels &&
-        !bs->trailModeChanged)
-    {
-        return 1;
-    }
-
-    logic->lastValuePixels = valuePixels;
-    logic->lastTrailPixelsRendered = trailPixelsRendered;
-    logic->lastBlinkOn = bs->blinkOn;
-    logic->lastActiveTrailState = bs->trailMode;
-
-    /* Detect fully idle state: value at target and no active timed work.
-     * We still render this frame, then next Gauge_update returns via needUpdate. */
-    if (!criticalModeActive &&
-        valueForIdle == logic->valueTargetPixels &&
-        logic->holdFramesRemaining == 0 &&
-        logic->blinkFramesRemaining == 0)
-    {
-        if (logic->modeKeepsStaticTrail)
-        {
-            logic->needUpdate = 0;
-        }
-        else if (trailForIdle == valueForIdle &&
-                 logic->activeTrailState == GAUGE_TRAIL_STATE_NONE)
-        {
-            logic->needUpdate = 0;
-        }
-    }
-
-    return 0;
-}
-
-static inline void gauge_prepare_fill_frame(const GaugeLogic *logic,
-                                            GaugeRenderFrame *frame)
-{
-    const BlinkState *blinkState = &frame->blinkState;
-
-    frame->valuePixels = frame->valuePixelsRaw;
-    frame->trailPixelsRendered = blinkState->blinkOn
-        ? frame->trailPixelsRaw
-        : frame->valuePixelsRaw;
-    frame->trailPixelsActual = frame->trailPixelsRaw;
-    frame->valueTargetForEarlyReturn = logic->valueTargetPixels;
-    frame->blinkOffActive = blinkState->blinkOffActive;
-
-    if (blinkState->useValueBlinkRendering && !blinkState->blinkOn)
-    {
-        frame->valuePixels = 0;
-        frame->trailPixelsRendered = frame->valuePixelsRaw;
-        frame->trailPixelsActual = frame->valuePixelsRaw;
-        frame->valueTargetForEarlyReturn = 0;
-    }
-}
-
-static void gauge_tick_and_render_fill(Gauge *gauge)
-{
-    GaugeRenderFrame frame;
-    GaugeLogic *logic = &gauge->logic;
-
-    if (!gauge_prepare_frame_common(gauge, &frame))
-        return;
-
-    gauge_prepare_fill_frame(logic, &frame);
-
-    if (update_render_cache_and_check(logic,
-                                      frame.valuePixels,
-                                      frame.trailPixelsRendered,
-                                      &frame.blinkState,
-                                      frame.valueTargetForEarlyReturn,
-                                      frame.valuePixelsRaw,
-                                      frame.trailPixelsRaw))
-        return;
-
-    gauge_build_baseLane_fill_decisions(gauge,
-                                        frame.valuePixels,
-                                        frame.trailPixelsRendered,
-                                        frame.trailPixelsActual,
-                                        frame.blinkOffActive,
-                                        frame.blinkState.trailMode);
-    gauge_render_prepared_frame(gauge, &frame);
-}
-
-/**
- * Quantize a pixel position to the nearest PIP step boundary.
- *
- * Fast path:
- *   direct lookup in the inverse PIP LUT built at Gauge_build() time
- *
- * Fallback:
- *   scan the direct valueToPixelsLUT if the inverse LUT could not be allocated
- *
- * @param logic   Logic with valueToPixelsLUT and maxValue
- * @param pixels  Raw pixel value to quantize
- * @return Quantized pixel value aligned to a pip boundary
- */
-static inline u16 quantize_pixels_to_pip_step(const GaugeLogic *logic, u16 pixels)
-{
-    if (pixels >= logic->maxFillPixels)
-        return logic->maxFillPixels;
-
-    if (logic->pixelsToQuantizedPixelsLUT)
-        return logic->pixelsToQuantizedPixelsLUT[pixels];
-
-    const u16 *lut = logic->valueToPixelsLUT;
-    if (!lut)
-    {
-        /* Fallback (should not happen in strict PIP config): tile-aligned quantization. */
-        return (u16)((pixels >> TILE_TO_PIXEL_SHIFT) << TILE_TO_PIXEL_SHIFT);
-    }
-
-    u16 value = 0;
-    while (value < logic->maxValue && lut[value + 1] <= pixels)
-        value++;
-
-    return lut[value];
-}
-
-static inline void gauge_prepare_pip_frame(const GaugeLogic *logic,
-                                           GaugeRenderFrame *frame)
-{
-    const BlinkState *blinkState = &frame->blinkState;
-    const u16 valuePixelsQuantized =
-        quantize_pixels_to_pip_step(logic, frame->valuePixelsRaw);
-    u16 trailPixels =
-        quantize_pixels_to_pip_step(logic, frame->trailPixelsRaw);
-
-    if (trailPixels < valuePixelsQuantized)
-        trailPixels = valuePixelsQuantized;
-
-    frame->valuePixels = valuePixelsQuantized;
-    frame->trailPixelsRendered = blinkState->blinkOn
-        ? trailPixels
-        : valuePixelsQuantized;
-    frame->trailPixelsActual = trailPixels;
-    frame->valueTargetForEarlyReturn =
-        quantize_pixels_to_pip_step(logic, logic->valueTargetPixels);
-    frame->blinkOffActive = compute_pip_blink_off_active(logic, blinkState);
-
-    if (blinkState->useValueBlinkRendering && blinkState->blinkOn)
-    {
-        frame->valuePixels = 0;
-        frame->trailPixelsRendered = valuePixelsQuantized;
-        frame->trailPixelsActual = valuePixelsQuantized;
-        frame->valueTargetForEarlyReturn = 0;
-    }
-}
-
-/**
- * PIP-mode update path: tick logic + render all lanes.
- *
- * Same flow as fill mode, but pixel values are quantized to pip boundaries
- * before rendering. This ensures each pip snaps to full/empty states rather
- * than showing partial fills. Uses the inverse PIP LUT when available, with a
- * fallback scan on the direct LUT if allocation failed.
- */
-static void gauge_tick_and_render_pip(Gauge *gauge)
-{
-    GaugeRenderFrame frame;
-    GaugeLogic *logic = &gauge->logic;
-
-    if (!gauge_prepare_frame_common(gauge, &frame))
-        return;
-
-    gauge_prepare_pip_frame(logic, &frame);
-
-    if (update_render_cache_and_check(logic,
-                                      frame.valuePixels,
-                                      frame.trailPixelsRendered,
-                                      &frame.blinkState,
-                                      frame.valueTargetForEarlyReturn,
-                                      frame.valuePixelsRaw,
-                                      frame.trailPixelsRaw))
-        return;
-
-    gauge_build_baseLane_pip_states(gauge,
-                                    frame.valuePixels,
-                                    frame.trailPixelsRendered,
-                                    frame.trailPixelsActual,
-                                    frame.blinkOffActive,
-                                    frame.blinkState.trailMode);
-    gauge_render_prepared_frame(gauge, &frame);
 }
 /* =============================================================================
    Final helpers
