@@ -3852,108 +3852,6 @@ static void GaugeLaneLayout_release(GaugeLaneLayout *layout)
 }
 
 /* =============================================================================
-   Direct layout build helpers
-   ============================================================================= */
-
-/**
- * Usage flags for one tileset group (base/gain/blinkOff/gainBlinkOff).
- * Each flag is 1 if any segment provides that tileset, 0 otherwise.
- */
-typedef struct
-{
-    u8 body;
-    u8 end;
-    u8 trail;
-    u8 bridge;
-    u8 capStart;
-    u8 capEnd;
-    u8 capStartBreak;
-    u8 capStartTrail;
-} SkinSetUsageFlags;
-
-static inline u8 usage_flag_for_slot(const SkinSetUsageFlags *usageFlags,
-                                     LayoutTilesetSlot slot)
-{
-    return (!usageFlags || slot >= LAYOUT_TILESET_SLOT_COUNT)
-        ? 0
-        : ((const u8 *)usageFlags)[slot];
-}
-
-static void sync_layout_tileset_group_slots_from_usage(GaugeLaneLayout *layout,
-                                                       LayoutTilesetGroupId group,
-                                                       const SkinSetUsageFlags *usageFlags,
-                                                       LayoutTilesetSlotMask slotMask)
-{
-    if (!layout || !usageFlags)
-        return;
-
-    for (u8 slot = 0; slot < LAYOUT_TILESET_SLOT_COUNT; slot++)
-    {
-        const LayoutTilesetSlot slotId = (LayoutTilesetSlot)slot;
-        if ((slotMask & LAYOUT_TILESET_SLOT_MASK(slotId)) == 0)
-            continue;
-
-        if (group == LAYOUT_TILESET_GROUP_BASE && slotId == LAYOUT_TILESET_SLOT_BODY)
-            continue;
-
-        const u32 ***targetField = layout_get_group_slot_target(layout, group, slotId);
-        if (!targetField)
-            continue;
-
-        layout_sync_optional_segment_tilesets_by_usage(
-            usage_flag_for_slot(usageFlags, slotId),
-            targetField,
-            layout->segmentCount);
-    }
-}
-
-/**
- * Scan helper: OR-combine a SkinSet's non-NULL pointers into usage flags.
- */
-/**
- * Sync base tileset allocations (end/trail/bridge/caps + capEnd flags).
- *
- * base.body is always required and handled by GaugeLaneLayout_initEx, so
- * only the 7 optional tilesets + capEnd flag array are synced here.
- */
-static void sync_base_allocations(GaugeLaneLayout *layout,
-                                  const SkinSetUsageFlags *f,
-                                  u8 hasCapEndFlags)
-{
-    const u8 sc = layout->segmentCount;
-
-    sync_layout_tileset_group_slots_from_usage(layout,
-                                               LAYOUT_TILESET_GROUP_BASE,
-                                               f,
-                                               LAYOUT_TILESET_SLOT_MASK_ALL);
-
-    layout_sync_optional_segment_flags(hasCapEndFlags,
-        &layout->capEndBySegment, sc, s_zeroSegmentFlags, 0);
-}
-
-/**
- * Populate base tilesets from segment styles into layout arrays.
- *
- * body is always assigned. Optional arrays are only written when allocated
- * (checked via != s_nullSegmentTilesets / s_zeroSegmentFlags sentinel).
- */
-/**
- * Compute all derived layout state after tilesets are populated.
- *
- * Caches blink-off presence flags, detects cap configuration,
- * builds bridge LUTs and pip LUTs.
- */
-static void finalize_layout_derived_state(GaugeLaneLayout *layout)
-{
-    layout->hasBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_STATE_DAMAGE);
-    layout->hasGainBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_STATE_GAIN);
-    detect_caps_enabled(layout, &layout->capStartEnabled, &layout->capEndEnabled);
-    build_bridge_luts(layout);
-    build_pip_luts(layout);
-}
-
-
-/* =============================================================================
    GaugeLogic implementation (internal -- not exposed in gauge.h)
    ============================================================================= */
 
@@ -4350,7 +4248,7 @@ static inline void invalidate_render_cache(GaugeLogic *logic)
 
 
 /* =============================================================================
-   GaugeLaneInstance internals
+   Fill and PIP rendering
    ============================================================================= */
 
 static void write_tilemap_pip_init(GaugeLaneInstance *lane)
@@ -5362,7 +5260,7 @@ static void GaugeLaneInstance_releaseInternal(GaugeLaneInstance *lane)
 
 
 /* =============================================================================
-   Gauge runtime support
+   Build and runtime helpers
    ============================================================================= */
 
 static u8 gauge_compute_stream_cell_capacity(GaugeValueMode valueMode,
@@ -5411,6 +5309,35 @@ static u16 gauge_compute_runtime_arena_size(GaugeLaneLayout * const *builtLayout
     }
 
     return totalBytes;
+}
+
+/**
+ * Compute how many VRAM tiles are needed for a layout in fixed-only mode.
+ *
+ * VRAM budget:
+ * - PIP:  1 tile per rendered physical PIP tile (height-expanded)
+ * - FILL: 1 tile per cell with a valid tileset
+ *
+ * @return Number of VRAM tiles required
+ */
+static u16 compute_vram_size_for_layout(const GaugeLaneLayout *layout,
+                                        u8 trailEnabled,
+                                        GaugeValueMode valueMode)
+{
+    (void)trailEnabled;
+
+    if (valueMode == GAUGE_VALUE_MODE_PIP)
+        return layout->pipRenderCount;
+
+    u16 count = 0;
+    for (u8 i = 0; i < layout->length; i++)
+    {
+        const u8 segmentId = layout->segmentIdByCell[i];
+        if (layout->tilesetBySegment[segmentId] || layout->gainTilesetBySegment[segmentId])
+            count++;
+    }
+
+    return count;
 }
 
 /**
@@ -5698,8 +5625,84 @@ static inline void gauge_set_current_value_and_target(GaugeLogic *logic,
 }
 
 /* =============================================================================
-   Direct GaugeDefinition build helpers
+   Build helpers
    ============================================================================= */
+
+/**
+ * Usage flags for one tileset group (base/gain/blinkOff/gainBlinkOff).
+ * Each flag is 1 if any segment provides that tileset, 0 otherwise.
+ */
+typedef struct
+{
+    u8 body;
+    u8 end;
+    u8 trail;
+    u8 bridge;
+    u8 capStart;
+    u8 capEnd;
+    u8 capStartBreak;
+    u8 capStartTrail;
+} SkinSetUsageFlags;
+
+static inline u8 usage_flag_for_slot(const SkinSetUsageFlags *usageFlags,
+                                     LayoutTilesetSlot slot)
+{
+    return (!usageFlags || slot >= LAYOUT_TILESET_SLOT_COUNT)
+        ? 0
+        : ((const u8 *)usageFlags)[slot];
+}
+
+static void sync_layout_tileset_group_slots_from_usage(GaugeLaneLayout *layout,
+                                                       LayoutTilesetGroupId group,
+                                                       const SkinSetUsageFlags *usageFlags,
+                                                       LayoutTilesetSlotMask slotMask)
+{
+    if (!layout || !usageFlags)
+        return;
+
+    for (u8 slot = 0; slot < LAYOUT_TILESET_SLOT_COUNT; slot++)
+    {
+        const LayoutTilesetSlot slotId = (LayoutTilesetSlot)slot;
+        if ((slotMask & LAYOUT_TILESET_SLOT_MASK(slotId)) == 0)
+            continue;
+
+        if (group == LAYOUT_TILESET_GROUP_BASE && slotId == LAYOUT_TILESET_SLOT_BODY)
+            continue;
+
+        const u32 ***targetField = layout_get_group_slot_target(layout, group, slotId);
+        if (!targetField)
+            continue;
+
+        layout_sync_optional_segment_tilesets_by_usage(
+            usage_flag_for_slot(usageFlags, slotId),
+            targetField,
+            layout->segmentCount);
+    }
+}
+
+static void sync_base_allocations(GaugeLaneLayout *layout,
+                                  const SkinSetUsageFlags *f,
+                                  u8 hasCapEndFlags)
+{
+    const u8 sc = layout->segmentCount;
+
+    sync_layout_tileset_group_slots_from_usage(layout,
+                                               LAYOUT_TILESET_GROUP_BASE,
+                                               f,
+                                               LAYOUT_TILESET_SLOT_MASK_ALL);
+
+    layout_sync_optional_segment_flags(hasCapEndFlags,
+        &layout->capEndBySegment, sc, s_zeroSegmentFlags, 0);
+}
+
+static void finalize_layout_derived_state(GaugeLaneLayout *layout)
+{
+    layout->hasBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_STATE_DAMAGE);
+    layout->hasGainBlinkOff = layout_has_blink_off_mode(layout, GAUGE_TRAIL_STATE_GAIN);
+    detect_caps_enabled(layout, &layout->capStartEnabled, &layout->capEndEnabled);
+    build_bridge_luts(layout);
+    build_pip_luts(layout);
+}
 
 static inline u8 sanitize_value_mode(u8 mode)
 {
@@ -6860,35 +6863,6 @@ static void gauge_tick_and_render_pip(Gauge *gauge)
     gauge_render_prepared_frame(gauge, &frame);
 }
 /* =============================================================================
-   Utility functions
+   Final helpers
    ============================================================================= */
-
-/**
- * Compute how many VRAM tiles are needed for a layout in fixed-only mode.
- *
- * VRAM budget:
- * - PIP:  1 tile per rendered physical PIP tile (height-expanded)
- * - FILL: 1 tile per cell with a valid tileset
- *
- * @return Number of VRAM tiles required
- */
-static u16 compute_vram_size_for_layout(const GaugeLaneLayout *layout,
-                                        u8 trailEnabled,
-                                        GaugeValueMode valueMode)
-{
-    (void)trailEnabled;
-
-    if (valueMode == GAUGE_VALUE_MODE_PIP)
-        return layout->pipRenderCount;
-
-    u16 count = 0;
-    for (u8 i = 0; i < layout->length; i++)
-    {
-        const u8 segmentId = layout->segmentIdByCell[i];
-        if (layout->tilesetBySegment[segmentId] || layout->gainTilesetBySegment[segmentId])
-            count++;
-    }
-
-    return count;
-}
 
