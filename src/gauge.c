@@ -5879,13 +5879,21 @@ static void build_base_lane_projection_maps(Gauge *gauge)
             continue;
 
         const GaugeLaneLayout *layout = lane->layout;
+        /* Exact mapping for the current discrete model:
+         * - every cell is exactly 8 px wide
+         * - fillOffset is cell-aligned
+         * - validate_lane_window_against_base() guarantees the lane window
+         *   stays within the base lane span
+         *
+         * Because of those invariants, a local fillIndex maps to the base lane
+         * by a pure cell offset, without midpoint sampling. */
+        const u16 baseFillOffsetPixels =
+            (u16)(layout->fillOffset - baseLaneLayout->fillOffset);
+        const u8 baseFillOffsetCells = (u8)(baseFillOffsetPixels >> TILE_TO_PIXEL_SHIFT);
         for (u8 cellIndex = 0; cellIndex < layout->length; cellIndex++)
         {
             const u8 localFillIndex = layout->fillIndexByCell[cellIndex];
-            const u16 samplePixel = (u16)(layout->fillOffset +
-                                          FILL_IDX_TO_OFFSET(localFillIndex) + 4);
-            u8 dummyPx;
-            const u8 mappedFillIndex = compute_fill_index_and_px(baseLaneLayout, samplePixel, &dummyPx);
+            const u8 mappedFillIndex = (u8)(baseFillOffsetCells + localFillIndex);
             lane->baseLaneFillIndexByCell[cellIndex] = mappedFillIndex;
         }
 
