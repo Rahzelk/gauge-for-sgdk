@@ -64,6 +64,7 @@
 #define GAUGE_DEFAULT_VALUE_ANIM_SHIFT  4  /* Value moves at distance/16 + 1 px per frame */
 #define GAUGE_DEFAULT_TRAIL_ANIM_SHIFT  4  /* Trail shrinks at distance/16 + 1 px per frame */
 #define GAUGE_DEFAULT_BLINK_SHIFT       3  /* Blink toggles every 8 frames (7.5 toggles/sec @ 60fps) */
+#define GAUGE_MAX_RUNTIME_SHIFT         7
 
 /* Helper macros */
 #define GAUGE_ARRAY_LEN(array)      ((u16)(sizeof(array) / sizeof((array)[0])))
@@ -441,6 +442,16 @@ u8 Gauge_init(Gauge *gauge,
 {
     if (!gauge || !definition)
         return 0;
+
+    if (gauge->runtimeArena != NULL &&
+        gauge->lanes != NULL &&
+        gauge->tickAndRenderHandler != NULL &&
+        gauge->laneCount > 0 &&
+        gauge->laneCount <= GAUGE_MAX_LANES &&
+        gauge->ownedLayoutCount <= gauge->laneCount)
+    {
+        Gauge_release(gauge);
+    }
 
     memset(gauge, 0, sizeof(*gauge));
     memset(&s_buildScratch, 0, sizeof(s_buildScratch));
@@ -5937,22 +5948,38 @@ static void gauge_apply_behavior_from_definition(Gauge *gauge,
             ? behavior->gainMode
             : GAUGE_GAIN_MODE_DISABLED;
 
-        logic->valueAnimEnabled = behavior->valueAnimEnabled ? 1 : 0;
-        logic->valueAnimShift = (behavior->valueAnimShift == 0)
+        const u8 valueAnimShift = (behavior->valueAnimShift == 0)
             ? GAUGE_DEFAULT_VALUE_ANIM_SHIFT
-            : behavior->valueAnimShift;
-        logic->trailAnimShift = (behavior->damageAnimShift == 0)
+            : ((behavior->valueAnimShift > GAUGE_MAX_RUNTIME_SHIFT)
+                ? GAUGE_MAX_RUNTIME_SHIFT
+                : behavior->valueAnimShift);
+        const u8 trailAnimShift = (behavior->damageAnimShift == 0)
             ? GAUGE_DEFAULT_TRAIL_ANIM_SHIFT
-            : behavior->damageAnimShift;
-        logic->blinkShift = (behavior->damageBlinkShift == 0)
+            : ((behavior->damageAnimShift > GAUGE_MAX_RUNTIME_SHIFT)
+                ? GAUGE_MAX_RUNTIME_SHIFT
+                : behavior->damageAnimShift);
+        const u8 blinkShift = (behavior->damageBlinkShift == 0)
             ? GAUGE_DEFAULT_BLINK_SHIFT
-            : behavior->damageBlinkShift;
-        logic->gainAnimShift = (behavior->gainAnimShift == 0)
+            : ((behavior->damageBlinkShift > GAUGE_MAX_RUNTIME_SHIFT)
+                ? GAUGE_MAX_RUNTIME_SHIFT
+                : behavior->damageBlinkShift);
+        const u8 gainAnimShift = (behavior->gainAnimShift == 0)
             ? GAUGE_DEFAULT_VALUE_ANIM_SHIFT
-            : behavior->gainAnimShift;
-        logic->gainBlinkShift = (behavior->gainBlinkShift == 0)
+            : ((behavior->gainAnimShift > GAUGE_MAX_RUNTIME_SHIFT)
+                ? GAUGE_MAX_RUNTIME_SHIFT
+                : behavior->gainAnimShift);
+        const u8 gainBlinkShift = (behavior->gainBlinkShift == 0)
             ? GAUGE_DEFAULT_BLINK_SHIFT
-            : behavior->gainBlinkShift;
+            : ((behavior->gainBlinkShift > GAUGE_MAX_RUNTIME_SHIFT)
+                ? GAUGE_MAX_RUNTIME_SHIFT
+                : behavior->gainBlinkShift);
+
+        logic->valueAnimEnabled = behavior->valueAnimEnabled ? 1 : 0;
+        logic->valueAnimShift = valueAnimShift;
+        logic->trailAnimShift = trailAnimShift;
+        logic->blinkShift = blinkShift;
+        logic->gainAnimShift = gainAnimShift;
+        logic->gainBlinkShift = gainBlinkShift;
         logic->criticalValue = (behavior->criticalValue > logic->maxValue)
             ? logic->maxValue
             : behavior->criticalValue;

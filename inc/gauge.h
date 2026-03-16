@@ -72,7 +72,7 @@
    ----------------------------------------------------------------------------- */
 #ifndef GAUGE_ENABLE_TRACE
 /* Set to 1 to compile frame/cell trace support into the module. */
-#define GAUGE_ENABLE_TRACE 1
+#define GAUGE_ENABLE_TRACE 0
 #endif
 
 #ifndef GAUGE_LUT_CAPACITY
@@ -254,7 +254,7 @@ typedef struct
  * Typical flow:
  * 1. author segment skins
  * 2. describe lanes and their segments
- * 3. call Gauge_init() on a fresh or released Gauge object
+ * 3. call Gauge_init() on a fresh Gauge object
  * 4. drive the runtime with Gauge_update()/Gauge_setValue()/Gauge_decrease()/Gauge_increase()
  */
 typedef struct
@@ -279,8 +279,9 @@ typedef struct
    Public Functions
    ----------------------------------------------------------------------------- */
 /* Initialize and build a gauge from a declarative definition and a base VRAM tile index.
- * This function expects either a fresh Gauge object or one that was previously
- * released with Gauge_release(). */
+ * If the object already looks like a live built gauge, Gauge_init() first calls
+ * Gauge_release() and then rebuilds it from scratch. Otherwise it assumes the
+ * object is fresh or already released and starts from a zeroed state. */
 u8 Gauge_init(Gauge *gauge,
               const GaugeDefinition *definition,
               u16 vramBase);
