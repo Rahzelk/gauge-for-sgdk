@@ -707,14 +707,24 @@ static const DemoCaseSource g_screen2Cases[] = {
         }
     },
     {
-        .descriptionLine1 = "Fixed caps with reverse mirrored fill.",
+        .descriptionLine1 = "Fixed caps on a forward fill gauge.",
         .descriptionLine2 = "Critical mode swaps in blink strips.",
         .cursorTileX = 1,
         .cursorTileY = 14,
         .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 2,
+        .gaugeCount = 1,
         .gauges = {
-            { .definition = &g_screen2CapsLeftDefinition },
+            { .definition = &g_screen2CapsLeftDefinition }
+        }
+    },
+    {
+        .descriptionLine1 = "Fixed caps with mirrored reverse fill.",
+        .descriptionLine2 = "Compare cap placement from the right.",
+        .cursorTileX = 20,
+        .cursorTileY = 14,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
             { .definition = &g_screen2CapsRightDefinition }
         }
     },

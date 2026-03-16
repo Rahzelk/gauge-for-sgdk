@@ -6,7 +6,7 @@
 
 #define DEMO_SCREEN_COUNT          4
 #define DEMO_MAX_CASES_PER_SCREEN  6
-#define DEMO_MAX_GAUGES_PER_CASE   2
+#define DEMO_MAX_GAUGES_PER_CASE   1
 #define DEMO_MAX_ACTIVE_GAUGES     8
 
 #define DEMO_FILL_STEP             4
