@@ -241,9 +241,13 @@ typedef struct
     u8 valueAnimShift;            /* Value animation speed divisor */
     GaugeTrailMode damageMode;    /* Visual behavior used for normal damage state */
     u16 criticalValue;            /* Threshold for critical damage modes */
+    u8 damageHoldFrames;          /* Default hold duration for Gauge_decrease() */
+    u8 damageBlinkFrames;         /* Default blink duration for Gauge_decrease() */
     u8 damageAnimShift;           /* Damage-trail animation speed divisor */
     u8 damageBlinkShift;          /* Damage blink cadence divisor */
     GaugeGainMode gainMode;       /* Visual behavior used for gain state */
+    u8 gainHoldFrames;            /* Default hold duration for Gauge_increase() */
+    u8 gainBlinkFrames;           /* Default blink duration for Gauge_increase() */
     u8 gainAnimShift;             /* Gain animation speed divisor */
     u8 gainBlinkShift;            /* Gain blink cadence divisor */
 } GaugeBehavior;
@@ -260,6 +264,7 @@ typedef struct
 typedef struct
 {
     GaugeMode mode;                        /* FILL or PIP */
+    VDPPlane plane;                        /* Target tilemap plane (BG_A / BG_B / WINDOW) */
     GaugeOrientation orientation;          /* Horizontal or vertical gauge */
     GaugeFillDirection fillDirection;      /* Forward or reverse fill order */
     u16 originX;                           /* Tilemap origin X */
@@ -292,10 +297,14 @@ void Gauge_update(Gauge *gauge);
 void Gauge_setMaxValue(Gauge *gauge, u16 newMaxValue);
 /* Set the logical value immediately. */
 void Gauge_setValue(Gauge *gauge, u16 newValue);
-/* Decrease the value and optionally start hold/blink timing. */
-void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
-/* Increase the value and optionally start hold/blink timing. */
-void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
+/* Decrease the value using the default hold/blink timing from GaugeBehavior. */
+void Gauge_decrease(Gauge *gauge, u16 amount);
+/* Decrease the value with explicit one-shot hold/blink timing. */
+void Gauge_decreaseEx(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
+/* Increase the value using the default hold/blink timing from GaugeBehavior. */
+void Gauge_increase(Gauge *gauge, u16 amount);
+/* Increase the value with explicit one-shot hold/blink timing. */
+void Gauge_increaseEx(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
 /* Release all runtime allocations and reset the Gauge object to its init state. */
 void Gauge_release(Gauge *gauge);
 /* Read the current logical value. */
@@ -349,6 +358,10 @@ struct GaugeLogic
 
     u8 holdFramesRemaining;
     u8 blinkFramesRemaining;
+    u8 defaultDamageHoldFrames;
+    u8 defaultDamageBlinkFrames;
+    u8 defaultGainHoldFrames;
+    u8 defaultGainBlinkFrames;
     u8 valueAnimEnabled;
     u8 valueAnimShift;
     u8 trailAnimShift;

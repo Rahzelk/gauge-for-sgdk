@@ -211,6 +211,7 @@ struct GaugeLaneLayout
     u16 fillOffset;
     u8 length;
     u8 segmentCount;
+    u8 plane;
 
     u8 segmentIdByCellStorage[GAUGE_MAX_LENGTH];
     u8 fillIndexByCellStorage[GAUGE_MAX_LENGTH];
@@ -357,6 +358,7 @@ static GaugeBuildScratch s_buildScratch;
 
 /* Public API uses internal helpers implemented later in the file. */
 static inline u8 sanitize_value_mode(u8 mode);
+static inline u8 sanitize_plane(u8 plane);
 static inline u8 sanitize_orientation(u8 orientation);
 static inline u8 sanitize_fill_direction(u8 fillDirection);
 static inline u8 sanitize_palette_index(u8 palette);
@@ -458,6 +460,7 @@ u8 Gauge_init(Gauge *gauge,
     GaugeDefinition *sanitized = &s_buildScratch.sanitizedDefinition;
     *sanitized = *definition;
     sanitized->mode = (GaugeMode)sanitize_value_mode((u8)sanitized->mode);
+    sanitized->plane = (VDPPlane)sanitize_plane((u8)sanitized->plane);
     sanitized->orientation = (GaugeOrientation)sanitize_orientation((u8)sanitized->orientation);
     sanitized->fillDirection = (GaugeFillDirection)sanitize_fill_direction((u8)sanitized->fillDirection);
     sanitized->palette = sanitize_palette_index(sanitized->palette);
@@ -725,7 +728,7 @@ void Gauge_setValue(Gauge *gauge, u16 newValue)
     apply_configured_trail_mode_state(logic, 0);
 }
 
-void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
+void Gauge_decreaseEx(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
 {
     if (!gauge)
         return;
@@ -759,7 +762,18 @@ void Gauge_decrease(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
     logic->activeTrailState = GAUGE_TRAIL_STATE_DAMAGE;
 }
 
-void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
+void Gauge_decrease(Gauge *gauge, u16 amount)
+{
+    if (!gauge)
+        return;
+
+    Gauge_decreaseEx(gauge,
+                     amount,
+                     gauge->logic.defaultDamageHoldFrames,
+                     gauge->logic.defaultDamageBlinkFrames);
+}
+
+void Gauge_increaseEx(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
 {
     if (!gauge)
         return;
@@ -796,6 +810,17 @@ void Gauge_increase(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
     {
         apply_non_follow_trail_mode_state(logic, 0);
     }
+}
+
+void Gauge_increase(Gauge *gauge, u16 amount)
+{
+    if (!gauge)
+        return;
+
+    Gauge_increaseEx(gauge,
+                     amount,
+                     gauge->logic.defaultGainHoldFrames,
+                     gauge->logic.defaultGainBlinkFrames);
 }
 
 void Gauge_release(Gauge *gauge)
@@ -1062,7 +1087,7 @@ static inline u8 compute_fill_index_and_px(const GaugeLaneLayout *layout,
 }
 
 /**
- * Compute tile position on the WINDOW plane based on orientation.
+ * Compute tile position on the configured tilemap plane based on orientation.
  *
  * For horizontal gauges: X varies by cell, Y stays at origin.
  * For vertical gauges:   Y varies upward from the bottom origin, X stays at origin.
@@ -2563,6 +2588,7 @@ typedef struct
     u16 tiles[GAUGE_MAX_LENGTH];
     u8 length;
     u8 active;
+    u8 plane;
 } GaugeTilemapSpan;
 
 typedef struct
@@ -2585,9 +2611,11 @@ static inline void tilemap_span_reset(GaugeTilemapSpan *span)
     span->firstY = 0;
     span->lastX = 0;
     span->lastY = 0;
+    span->plane = BG_A;
 }
 
 static inline void tilemap_span_begin(GaugeTilemapSpan *span,
+                                      u8 plane,
                                       u16 basetile,
                                       u16 x,
                                       u16 y,
@@ -2600,10 +2628,12 @@ static inline void tilemap_span_begin(GaugeTilemapSpan *span,
     span->firstY = y;
     span->lastX = x;
     span->lastY = y;
+    span->plane = plane;
     span->tiles[0] = tileIndex;
 }
 
 static inline u8 tilemap_span_can_append(const GaugeTilemapSpan *span,
+                                         u8 plane,
                                          u8 orientation,
                                          u16 basetile,
                                          u16 x,
@@ -2611,7 +2641,7 @@ static inline u8 tilemap_span_can_append(const GaugeTilemapSpan *span,
 {
     if (!span->active)
         return 1;
-    if (span->basetile != basetile || span->length >= GAUGE_MAX_LENGTH)
+    if (span->plane != plane || span->basetile != basetile || span->length >= GAUGE_MAX_LENGTH)
         return 0;
 
     if (orientation == GAUGE_ORIENT_HORIZONTAL)
@@ -2632,18 +2662,19 @@ static inline void tilemap_span_append(GaugeTilemapSpan *span,
 }
 
 static inline void tilemap_span_push(GaugeTilemapSpan *span,
+                                     u8 plane,
                                      u8 orientation,
                                      u16 basetile,
                                      u16 x,
                                      u16 y,
                                      u16 tileIndex)
 {
-    if (!tilemap_span_can_append(span, orientation, basetile, x, y))
+    if (!tilemap_span_can_append(span, plane, orientation, basetile, x, y))
     {
         u16 reversedTiles[GAUGE_MAX_LENGTH];
         if (orientation == GAUGE_ORIENT_HORIZONTAL)
         {
-            VDP_setTileMapDataRowEx(WINDOW,
+            VDP_setTileMapDataRowEx((VDPPlane)plane,
                                     span->tiles,
                                     span->basetile,
                                     span->firstY,
@@ -2656,7 +2687,7 @@ static inline void tilemap_span_push(GaugeTilemapSpan *span,
             for (u8 i = 0; i < span->length; i++)
                 reversedTiles[i] = span->tiles[(u8)(span->length - 1 - i)];
 
-            VDP_setTileMapDataColumnEx(WINDOW,
+            VDP_setTileMapDataColumnEx((VDPPlane)plane,
                                        reversedTiles,
                                        span->basetile,
                                        span->firstX,
@@ -2670,7 +2701,7 @@ static inline void tilemap_span_push(GaugeTilemapSpan *span,
     }
 
     if (!span->active)
-        tilemap_span_begin(span, basetile, x, y, tileIndex);
+        tilemap_span_begin(span, plane, basetile, x, y, tileIndex);
     else
         tilemap_span_append(span, x, y, tileIndex);
 }
@@ -2682,7 +2713,7 @@ static inline void tilemap_span_flush(GaugeTilemapSpan *span, u8 orientation)
 
     if (orientation == GAUGE_ORIENT_HORIZONTAL)
     {
-        VDP_setTileMapDataRowEx(WINDOW,
+        VDP_setTileMapDataRowEx((VDPPlane)span->plane,
                                 span->tiles,
                                 span->basetile,
                                 span->firstY,
@@ -2697,7 +2728,7 @@ static inline void tilemap_span_flush(GaugeTilemapSpan *span, u8 orientation)
         for (u8 i = 0; i < span->length; i++)
             reversedTiles[i] = span->tiles[(u8)(span->length - 1 - i)];
 
-        VDP_setTileMapDataColumnEx(WINDOW,
+        VDP_setTileMapDataColumnEx((VDPPlane)span->plane,
                                    reversedTiles,
                                    span->basetile,
                                    span->firstX,
@@ -3728,6 +3759,7 @@ static void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
                                    const u32 * const *trailTilesets,
                                    const u32 * const *bridgeTilesets,
                                    const u8 *segmentIdByCell,
+                                   u8 plane,
                                    GaugeOrientation orientation,
                                    u8 palette,
                                    u8 priority,
@@ -3803,6 +3835,7 @@ static void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
     GaugeLaneLayout_applyFillDirection(layout, fillDirection);
 
     /* Set visual properties */
+    layout->plane = plane;
     layout->orientation = orientation;
     layout->palette = palette;
     layout->priority = priority ? 1 : 0;
@@ -3920,6 +3953,10 @@ static void GaugeLogic_initWithAnim(GaugeLogic *logic,
     logic->holdFramesRemaining = 0;
     logic->blinkFramesRemaining = 0;
     logic->blinkTimer = 0;
+    logic->defaultDamageHoldFrames = 0;
+    logic->defaultDamageBlinkFrames = 0;
+    logic->defaultGainHoldFrames = 0;
+    logic->defaultGainBlinkFrames = 0;
 
     /* Animation config */
     logic->valueAnimEnabled = valueAnimEnabled ? 1 : 0;
@@ -4307,7 +4344,13 @@ static void write_tilemap_pip_init(GaugeLaneInstance *lane)
             u16 x = 0;
             u16 y = 0;
             compute_pip_render_xy(layout, lane->originX, lane->originY, fillIndex, renderRow, &x, &y);
-            tilemap_span_push(&tilemapSpan, layout->orientation, attrBase, x, y, vramTile);
+            tilemap_span_push(&tilemapSpan,
+                              layout->plane,
+                              layout->orientation,
+                              attrBase,
+                              x,
+                              y,
+                              vramTile);
 
             const u16 renderStateIndex = compute_pip_render_state_lut_index(PIP_STATE_EMPTY, renderIndex);
             const u8 stripIndex = layout->pipRenderStripIndexByState[renderStateIndex];
@@ -4334,7 +4377,7 @@ static void write_tilemap_pip_init(GaugeLaneInstance *lane)
  *
  * Allocates one VRAM tile per valid cell, pre-caches tileset strip pointers
  * (body/end/trail/bridge) per cell to avoid per-frame segment lookups, and writes
- * the tilemap on the WINDOW plane. Tile data itself is still uploaded lazily on
+ * the tilemap on the configured plane. Tile data itself is still uploaded lazily on
  * the first runtime update.
  *
  * @param lane  GaugeLaneInstance to initialize (must have layout and vramBase set)
@@ -4367,6 +4410,7 @@ static void write_tilemap_fill_init(GaugeLaneInstance *lane)
         compute_tile_xy(layout->orientation, lane->originX, lane->originY, cellIndex, &x, &y);
 
         tilemap_span_push(&tilemapSpan,
+                          layout->plane,
                           layout->orientation,
                           attrBase,
                           x,
@@ -4853,7 +4897,6 @@ static void process_fill_mode(GaugeLaneInstance *lane,
     (void)blinkOffActive;
     (void)blinkOnChanged;
     (void)trailModeChanged;
-    const GaugeLaneLayout *layout = lane->layout;
     GaugeFillStreamCell *cells = (GaugeFillStreamCell *)lane->cells;
     GaugeTileUploadSpan uploadSpan;
     FillLaneResolveContext resolveContext;
@@ -5988,6 +6031,10 @@ static void gauge_apply_behavior_from_definition(Gauge *gauge,
         logic->blinkShift = blinkShift;
         logic->gainAnimShift = gainAnimShift;
         logic->gainBlinkShift = gainBlinkShift;
+        logic->defaultDamageHoldFrames = behavior->damageHoldFrames;
+        logic->defaultDamageBlinkFrames = behavior->damageBlinkFrames;
+        logic->defaultGainHoldFrames = behavior->gainHoldFrames;
+        logic->defaultGainBlinkFrames = behavior->gainBlinkFrames;
         logic->criticalValue = (behavior->criticalValue > logic->maxValue)
             ? logic->maxValue
             : behavior->criticalValue;
@@ -6113,6 +6160,11 @@ static void finalize_layout_derived_state(GaugeLaneLayout *layout)
 static inline u8 sanitize_value_mode(u8 mode)
 {
     return (mode == GAUGE_VALUE_MODE_PIP) ? GAUGE_VALUE_MODE_PIP : GAUGE_VALUE_MODE_FILL;
+}
+
+static inline u8 sanitize_plane(u8 plane)
+{
+    return (plane <= WINDOW) ? plane : BG_A;
 }
 
 static inline u8 sanitize_orientation(u8 orientation)
@@ -6733,6 +6785,7 @@ static u8 init_layout_from_lane_plan(const GaugeDefinition *definition,
                            NULL,
                            NULL,
                            lanePlan->segmentIdByCell,
+                           (u8)definition->plane,
                            definition->orientation,
                            lanePlan->palette,
                            definition->priority,
