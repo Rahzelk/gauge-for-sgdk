@@ -248,8 +248,8 @@ static const GaugeDefinition g_screen1BasicSingleDefinition = {
     .plane = WINDOW,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .originX = 4,
-    .originY = 8,
+    .originX = 3,
+    .originY = 11,
     .maxValue = 96,
     .palette = PAL0,
     .priority = 1,
@@ -271,8 +271,8 @@ static const GaugeDefinition g_screen1BasicTwoLanesDefinition = {
     .plane = WINDOW,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .originX = 4,
-    .originY = 21,
+    .originX = 3,
+    .originY = 17,
     .maxValue = 96,
     .palette = PAL0,
     .priority = 1,
@@ -300,8 +300,8 @@ static const GaugeDefinition g_screen1BasicMirrorDefinition = {
     .plane = WINDOW,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_REVERSE,
-    .originX = 24,
-    .originY = 8,
+    .originX = 22,
+    .originY = 11,
     .maxValue = 96,
     .palette = PAL0,
     .priority = 1,
@@ -326,8 +326,8 @@ static const GaugeDefinition g_screen1PaletteLanesDefinition = {
     .plane = WINDOW,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .originX = 24,
-    .originY = 21,
+    .originX = 22,
+    .originY = 17,
     .maxValue = 96,
     .palette = PAL0,
     .priority = 1,
@@ -369,7 +369,7 @@ static const GaugeDefinition g_screen1GainDefinition = {
     .plane = WINDOW,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .originX = 4,
+    .originX = 3,
     .originY = 14,
     .maxValue = 96,
     .palette = PAL0,
@@ -398,7 +398,7 @@ static const GaugeDefinition g_screen1BlinkOffDefinition = {
     .plane = WINDOW,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
-    .originX = 24,
+    .originX = 22,
     .originY = 14,
     .maxValue = 96,
     .palette = PAL0,
@@ -420,9 +420,10 @@ static const GaugeDefinition g_screen1BlinkOffDefinition = {
 
 static const DemoCaseSource g_screen1Cases[] = {
     {
-        .label = "Basic 1 lane",
-        .cursorTileX = 2,
-        .cursorTileY = 8,
+        .descriptionLine1 = "One fill lane, one segment, forward.",
+        .descriptionLine2 = "Watch follow damage trail on loss.",
+        .cursorTileX = 1,
+        .cursorTileY = 11,
         .stepAmount = DEMO_FILL_STEP,
         .gaugeCount = 1,
         .gauges = {
@@ -430,9 +431,10 @@ static const DemoCaseSource g_screen1Cases[] = {
         }
     },
     {
-        .label = "Mirror fill",
-        .cursorTileX = 22,
-        .cursorTileY = 8,
+        .descriptionLine1 = "Reverse fill with horizontal mirror.",
+        .descriptionLine2 = "Value animates from right to left.",
+        .cursorTileX = 20,
+        .cursorTileY = 11,
         .stepAmount = DEMO_FILL_STEP,
         .gaugeCount = 1,
         .gauges = {
@@ -440,8 +442,9 @@ static const DemoCaseSource g_screen1Cases[] = {
         }
     },
     {
-        .label = "Gain follow",
-        .cursorTileX = 2,
+        .descriptionLine1 = "Gain mode follow adds a leading trail.",
+        .descriptionLine2 = "Increase to watch value catch it.",
+        .cursorTileX = 1,
         .cursorTileY = 14,
         .stepAmount = DEMO_FILL_STEP,
         .gaugeCount = 1,
@@ -450,8 +453,9 @@ static const DemoCaseSource g_screen1Cases[] = {
         }
     },
     {
-        .label = "Blink off",
-        .cursorTileX = 22,
+        .descriptionLine1 = "Critical static trail uses blinkOff.",
+        .descriptionLine2 = "Lower below threshold to see it.",
+        .cursorTileX = 20,
         .cursorTileY = 14,
         .stepAmount = DEMO_FILL_STEP,
         .gaugeCount = 1,
@@ -460,9 +464,10 @@ static const DemoCaseSource g_screen1Cases[] = {
         }
     },
     {
-        .label = "Basic 2 lanes",
-        .cursorTileX = 2,
-        .cursorTileY = 21,
+        .descriptionLine1 = "Two aligned lanes share one value.",
+        .descriptionLine2 = "Inspect offsetY and shared updates.",
+        .cursorTileX = 1,
+        .cursorTileY = 17,
         .stepAmount = DEMO_FILL_STEP,
         .gaugeCount = 1,
         .gauges = {
@@ -470,9 +475,10 @@ static const DemoCaseSource g_screen1Cases[] = {
         }
     },
     {
-        .label = "3 lanes + palettes",
-        .cursorTileX = 22,
-        .cursorTileY = 21,
+        .descriptionLine1 = "Three lanes use windows and palettes.",
+        .descriptionLine2 = "Lower to see critical trail blink.",
+        .cursorTileX = 20,
+        .cursorTileY = 17,
         .stepAmount = DEMO_FILL_STEP,
         .gaugeCount = 1,
         .gauges = {
@@ -490,7 +496,7 @@ static const GaugeDefinition g_screen2BevelDefinition = {
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
     .originX = 3,
-    .originY = 8,
+    .originY = 11,
     .maxValue = 96,
     .palette = PAL0,
     .priority = 1,
@@ -513,7 +519,7 @@ static const GaugeDefinition g_screen2BridgeDefinition = {
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
     .originX = 22,
-    .originY = 8,
+    .originY = 11,
     .maxValue = 100,
     .palette = PAL0,
     .priority = 1,
@@ -607,7 +613,7 @@ static const GaugeDefinition g_screen2LowerBridgeDefinition = {
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
     .originX = 22,
-    .originY = 20,
+    .originY = 17,
     .maxValue = 96,
     .palette = PAL0,
     .priority = 1,
@@ -642,7 +648,7 @@ static const GaugeDefinition g_screen2ThreeLanesDefinition = {
     .orientation = GAUGE_ORIENT_HORIZONTAL,
     .fillDirection = GAUGE_FILL_FORWARD,
     .originX = 3,
-    .originY = 20,
+    .originY = 17,
     .maxValue = 96,
     .palette = PAL0,
     .priority = 1,
@@ -679,9 +685,10 @@ static const GaugeDefinition g_screen2ThreeLanesDefinition = {
 
 static const DemoCaseSource g_screen2Cases[] = {
     {
-        .label = "Bevel",
+        .descriptionLine1 = "Bevel skin shows body, trail, end.",
+        .descriptionLine2 = "Use it to inspect strip selection.",
         .cursorTileX = 1,
-        .cursorTileY = 8,
+        .cursorTileY = 11,
         .stepAmount = DEMO_FILL_STEP,
         .gaugeCount = 1,
         .gauges = {
@@ -689,9 +696,10 @@ static const DemoCaseSource g_screen2Cases[] = {
         }
     },
     {
-        .label = "Bridges",
+        .descriptionLine1 = "Segment bridges link different skins.",
+        .descriptionLine2 = "Watch bridge strips at boundaries.",
         .cursorTileX = 20,
-        .cursorTileY = 8,
+        .cursorTileY = 11,
         .stepAmount = DEMO_FILL_STEP,
         .gaugeCount = 1,
         .gauges = {
@@ -699,7 +707,8 @@ static const DemoCaseSource g_screen2Cases[] = {
         }
     },
     {
-        .label = "Caps + mirror blink",
+        .descriptionLine1 = "Fixed caps with reverse mirrored fill.",
+        .descriptionLine2 = "Critical mode swaps in blink strips.",
         .cursorTileX = 1,
         .cursorTileY = 14,
         .stepAmount = DEMO_FILL_STEP,
@@ -710,9 +719,10 @@ static const DemoCaseSource g_screen2Cases[] = {
         }
     },
     {
-        .label = "3 stylized lanes",
+        .descriptionLine1 = "Three stylized lanes use lane windows.",
+        .descriptionLine2 = "Critical value mode blinks the value.",
         .cursorTileX = 1,
-        .cursorTileY = 21,
+        .cursorTileY = 17,
         .stepAmount = DEMO_FILL_STEP,
         .gaugeCount = 1,
         .gauges = {
@@ -720,9 +730,10 @@ static const DemoCaseSource g_screen2Cases[] = {
         }
     },
     {
-        .label = "Lower lane bridge",
+        .descriptionLine1 = "Lower linked lane adds a bridge strip.",
+        .descriptionLine2 = "Watch base lane mapping at the join.",
         .cursorTileX = 20,
-        .cursorTileY = 20,
+        .cursorTileY = 17,
         .stepAmount = DEMO_FILL_STEP,
         .gaugeCount = 1,
         .gauges = {
@@ -865,7 +876,8 @@ static const GaugeDefinition g_screen3VerticalMirrorDefinition = {
 
 static const DemoCaseSource g_screen3Cases[] = {
     {
-        .label = "Vertical gain",
+        .descriptionLine1 = "Vertical fill with gain follow trail.",
+        .descriptionLine2 = "Increase to see the trail rise first.",
         .cursorTileX = 4,
         .cursorTileY = 18,
         .stepAmount = DEMO_FILL_STEP,
@@ -875,7 +887,8 @@ static const DemoCaseSource g_screen3Cases[] = {
         }
     },
     {
-        .label = "Vertical 2 lanes",
+        .descriptionLine1 = "Two vertical lanes share one value.",
+        .descriptionLine2 = "Inspect offsetX and shared updates.",
         .cursorTileX = 12,
         .cursorTileY = 18,
         .stepAmount = DEMO_FILL_STEP,
@@ -885,7 +898,8 @@ static const DemoCaseSource g_screen3Cases[] = {
         }
     },
     {
-        .label = "Vertical 3 lanes",
+        .descriptionLine1 = "Three lanes stack with lane windows.",
+        .descriptionLine2 = "Critical trail blink uses palettes.",
         .cursorTileX = 20,
         .cursorTileY = 18,
         .stepAmount = DEMO_FILL_STEP,
@@ -895,7 +909,8 @@ static const DemoCaseSource g_screen3Cases[] = {
         }
     },
     {
-        .label = "Vertical critical mirror",
+        .descriptionLine1 = "Reverse vertical fill uses blinkOff.",
+        .descriptionLine2 = "Lower below critical to see blinking.",
         .cursorTileX = 30,
         .cursorTileY = 18,
         .stepAmount = DEMO_FILL_STEP,
@@ -1057,7 +1072,8 @@ static const GaugeDefinition g_screen4VerticalPipDefinition = {
 
 static const DemoCaseSource g_screen4Cases[] = {
     {
-        .label = "PIP 1 cell = 1 tile",
+        .descriptionLine1 = "One pip cell maps to one tile.",
+        .descriptionLine2 = "Use it as the simplest PIP setup.",
         .cursorTileX = 2,
         .cursorTileY = 11,
         .stepAmount = DEMO_PIP_STEP,
@@ -1067,7 +1083,8 @@ static const DemoCaseSource g_screen4Cases[] = {
         }
     },
     {
-        .label = "PIP basic",
+        .descriptionLine1 = "Basic horizontal PIP value states.",
+        .descriptionLine2 = "Compare gain and damage trail pips.",
         .cursorTileX = 2,
         .cursorTileY = 14,
         .stepAmount = DEMO_PIP_STEP,
@@ -1077,7 +1094,8 @@ static const DemoCaseSource g_screen4Cases[] = {
         }
     },
     {
-        .label = "PIP quarter 2x2",
+        .descriptionLine1 = "Each pip uses a 2x2 tile block.",
+        .descriptionLine2 = "Good for multi-tile PIP composition.",
         .cursorTileX = 2,
         .cursorTileY = 18,
         .stepAmount = DEMO_PIP_STEP,
@@ -1087,7 +1105,8 @@ static const DemoCaseSource g_screen4Cases[] = {
         }
     },
     {
-        .label = "Mini PIP 2 lanes",
+        .descriptionLine1 = "Two compact pip lanes share a value.",
+        .descriptionLine2 = "Inspect lane windows in PIP mode.",
         .cursorTileX = 2,
         .cursorTileY = 21,
         .stepAmount = DEMO_PIP_STEP,
@@ -1097,7 +1116,8 @@ static const DemoCaseSource g_screen4Cases[] = {
         }
     },
     {
-        .label = "Vertical PIP 3 lanes",
+        .descriptionLine1 = "Three vertical pip lanes share steps.",
+        .descriptionLine2 = "Critical blink affects the trail pips.",
         .cursorTileX = 27,
         .cursorTileY = 15,
         .stepAmount = DEMO_PIP_STEP,

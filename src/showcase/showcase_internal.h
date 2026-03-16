@@ -34,7 +34,8 @@ typedef struct
 
 typedef struct
 {
-    const char *label;
+    const char *descriptionLine1;
+    const char *descriptionLine2;
     u8 cursorTileX;
     u8 cursorTileY;
     u16 stepAmount;
@@ -51,7 +52,8 @@ typedef struct
 
 typedef struct
 {
-    const char *label;
+    const char *descriptionLine1;
+    const char *descriptionLine2;
     u8 cursorTileX;
     u8 cursorTileY;
     u16 stepAmount;

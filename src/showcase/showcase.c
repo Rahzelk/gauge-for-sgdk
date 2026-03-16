@@ -8,6 +8,8 @@
 
 static const char s_blankLine[] = "                                        ";
 static const char s_separator[] = "----------------------------------------";
+static const char s_noCaseDescriptionLine1[] = "No buildable showcase case on screen.";
+static const char s_noCaseDescriptionLine2[] = "Check this screen definition and data.";
 
 static void clearHudLine(u16 y)
 {
@@ -23,13 +25,14 @@ void drawHudStatic(void)
     clearHudLine(4);
     clearHudLine(5);
     clearHudLine(6);
+    clearHudLine(7);
+    clearHudLine(8);
+    clearHudLine(9);
 
     VDP_drawText("A: increase   B: decrease", 1, 0);
     VDP_drawText("U/L prev  D/R next  C: change screen", 1, 1);
     VDP_drawText("Screen:", 1, 3);
-    VDP_drawText("Selected:", 1, 4);
-    VDP_drawText("VRAM mode:", 1, 5);
-    VDP_drawText(s_separator, 0, 6);
+    VDP_drawText(s_separator, 0, 8);
 }
 
 /* -----------------------------------------------------------------------------
@@ -38,19 +41,27 @@ void drawHudStatic(void)
 void updateHudDynamic(void)
 {
     const DemoScreenSource *screen = &g_screens[g_selectedScreen];
-    const char *selectedLabel = "No case available";
+    const char *selectedDescriptionLine1 = s_noCaseDescriptionLine1;
+    const char *selectedDescriptionLine2 = s_noCaseDescriptionLine2;
 
     if (g_activeCaseCount > 0 && g_selectedCase < g_activeCaseCount)
-        selectedLabel = g_activeCases[g_selectedCase].label;
+    {
+        selectedDescriptionLine1 = g_activeCases[g_selectedCase].descriptionLine1;
+        selectedDescriptionLine2 = g_activeCases[g_selectedCase].descriptionLine2;
+    }
 
     clearHudLine(2);
     clearHudLine(3);
     clearHudLine(4);
     clearHudLine(5);
+    clearHudLine(7);
+    clearHudLine(8);
+    clearHudLine(9);
     VDP_drawText("Screen:", 1, 3);
-    VDP_drawText("Selected:", 1, 4);
     VDP_drawText(screen->title, 9, 3);
-    VDP_drawText(selectedLabel, 11, 4);
+    VDP_drawText(selectedDescriptionLine1, 1, 5);
+    VDP_drawText(selectedDescriptionLine2, 1, 6);
+    VDP_drawText(s_separator, 0, 8);
 }
 
 void updateCursorSprite(void)
