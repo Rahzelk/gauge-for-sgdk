@@ -305,6 +305,12 @@ void Gauge_decreaseEx(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
 void Gauge_increase(Gauge *gauge, u16 amount);
 /* Increase the value with explicit one-shot hold/blink timing. */
 void Gauge_increaseEx(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
+/* Enable or disable module debug visualization for this gauge. */
+void Gauge_setDebugMode(Gauge *gauge, u8 enabled);
+/* Read whether module debug visualization is enabled. */
+u8 Gauge_getDebugMode(const Gauge *gauge);
+/* Read the next free VRAM tile index after this gauge allocation. */
+u16 Gauge_getNextVramIndex(const Gauge *gauge);
 /* Release all runtime allocations and reset the Gauge object to its init state. */
 void Gauge_release(Gauge *gauge);
 /* Read the current logical value. */

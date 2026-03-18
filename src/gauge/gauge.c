@@ -861,6 +861,26 @@ u16 Gauge_getValue(const Gauge *gauge)
     return gauge ? gauge->logic.currentValue : 0;
 }
 
+void Gauge_setDebugMode(Gauge *gauge, u8 enabled)
+{
+    if (!gauge)
+        return;
+
+    gauge->debugMode = enabled ? 1 : 0;
+}
+
+u8 Gauge_getDebugMode(const Gauge *gauge)
+{
+    return gauge ? gauge->debugMode : 0;
+}
+
+u16 Gauge_getNextVramIndex(const Gauge *gauge)
+{
+    if (!gauge || !gauge->lanes || gauge->laneCount == 0 || !gauge->lanes[0])
+        return 0;
+
+    return (u16)(gauge->lanes[0]->vramBase + gauge->vramNextOffset);
+}
 
 /* =============================================================================
    Tile index lookup table

@@ -36,6 +36,7 @@ typedef struct
 {
     const char *descriptionLine1;
     const char *descriptionLine2;
+    const char *descriptionLine3;
     u8 cursorTileX;
     u8 cursorTileY;
     u16 stepAmount;
@@ -54,11 +55,13 @@ typedef struct
 {
     const char *descriptionLine1;
     const char *descriptionLine2;
+    const char *descriptionLine3;
     u8 cursorTileX;
     u8 cursorTileY;
     u16 stepAmount;
     u8 gaugeCount;
     Gauge *gauges[DEMO_MAX_GAUGES_PER_CASE];
+    u16 vramBaseByGauge[DEMO_MAX_GAUGES_PER_CASE];
 } DemoCaseRuntime;
 
 extern Gauge g_runtimeGaugePool[DEMO_MAX_ACTIVE_GAUGES];

@@ -23,7 +23,7 @@ u8 buildGaugeFromDefinition(Gauge *gauge,
     if (!Gauge_init(gauge, definition, vramBase))
         return 0;
 
-    *nextVram = (u16)(vramBase + gauge->vramNextOffset);
+    *nextVram = Gauge_getNextVramIndex(gauge);
     return 1;
 }
 
@@ -51,6 +51,7 @@ u8 tryBuildCase(const DemoCaseSource *sourceCase,
     memset(runtimeCase, 0, sizeof(*runtimeCase));
     runtimeCase->descriptionLine1 = sourceCase->descriptionLine1;
     runtimeCase->descriptionLine2 = sourceCase->descriptionLine2;
+    runtimeCase->descriptionLine3 = sourceCase->descriptionLine3;
     runtimeCase->cursorTileX = sourceCase->cursorTileX;
     runtimeCase->cursorTileY = sourceCase->cursorTileY;
     runtimeCase->stepAmount = sourceCase->stepAmount;
@@ -64,6 +65,7 @@ u8 tryBuildCase(const DemoCaseSource *sourceCase,
             break;
 
         gauge = &g_runtimeGaugePool[*gaugeCursor];
+        runtimeCase->vramBaseByGauge[localGaugeCount] = *nextVram;
         if (!buildGaugeFromDefinition(gauge, sourceGauge->definition, nextVram))
             break;
 

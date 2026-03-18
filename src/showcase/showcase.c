@@ -10,6 +10,73 @@ static const char s_blankLine[] = "                                        ";
 static const char s_separator[] = "----------------------------------------";
 static const char s_noCaseDescriptionLine1[] = "No buildable showcase case on screen.";
 static const char s_noCaseDescriptionLine2[] = "Check this screen definition and data.";
+static const char s_noCaseDescriptionLine3[] = "No gauge stats are available here.";
+
+static void clearHudLine(u16 y);
+
+static u16 appendString(char *buffer, u16 offset, const char *text)
+{
+    while (text && *text != '\0' && offset < 40)
+        buffer[offset++] = *text++;
+
+    return offset;
+}
+
+static u16 appendU16Decimal(char *buffer, u16 offset, u16 value, u8 minDigits)
+{
+    char temp[5];
+    u8 digitCount = 0;
+    u8 padCount = 0;
+
+    do
+    {
+        temp[digitCount++] = (char)('0' + (value % 10));
+        value /= 10;
+    }
+    while (value != 0 && digitCount < sizeof(temp));
+
+    if (digitCount < minDigits)
+        padCount = (u8)(minDigits - digitCount);
+
+    while (padCount > 0 && offset < 40)
+    {
+        buffer[offset++] = '0';
+        padCount--;
+    }
+
+    while (digitCount > 0 && offset < 40)
+        buffer[offset++] = temp[--digitCount];
+
+    return offset;
+}
+
+static void drawSelectedGaugeVramLine(void)
+{
+    DemoCaseRuntime *selectedCase = getSelectedCase();
+
+    clearHudLine(23);
+    if (!selectedCase || selectedCase->gaugeCount == 0 || !selectedCase->gauges[0])
+        return;
+
+    {
+        char lineBuffer[41];
+        const Gauge *gauge = selectedCase->gauges[0];
+        const u16 vramBase = selectedCase->vramBaseByGauge[0];
+        const u16 nextVramIndex = Gauge_getNextVramIndex(gauge);
+        const u16 tilesUsed = (nextVramIndex >= vramBase)
+            ? (u16)(nextVramIndex - vramBase)
+            : 0;
+        u16 offset = 0;
+
+        memset(lineBuffer, 0, sizeof(lineBuffer));
+        offset = appendString(lineBuffer, offset, "VRAM Base = ");
+        offset = appendU16Decimal(lineBuffer, offset, vramBase, 4);
+        offset = appendString(lineBuffer, offset, " --- Tiles used = ");
+        offset = appendU16Decimal(lineBuffer, offset, tilesUsed, 1);
+        lineBuffer[offset] = '\0';
+        VDP_drawText(lineBuffer, 1, 26);
+    }
+}
 
 static void clearHudLine(u16 y)
 {
@@ -28,11 +95,13 @@ void drawHudStatic(void)
     clearHudLine(7);
     clearHudLine(8);
     clearHudLine(9);
+    clearHudLine(10);
+    clearHudLine(23);
 
     VDP_drawText("A: increase   B: decrease", 1, 0);
     VDP_drawText("U/L prev  D/R next  C: change screen", 1, 1);
     VDP_drawText("Screen:", 1, 3);
-    VDP_drawText(s_separator, 0, 8);
+    VDP_drawText(s_separator, 0, 9);
 }
 
 /* -----------------------------------------------------------------------------
@@ -43,25 +112,31 @@ void updateHudDynamic(void)
     const DemoScreenSource *screen = &g_screens[g_selectedScreen];
     const char *selectedDescriptionLine1 = s_noCaseDescriptionLine1;
     const char *selectedDescriptionLine2 = s_noCaseDescriptionLine2;
+    const char *selectedDescriptionLine3 = s_noCaseDescriptionLine3;
 
     if (g_activeCaseCount > 0 && g_selectedCase < g_activeCaseCount)
     {
         selectedDescriptionLine1 = g_activeCases[g_selectedCase].descriptionLine1;
         selectedDescriptionLine2 = g_activeCases[g_selectedCase].descriptionLine2;
+        selectedDescriptionLine3 = g_activeCases[g_selectedCase].descriptionLine3;
     }
 
     clearHudLine(2);
     clearHudLine(3);
     clearHudLine(4);
     clearHudLine(5);
+    clearHudLine(6);
     clearHudLine(7);
     clearHudLine(8);
     clearHudLine(9);
+    clearHudLine(10);
     VDP_drawText("Screen:", 1, 3);
     VDP_drawText(screen->title, 9, 3);
     VDP_drawText(selectedDescriptionLine1, 1, 5);
     VDP_drawText(selectedDescriptionLine2, 1, 6);
-    VDP_drawText(s_separator, 0, 8);
+    VDP_drawText(selectedDescriptionLine3, 1, 7);
+    VDP_drawText(s_separator, 0, 9);
+    drawSelectedGaugeVramLine();
 }
 
 void updateCursorSprite(void)
@@ -109,16 +184,19 @@ static void handleInput(u16 pressed, u16 held)
 
     if (pressed & BUTTON_START)
     {
+        /* Demo-only: toggles module debug visualization.
+         * Not required for normal integration.
+         */
         if (selectedCase && selectedCase->gaugeCount > 0)
         {
             const u8 enabled = selectedCase->gauges[0] ?
-                (selectedCase->gauges[0]->debugMode ? 0 : 1) : 1;
+                (Gauge_getDebugMode(selectedCase->gauges[0]) ? 0 : 1) : 1;
 
             for (u8 gaugeIndex = 0; gaugeIndex < selectedCase->gaugeCount; gaugeIndex++)
             {
                 Gauge *gauge = selectedCase->gauges[gaugeIndex];
                 if (gauge)
-                    gauge->debugMode = enabled;
+                    Gauge_setDebugMode(gauge, enabled);
             }
         }
     }
