@@ -113,7 +113,12 @@ void loadScreen(u8 screenIndex)
         DemoCaseRuntime runtimeCase;
 
         if (!tryBuildCase(&screen->cases[caseIndex], &runtimeCase, &gaugeCursor, &nextVram))
+        {
+            KLog_U2("SHOWCASE screen: ", screenIndex,
+                    " case: ", caseIndex);
+            KLog("SHOWCASE: case build failed");
             continue;
+        }
 
         g_activeCases[activeCaseCount] = runtimeCase;
         activeCaseCount++;

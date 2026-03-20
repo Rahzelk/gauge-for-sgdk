@@ -1750,30 +1750,6 @@ static inline void classify_cap_start_with_strips(const GaugeBreakInfo *breakInf
     }
 }
 
-/**
- * Classify the cap start cell and determine which strip + index to use.
- *
- * @param layout         Layout configuration
- * @param breakInfo            Pre-computed break zone info
- * @param cellFillIndex  Fill index of the cap start cell
- * @param segmentId          Segment ID of the cap start cell
- * @param out            [out] Classification result (strip + index)
- *
- * Cost: ~30-50 cycles (a few comparisons + LUT lookups)
- */
-static inline void classify_cap_start(const GaugeLaneLayout *layout,
-                                       const GaugeBreakInfo *breakInfo,
-                                       u8 cellFillIndex,
-                                       u8 segmentId,
-                                       CapStartResult *out)
-{
-    classify_cap_start_with_strips(breakInfo, cellFillIndex,
-                                   layout->tilesetCapStartBySegment[segmentId],
-                                   layout->tilesetCapStartBreakBySegment[segmentId],
-                                   layout->tilesetCapStartTrailBySegment[segmentId],
-                                   out);
-}
-
 /* =============================================================================
    Bridge strip index computation
    =============================================================================
@@ -3058,15 +3034,6 @@ static inline void tile_upload_span_flush(GaugeTileUploadSpan *span)
     tile_upload_span_reset(span);
 }
 
-/**
- * Upload a fill tile from ROM strip to VRAM.
- */
-static inline void upload_fill_tile(const u32 *strip, u8 fillIndex, u16 vramTile, u8 dmaMode)
-{
-    const u32 *src = strip + FILL_IDX_TO_OFFSET(fillIndex);
-    VDP_loadTileData(src, vramTile, 1, dmaMode);
-}
-
 static inline u8 segment_tileset_array_has_any(const u32 * const *tilesetsBySegment,
                                                u8 segmentCount)
 {
@@ -3076,20 +3043,6 @@ static inline u8 segment_tileset_array_has_any(const u32 * const *tilesetsBySegm
     for (u8 segmentId = 0; segmentId < segmentCount; segmentId++)
     {
         if (tilesetsBySegment[segmentId] != NULL)
-            return 1;
-    }
-    return 0;
-}
-
-static inline u8 segment_flag_array_has_any(const u8 *flagsBySegment,
-                                            u8 segmentCount)
-{
-    if (!flagsBySegment)
-        return 0;
-
-    for (u8 segmentId = 0; segmentId < segmentCount; segmentId++)
-    {
-        if (flagsBySegment[segmentId] != 0)
             return 1;
     }
     return 0;
@@ -5235,7 +5188,6 @@ static void process_fill_mode(GaugeLaneInstance *lane,
     (void)blinkOffActive;
     (void)blinkOnChanged;
     (void)trailModeChanged;
-    const GaugeLaneLayout *layout = lane->layout;
     GaugeFillStreamCell *cells = (GaugeFillStreamCell *)lane->cells;
     GaugeTileUploadSpan uploadSpan;
     FillLaneResolveContext resolveContext;
@@ -6765,7 +6717,7 @@ static u8 resolve_pip_strip_geometry_from_skin(const GaugePipSkin *skin,
 
     const u8 pipWidth = skin->pipWidth ? skin->pipWidth : 1;
     u8 pipHeight = skin->pipHeight ? skin->pipHeight : 1;
-    if (pipHeight == 0 || pipHeight > 4)
+    if (pipHeight > 4)
         return 0;
 
     const u16 pipTileCount = skin->tileset->numTile;
