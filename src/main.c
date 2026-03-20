@@ -78,8 +78,8 @@ int main(bool hardReset)
     /* -----------------------------------------------------------------------------
      2. Gauge Init based on the GaugeDefinition
      ----------------------------------------------------------------------------- */
-    Gauge g_demoGauge;
-    if (!Gauge_init(&g_demoGauge, &g_demoDefinition, TILE_USER_INDEX))
+    Gauge *g_demoGauge = Gauge_init(&g_demoDefinition, TILE_USER_INDEX);
+    if (!g_demoGauge)
     {
         KLog("Gauge_init failed");
         return 1;
@@ -90,12 +90,12 @@ int main(bool hardReset)
         /* -----------------------------------------------------------------------------
          3. Events happens : increase or decrease of the gauge
         ----------------------------------------------------------------------------- */
-        handleInput(&g_demoGauge);
+        handleInput(g_demoGauge);
 
         /* -----------------------------------------------------------------------------
          4. Update it each frame  - it handles the no-op so you don't have to
          ----------------------------------------------------------------------------- */
-        Gauge_update(&g_demoGauge);
+        Gauge_update(g_demoGauge);
 
         SYS_doVBlankProcess();
     }
@@ -103,7 +103,7 @@ int main(bool hardReset)
     /* --------------------------------------------------------------------------------
     5. Dont forget to release when not needed anymore (i.e. between levels and menus...)
     --------------------------------------------------------------------------------- */
-    Gauge_release(&g_demoGauge);
+    Gauge_release(g_demoGauge);
 
     return 0;
 #endif

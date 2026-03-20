@@ -64,7 +64,7 @@ typedef struct
     u16 vramBaseByGauge[DEMO_MAX_GAUGES_PER_CASE];
 } DemoCaseRuntime;
 
-extern Gauge g_runtimeGaugePool[DEMO_MAX_ACTIVE_GAUGES];
+extern Gauge *g_runtimeGaugePool[DEMO_MAX_ACTIVE_GAUGES];
 extern DemoCaseRuntime g_activeCases[DEMO_MAX_CASES_PER_SCREEN];
 extern u8 g_activeCaseCount;
 extern u8 g_activeGaugeCount;
@@ -78,9 +78,8 @@ extern Sprite *g_cursorSprite;
 
 extern const DemoScreenSource g_screens[DEMO_SCREEN_COUNT];
 
-u8 buildGaugeFromDefinition(Gauge *gauge,
-                            const GaugeDefinition *definition,
-                            u16 *nextVram);
+Gauge *buildGaugeFromDefinition(const GaugeDefinition *definition,
+                                u16 *nextVram);
 void releaseActiveScreen(void);
 u8 tryBuildCase(const DemoCaseSource *sourceCase,
                 DemoCaseRuntime *runtimeCase,

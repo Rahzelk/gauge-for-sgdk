@@ -204,12 +204,12 @@ static const GaugeSkin g_skinVerticalYellowGainBlinkOff = {
     }
 };
 
-static const GaugeSkin g_skinPipBasic = {
+static const GaugeSkin g_skinPipDoubleHalf = {
     .pip = {
-        .tileset = &gauge_h_pip_basic_strip,
+        .tileset = &gauge_h_pip_double_half_strip,
         .pipWidth = 2,
         .pipHeight = 1,
-        .coverage = GAUGE_PIP_COVERAGE_FULL
+        .coverage = GAUGE_PIP_COVERAGE_HALF
     }
 };
 
@@ -950,7 +950,7 @@ static const DemoCaseSource g_screen3Cases[] = {
 /* -----------------------------------------------------------------------------
    Screen 4: PIP
    ----------------------------------------------------------------------------- */
-static const GaugeDefinition g_screen4PipBasicDefinition = {
+static const GaugeDefinition g_screen4PipHalfDefinition = {
     .mode = GAUGE_MODE_PIP,
     .plane = WINDOW,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
@@ -963,7 +963,7 @@ static const GaugeDefinition g_screen4PipBasicDefinition = {
     .lanes = {
         {
             .segments = {
-                { .cells = 6, .skin = &g_skinPipBasic }
+                { .cells = 6, .skin = &g_skinPipDoubleHalf }
             }
         }
     },
@@ -1110,21 +1110,21 @@ static const DemoCaseSource g_screen4Cases[] = {
         }
     },
     {
-        .descriptionLine1 = "Basic horizontal PIP value states.",
-        .descriptionLine2 = "Compare gain and damage trail pips.",
-        .descriptionLine3 = "Check fill mode set to PIP.",
+        .descriptionLine1 = "HALF mirrors one source tile.",
+        .descriptionLine2 = "Each pip draws twice with HFLIP.",
+        .descriptionLine3 = "VRAM drops from 12 tiles to 6.",
         .cursorTileX = 2,
         .cursorTileY = 15,
         .stepAmount = DEMO_PIP_STEP,
         .gaugeCount = 1,
         .gauges = {
-            { .definition = &g_screen4PipBasicDefinition }
+            { .definition = &g_screen4PipHalfDefinition }
         }
     },
     {
-        .descriptionLine1 = "Each pip uses a 2x2 tile block.",
-        .descriptionLine2 = "Good for multi-tile PIP composition.",
-        .descriptionLine3 = "Check pip width and pip height.",
+        .descriptionLine1 = "QUARTER mirrors one source tile.",
+        .descriptionLine2 = "Each pip draws four mirrored tiles.",
+        .descriptionLine3 = "VRAM drops from 24 tiles to 6.",
         .cursorTileX = 2,
         .cursorTileY = 18,
         .stepAmount = DEMO_PIP_STEP,

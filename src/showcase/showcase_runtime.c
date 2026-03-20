@@ -1,7 +1,7 @@
 #include <genesis.h>
 #include "showcase_internal.h"
 
-Gauge g_runtimeGaugePool[DEMO_MAX_ACTIVE_GAUGES];
+Gauge *g_runtimeGaugePool[DEMO_MAX_ACTIVE_GAUGES];
 DemoCaseRuntime g_activeCases[DEMO_MAX_CASES_PER_SCREEN];
 u8 g_activeCaseCount = 0;
 u8 g_activeGaugeCount = 0;
@@ -14,17 +14,18 @@ u8 g_holdB = 0;
 u16 g_frameCount = 0;
 Sprite *g_cursorSprite = NULL;
 
-u8 buildGaugeFromDefinition(Gauge *gauge,
-                            const GaugeDefinition *definition,
-                            u16 *nextVram)
+Gauge *buildGaugeFromDefinition(const GaugeDefinition *definition,
+                                u16 *nextVram)
 {
+    Gauge *gauge = NULL;
     const u16 vramBase = *nextVram;
 
-    if (!Gauge_init(gauge, definition, vramBase))
-        return 0;
+    gauge = Gauge_init(definition, vramBase);
+    if (!gauge)
+        return NULL;
 
     *nextVram = Gauge_getNextVramIndex(gauge);
-    return 1;
+    return gauge;
 }
 
 void releaseActiveScreen(void)
@@ -32,8 +33,12 @@ void releaseActiveScreen(void)
     u8 gaugeIndex;
 
     for (gaugeIndex = 0; gaugeIndex < g_activeGaugeCount; gaugeIndex++)
-        Gauge_release(&g_runtimeGaugePool[gaugeIndex]);
+    {
+        Gauge_release(g_runtimeGaugePool[gaugeIndex]);
+        g_runtimeGaugePool[gaugeIndex] = NULL;
+    }
 
+    memset(g_runtimeGaugePool, 0, sizeof(g_runtimeGaugePool));
     memset(g_activeCases, 0, sizeof(g_activeCases));
     g_activeCaseCount = 0;
     g_activeGaugeCount = 0;
@@ -64,11 +69,12 @@ u8 tryBuildCase(const DemoCaseSource *sourceCase,
         if (*gaugeCursor >= DEMO_MAX_ACTIVE_GAUGES)
             break;
 
-        gauge = &g_runtimeGaugePool[*gaugeCursor];
         runtimeCase->vramBaseByGauge[localGaugeCount] = *nextVram;
-        if (!buildGaugeFromDefinition(gauge, sourceGauge->definition, nextVram))
+        gauge = buildGaugeFromDefinition(sourceGauge->definition, nextVram);
+        if (!gauge)
             break;
 
+        g_runtimeGaugePool[*gaugeCursor] = gauge;
         runtimeCase->gauges[localGaugeCount] = gauge;
         localGaugeCount++;
         (*gaugeCursor)++;
@@ -79,7 +85,8 @@ u8 tryBuildCase(const DemoCaseSource *sourceCase,
         while (*gaugeCursor > startGaugeIndex)
         {
             (*gaugeCursor)--;
-            Gauge_release(&g_runtimeGaugePool[*gaugeCursor]);
+            Gauge_release(g_runtimeGaugePool[*gaugeCursor]);
+            g_runtimeGaugePool[*gaugeCursor] = NULL;
         }
         memset(runtimeCase, 0, sizeof(*runtimeCase));
         return 0;
@@ -196,5 +203,9 @@ void updateActiveGauges(void)
     u8 gaugeIndex;
 
     for (gaugeIndex = 0; gaugeIndex < g_activeGaugeCount; gaugeIndex++)
-        Gauge_update(&g_runtimeGaugePool[gaugeIndex]);
+    {
+        Gauge *gauge = g_runtimeGaugePool[gaugeIndex];
+        if (gauge)
+            Gauge_update(gauge);
+    }
 }

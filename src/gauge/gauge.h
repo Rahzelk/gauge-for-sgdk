@@ -63,8 +63,7 @@
    - gain      : visuals used while the value is increasing
    - blink-off : alternate visuals used during OFF blink frames
 
-   The public section below is the preferred integration surface. Everything
-   after it stays visible only for direct Gauge allocation and compatibility.
+   The public section below is the complete preferred integration surface.
    ============================================================================= */
 
 /* -----------------------------------------------------------------------------
@@ -258,7 +257,7 @@ typedef struct
  * Typical flow:
  * 1. author segment skins
  * 2. describe lanes and their segments
- * 3. call Gauge_init() on a fresh Gauge object
+ * 3. call Gauge_init() to allocate and build a gauge
  * 4. drive the runtime with Gauge_update()/Gauge_setValue()/Gauge_decrease()/Gauge_increase()
  */
 typedef struct
@@ -283,13 +282,10 @@ typedef struct
 /* -----------------------------------------------------------------------------
    Public Functions
    ----------------------------------------------------------------------------- */
-/* Initialize and build a gauge from a declarative definition and a base VRAM tile index.
- * If the object already looks like a live built gauge, Gauge_init() first calls
- * Gauge_release() and then rebuilds it from scratch. Otherwise it assumes the
- * object is fresh or already released and starts from a zeroed state. */
-u8 Gauge_init(Gauge *gauge,
-              const GaugeDefinition *definition,
-              u16 vramBase);
+/* Allocate and build a gauge from a declarative definition and a base VRAM tile index.
+ * Returns NULL on allocation or build failure. */
+Gauge *Gauge_init(const GaugeDefinition *definition,
+                  u16 vramBase);
 
 /* Tick animations/state and render the gauge. Call once per frame. */
 void Gauge_update(Gauge *gauge);
@@ -311,114 +307,9 @@ void Gauge_setDebugMode(Gauge *gauge, u8 enabled);
 u8 Gauge_getDebugMode(const Gauge *gauge);
 /* Read the next free VRAM tile index after this gauge allocation. */
 u16 Gauge_getNextVramIndex(const Gauge *gauge);
-/* Release all runtime allocations and reset the Gauge object to its init state. */
+/* Destroy a gauge and free all runtime allocations. Accepts NULL. */
 void Gauge_release(Gauge *gauge);
 /* Read the current logical value. */
 u16 Gauge_getValue(const Gauge *gauge);
-
-/* =============================================================================
-   Runtime Compatibility Layout
-   =============================================================================
-
-   This block stays in the header because callers still allocate Gauge objects
-   directly (`static Gauge myGauge;`) and some existing code still reads a few
-   runtime fields.
-
-   Preferred integration remains: GaugeDefinition plus the public functions.
-
-   Compatibility fields intentionally preserved:
-   - gauge->logic.maxValue
-   - gauge->debugMode
-   - gauge->vramNextOffset
-   ============================================================================= */
-
-typedef struct GaugeLogic GaugeLogic;
-typedef struct GaugeLaneLayout GaugeLaneLayout;
-typedef struct GaugeLaneInstance GaugeLaneInstance;
-
-/*
- * Embedded runtime logic state.
- *
- * Compatibility note:
- * - maxValue remains directly readable
- * - the remaining fields are runtime internals and should not be manipulated
- *   by game code
- */
-struct GaugeLogic
-{
-    u16 maxValue;
-    u16 currentValue;
-    u16 maxFillPixels;
-    const u16 *valueToPixelsLUT;
-    u16 *valueToPixelsData;
-    u16 *pixelsToQuantizedPixelsLUT;
-
-    u16 valueTargetPixels;
-    u16 valuePixels;
-    u16 trailPixels;
-    u16 blinkTimer;
-    u16 criticalValue;
-
-    u16 lastValuePixels;
-    u16 lastTrailPixelsRendered;
-
-    u8 holdFramesRemaining;
-    u8 blinkFramesRemaining;
-    u8 defaultDamageHoldFrames;
-    u8 defaultDamageBlinkFrames;
-    u8 defaultGainHoldFrames;
-    u8 defaultGainBlinkFrames;
-    u8 valueAnimEnabled;
-    u8 valueAnimShift;
-    u8 trailAnimShift;
-    u8 blinkShift;
-    u8 gainAnimShift;
-    u8 gainBlinkShift;
-    u8 trailEnabled;
-    u8 configuredTrailMode;
-    u8 configuredGainMode;
-    u8 activeTrailState;
-    u8 modeUsesCriticalThreshold;
-    u8 modeUsesValueBlink;
-    u8 modeKeepsStaticTrail;
-    u8 lastBlinkOn;
-    u8 lastActiveTrailState;
-    u8 needUpdate;
-};
-
-/*
- * High-level runtime container.
- *
- * Compatibility note:
- * - debugMode and vramNextOffset remain directly accessible
- * - the remaining fields are module internals
- */
-struct Gauge
-{
-    GaugeLogic logic;
-
-    GaugeLaneInstance **lanes;
-    void (*tickAndRenderHandler)(Gauge *gauge);
-    void (*logicTickHandler)(GaugeLogic *logic);
-    u8 laneCount;
-    u8 baseLaneIndex;
-    u8 baseLaneHasBridge;
-    u8 debugMode;
-    u16 baseLaneSpanPixels;
-
-    u8 baseLaneDecisionTypeByFillIndex[GAUGE_MAX_LENGTH];
-    u8 baseLaneDecisionIdxByFillIndex[GAUGE_MAX_LENGTH];
-    u8 baseLaneDecisionCapStartBreakByFillIndex[GAUGE_MAX_LENGTH];
-    u8 baseLaneDecisionCapStartTrailByFillIndex[GAUGE_MAX_LENGTH];
-    u8 baseLaneDecisionUseBlinkVariantByFillIndex[GAUGE_MAX_LENGTH];
-    u8 baseLanePipStateByFillIndex[GAUGE_MAX_LENGTH];
-
-    GaugeLaneLayout *ownedLayouts[GAUGE_MAX_LANES];
-    u8 ownedLayoutCount;
-
-    u16 vramNextOffset;
-    GaugeValueMode valueMode;
-    void *runtimeArena;
-};
 
 #endif /* GAUGE_H */

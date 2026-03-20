@@ -54,7 +54,7 @@ static void drawSelectedGaugeVramLine(void)
 {
     DemoCaseRuntime *selectedCase = getSelectedCase();
 
-    clearHudLine(23);
+    clearHudLine(26);
     if (!selectedCase || selectedCase->gaugeCount == 0 || !selectedCase->gauges[0])
         return;
 
@@ -96,7 +96,7 @@ void drawHudStatic(void)
     clearHudLine(8);
     clearHudLine(9);
     clearHudLine(10);
-    clearHudLine(23);
+    clearHudLine(26);
 
     VDP_drawText("A: increase   B: decrease", 1, 0);
     VDP_drawText("U/L prev  D/R next  C: change screen", 1, 1);
