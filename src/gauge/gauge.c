@@ -494,10 +494,17 @@ static u8 build_lane_plan(const GaugeDefinition *definition,
 static u8 build_layout_from_lane_plan(const GaugeDefinition *definition,
                                       const GaugeBuildLanePlan *lanePlan,
                                       GaugeLaneLayout **outLayout);
-static u8 init_layout_from_lane_plan(const GaugeDefinition *definition,
-                                     const GaugeBuildLanePlan *lanePlan,
-                                     GaugeLaneLayout *layout,
-                                     const u32 * const *bodyTilesets);
+static u8 layout_prepare_from_lane_plan(const GaugeDefinition *definition,
+                                       const GaugeBuildLanePlan *lanePlan,
+                                       GaugeLaneLayout *layout,
+                                       const u32 * const *bodyTilesets);
+static void layout_finalize_after_population(GaugeLaneLayout *layout);
+static inline void gauge_begin_damage_transition(GaugeLogic *logic,
+                                                 u8 holdFrames,
+                                                 u8 blinkFrames);
+static inline void gauge_begin_gain_transition(GaugeLogic *logic,
+                                               u8 holdFrames,
+                                               u8 blinkFrames);
 static void release_built_layouts(GaugeLaneLayout **builtLayouts);
 static inline u8 gauge_layout_has_bridge(const GaugeLaneLayout *layout);
 static u16 compute_pip_total_pixels(const GaugeLaneLayout *layout);
@@ -965,20 +972,7 @@ void Gauge_decreaseEx(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
         return;
     }
 
-    const u16 previousDisplayedValuePixels = logic->valuePixels;
-    if (logic->activeTrailState == GAUGE_TRAIL_STATE_GAIN)
-    {
-        logic->trailPixels = previousDisplayedValuePixels;
-    }
-    else if (logic->trailPixels < previousDisplayedValuePixels)
-    {
-        logic->trailPixels = previousDisplayedValuePixels;
-    }
-
-    logic->holdFramesRemaining = holdFrames;
-    logic->blinkFramesRemaining = blinkFrames;
-    logic->blinkTimer = 0;
-    logic->activeTrailState = GAUGE_TRAIL_STATE_DAMAGE;
+    gauge_begin_damage_transition(logic, holdFrames, blinkFrames);
 }
 
 void Gauge_decrease(Gauge *gauge, u16 amount)
@@ -1009,11 +1003,7 @@ void Gauge_increaseEx(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
     if ((GaugeGainMode)logic->configuredGainMode == GAUGE_GAIN_MODE_FOLLOW &&
         logic->valueAnimEnabled)
     {
-        logic->trailPixels = logic->valueTargetPixels;
-        logic->holdFramesRemaining = holdFrames;
-        logic->blinkFramesRemaining = blinkFrames;
-        logic->blinkTimer = 0;
-        logic->activeTrailState = GAUGE_TRAIL_STATE_GAIN;
+        gauge_begin_gain_transition(logic, holdFrames, blinkFrames);
         return;
     }
 
@@ -7119,10 +7109,10 @@ static inline void assign_pip_style_to_layout(GaugeLaneLayout *layout,
         layout->pipSourceHeightBySegment[segmentIndex] = resolved->sourceHeight;
 }
 
-static u8 init_layout_from_lane_plan(const GaugeDefinition *definition,
-                                     const GaugeBuildLanePlan *lanePlan,
-                                     GaugeLaneLayout *layout,
-                                     const u32 * const *bodyTilesets)
+static u8 layout_prepare_from_lane_plan(const GaugeDefinition *definition,
+                                       const GaugeBuildLanePlan *lanePlan,
+                                       GaugeLaneLayout *layout,
+                                       const u32 * const *bodyTilesets)
 {
     GaugeLaneLayout_initEx(layout,
                            lanePlan->length,
@@ -7140,6 +7130,42 @@ static u8 init_layout_from_lane_plan(const GaugeDefinition *definition,
                            definition->horizontalFlip);
 
     return (layout->length != 0 && layout->segmentCount != 0) ? 1 : 0;
+}
+
+static void layout_finalize_after_population(GaugeLaneLayout *layout)
+{
+    finalize_layout_derived_state(layout);
+}
+
+static inline void gauge_begin_damage_transition(GaugeLogic *logic,
+                                                 u8 holdFrames,
+                                                 u8 blinkFrames)
+{
+    const u16 previousDisplayedValuePixels = logic->valuePixels;
+    if (logic->activeTrailState == GAUGE_TRAIL_STATE_GAIN)
+    {
+        logic->trailPixels = previousDisplayedValuePixels;
+    }
+    else if (logic->trailPixels < previousDisplayedValuePixels)
+    {
+        logic->trailPixels = previousDisplayedValuePixels;
+    }
+
+    logic->holdFramesRemaining = holdFrames;
+    logic->blinkFramesRemaining = blinkFrames;
+    logic->blinkTimer = 0;
+    logic->activeTrailState = GAUGE_TRAIL_STATE_DAMAGE;
+}
+
+static inline void gauge_begin_gain_transition(GaugeLogic *logic,
+                                               u8 holdFrames,
+                                               u8 blinkFrames)
+{
+    logic->trailPixels = logic->valueTargetPixels;
+    logic->holdFramesRemaining = holdFrames;
+    logic->blinkFramesRemaining = blinkFrames;
+    logic->blinkTimer = 0;
+    logic->activeTrailState = GAUGE_TRAIL_STATE_GAIN;
 }
 
 static u8 build_fill_layout_direct(const GaugeDefinition *definition,
@@ -7172,7 +7198,7 @@ static u8 build_fill_layout_direct(const GaugeDefinition *definition,
         }
     }
 
-    if (!init_layout_from_lane_plan(definition, lanePlan, layout, baseBodyTilesets))
+    if (!layout_prepare_from_lane_plan(definition, lanePlan, layout, baseBodyTilesets))
         return 0;
 
     sync_base_allocations(layout, &groupUsage[0], capEndFlags);
@@ -7205,7 +7231,7 @@ static u8 build_fill_layout_direct(const GaugeDefinition *definition,
             layout->capEndBySegment[segmentIndex] = definition->fixedEndCap ? 1 : 0;
     }
 
-    finalize_layout_derived_state(layout);
+    layout_finalize_after_population(layout);
     return 1;
 }
 
@@ -7225,7 +7251,7 @@ static u8 build_pip_layout_direct(const GaugeDefinition *definition,
 
     memset(resolvedStyles, 0, sizeof(resolvedStyles));
 
-    if (!init_layout_from_lane_plan(definition, lanePlan, layout, NULL))
+    if (!layout_prepare_from_lane_plan(definition, lanePlan, layout, NULL))
         return 0;
 
     for (u8 segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++)
@@ -7301,7 +7327,7 @@ static u8 build_pip_layout_direct(const GaugeDefinition *definition,
     for (u8 segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++)
         assign_pip_style_to_layout(layout, segmentIndex, &resolvedStyles[segmentIndex]);
 
-    finalize_layout_derived_state(layout);
+    layout_finalize_after_population(layout);
     return 1;
 }
 
