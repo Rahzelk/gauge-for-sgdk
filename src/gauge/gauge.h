@@ -4,70 +4,40 @@
 #include <genesis.h>
 
 /* =============================================================================
-   Public Concepts
-   =============================================================================
+   GH-00 Public Module Overview
 
-   A Gauge is one runtime HUD meter built from a declarative GaugeDefinition.
+   Purpose:
+   - Describe one HUD gauge declaratively through GaugeDefinition.
+   - Build an opaque runtime handle through Gauge_init().
+   - Drive the handle once per frame through Gauge_update() and the value
+     mutation helpers.
+
+   Search tags:
+   - GH-10 : integration configuration
+   - GH-20 : public constants and enums
+   - GH-30 : public build-time data structures
+   - GH-40 : public runtime API
 
    Public hierarchy:
-   - Gauge   : runtime object updated once per frame
-   - Lane    : one visual row/column of that gauge
-   - Segment : contiguous stretch of a lane sharing one skin
-   - Cell    : one 8x8 tile inside a segment
+   - Gauge   : opaque runtime handle
+   - Lane    : one visual row or column of the gauge
+   - Segment : contiguous authored portion of a lane with one skin
+   - Cell    : one rendered 8x8 tile in fill order
+
+   Rendering model:
+   - Fill mode renders continuous bars through per-cell strip updates.
+   - PIP mode renders discrete steps through compact authored states.
+   - The module owns the VRAM layout internally; callers only provide the first
+     VRAM tile index reserved for the gauge.
 
    Fixed-only note:
-   - Older revisions also had a dynamic VRAM path built around a smaller shared
-     tile pool and more frequent tilemap updates.
-   - In practice its tradeoff was too dependent on the exact lane/segment
-     layout to justify keeping two rendering pipelines.
-   - The figures below are static estimates taken from the representative demo
-     gauges in this repository. They are useful for comparison, but they are
-     not emulator-instrumented timings.
-   - Representative comparisons:
-       Screen 1 / simple fill   : FIXED 12 tiles, ~700-1000 cycles/frame
-                                  DYNAMIC 5 tiles, ~850-1250 cycles/frame
-       Screen 2 / bridges       : FIXED 12 tiles, ~1000-1400 cycles/frame
-                                  DYNAMIC 15 tiles, ~1300-1900 cycles/frame
-       Screen 3 / vertical gain : FIXED 12 tiles, ~750-1050 cycles/frame
-                                  DYNAMIC 5 tiles, ~950-1350 cycles/frame
-       Screen 4 / PIP basic     : FIXED 12 tiles, ~700-1000 cycles/frame
-                                  DYNAMIC 10 tiles, ~750-1050 cycles/frame
-   - Representative tilemap pressure:
-       Screen 1 / Blink off     : FIXED runtime tilemap writes = 0
-                                  DYNAMIC normal frame         = 0-2 cells
-                                  DYNAMIC blink switch         = 0
-                                  DYNAMIC trail switch         = 1-12 cells
-   - In short, dynamic could reduce VRAM on some simple gauges, but it was not
-     a general CPU win, it could lose VRAM on bridge-heavy layouts, and it
-     added more VDP/tilemap complexity and more opportunities for glitches.
-   - The module therefore keeps a single implicit VRAM strategy matching the
-     old fixed tile-per-cell behavior.
-
-   Fill authoring contract:
-   - BODY, END and BRIDGE strips use 45 tiles each.
-   - TRAIL strips use 64 tiles.
-   - GaugeFillSkin exposes three public visual families:
-     normal   : default rendering
-     gain     : used while the gain trail is active
-     blinkOff : alternate graphics used on blink-off frames
-
-   PIP authoring contract:
-   - GaugePipSkin::tileset stores the compact states for one segment style.
-   - Minimum state order is: EMPTY, VALUE.
-   - Optional extra states extend that order with: LOSS, GAIN, BLINK_OFF.
-   - coverage describes whether the authored source art covers a full, half, or
-     quarter pip surface before runtime expansion.
-
-   Runtime visual states:
-   - normal    : base rendering family
-   - gain      : visuals used while the value is increasing
-   - blink-off : alternate visuals used during OFF blink frames
-
-   The public section below is the complete preferred integration surface.
+   - Older revisions also had a dynamic VRAM path. The current module keeps a
+     single fixed VRAM strategy because it was simpler, more predictable, and
+     not slower in the representative gauges kept in this repository.
    ============================================================================= */
 
 /* -----------------------------------------------------------------------------
-   Advanced Integration Configuration
+   GH-10 Integration Configuration
    ----------------------------------------------------------------------------- */
 #ifndef GAUGE_ENABLE_TRACE
 /* Set to 1 to compile frame/cell trace support into the module. */
@@ -80,7 +50,7 @@
 #endif
 
 /* -----------------------------------------------------------------------------
-   Public Limits And Authoring Constants
+   GH-20 Public Limits And Authoring Constants
    ----------------------------------------------------------------------------- */
 #define GAUGE_MAX_SEGMENTS      12
 #define GAUGE_MAX_LENGTH        16
@@ -95,7 +65,7 @@
 #define GAUGE_FILL_PX_MAX        8
 
 /* -----------------------------------------------------------------------------
-   Public Enumerations
+   GH-21 Public Enumerations
    ----------------------------------------------------------------------------- */
 typedef enum
 {
@@ -158,8 +128,9 @@ typedef enum
 } GaugeGainMode;
 
 /* -----------------------------------------------------------------------------
-   Public Types
+   GH-30 Public Build-Time Data Structures
    ----------------------------------------------------------------------------- */
+/* Opaque runtime handle returned by Gauge_init() and destroyed by Gauge_release(). */
 typedef struct Gauge Gauge;
 
 /* BODY / END / BRIDGE strips use 45 tiles. TRAIL strips use 64 tiles. */
@@ -199,12 +170,16 @@ typedef struct
     GaugePipCoverage coverage;     /* FULL / HALF / QUARTER authored coverage */
 } GaugePipSkin;
 
+/* One authored skin family exposing both rendering modes.
+ * Only the branch matching GaugeDefinition::mode is consumed at build time. */
 typedef struct
 {
     GaugeFillSkin fill;  /* Continuous bar rendering assets */
     GaugePipSkin pip;    /* Discrete pip rendering assets */
 } GaugeSkin;
 
+/* One authored segment inside a lane.
+ * The build pipeline expands its cells into rendered fill-order cells. */
 typedef struct
 {
     u8 cells;               /* Number of cells contributed by this segment */
@@ -280,36 +255,117 @@ typedef struct
 } GaugeDefinition;
 
 /* -----------------------------------------------------------------------------
-   Public Functions
+   GH-40 Public Runtime API
    ----------------------------------------------------------------------------- */
-/* Allocate and build a gauge from a declarative definition and a base VRAM tile index.
- * Returns NULL on allocation or build failure. */
+/**
+ * Allocate, validate, and build one runtime gauge.
+ *
+ * @param definition Public authored build description.
+ * @param vramBase   First VRAM tile reserved for this gauge.
+ * @return Heap-allocated opaque Gauge handle, or NULL on validation/allocation failure.
+ */
 Gauge *Gauge_init(const GaugeDefinition *definition,
                   u16 vramBase);
 
-/* Tick animations/state and render the gauge. Call once per frame. */
+/**
+ * Tick the gauge logic and render every lane once.
+ * Call this once per frame for every live gauge.
+ *
+ * @param gauge Gauge to update. NULL is ignored.
+ */
 void Gauge_update(Gauge *gauge);
-/* Change the logical maximum while keeping the built topology intact. */
+
+/**
+ * Change the logical maximum while keeping the built topology intact.
+ *
+ * @param gauge       Gauge to update. NULL is ignored.
+ * @param newMaxValue New logical maximum, clamped to the module LUT capacity.
+ */
 void Gauge_setMaxValue(Gauge *gauge, u16 newMaxValue);
-/* Set the logical value immediately. */
+
+/**
+ * Set the current logical value immediately.
+ * This bypasses damage/gain transitions and resets trail state.
+ *
+ * @param gauge    Gauge to update. NULL is ignored.
+ * @param newValue New logical value, clamped to the current max value.
+ */
 void Gauge_setValue(Gauge *gauge, u16 newValue);
-/* Decrease the value using the default hold/blink timing from GaugeBehavior. */
+
+/**
+ * Decrease the current value using the default damage timing from GaugeBehavior.
+ *
+ * @param gauge  Gauge to update. NULL is ignored.
+ * @param amount Logical amount to subtract.
+ */
 void Gauge_decrease(Gauge *gauge, u16 amount);
-/* Decrease the value with explicit one-shot hold/blink timing. */
+
+/**
+ * Decrease the current value with explicit one-shot damage timing.
+ *
+ * @param gauge       Gauge to update. NULL is ignored.
+ * @param amount      Logical amount to subtract.
+ * @param holdFrames  Number of frames the damage trail should hold before blinking.
+ * @param blinkFrames Number of blink-gated frames before the trail shrinks.
+ */
 void Gauge_decreaseEx(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
-/* Increase the value using the default hold/blink timing from GaugeBehavior. */
+
+/**
+ * Increase the current value using the default gain timing from GaugeBehavior.
+ *
+ * @param gauge  Gauge to update. NULL is ignored.
+ * @param amount Logical amount to add.
+ */
 void Gauge_increase(Gauge *gauge, u16 amount);
-/* Increase the value with explicit one-shot hold/blink timing. */
+
+/**
+ * Increase the current value with explicit one-shot gain timing.
+ *
+ * @param gauge       Gauge to update. NULL is ignored.
+ * @param amount      Logical amount to add.
+ * @param holdFrames  Number of frames the gain trail should hold before blinking.
+ * @param blinkFrames Number of blink-gated frames before the value catches up.
+ */
 void Gauge_increaseEx(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames);
-/* Enable or disable module debug visualization for this gauge. */
+
+/**
+ * Enable or disable the module debug visualization for one gauge.
+ * This is mainly useful for the local demo and debugging tools.
+ *
+ * @param gauge   Gauge to update. NULL is ignored.
+ * @param enabled Non-zero enables debug visualization, zero disables it.
+ */
 void Gauge_setDebugMode(Gauge *gauge, u8 enabled);
-/* Read whether module debug visualization is enabled. */
+
+/**
+ * Query whether debug visualization is enabled for one gauge.
+ *
+ * @param gauge Gauge to inspect.
+ * @return 1 when debug visualization is enabled, else 0.
+ */
 u8 Gauge_getDebugMode(const Gauge *gauge);
-/* Read the next free VRAM tile index after this gauge allocation. */
+
+/**
+ * Read the next free VRAM tile index after the current gauge allocation.
+ *
+ * @param gauge Gauge to inspect.
+ * @return First VRAM tile index not consumed by this gauge, or 0 if unavailable.
+ */
 u16 Gauge_getNextVramIndex(const Gauge *gauge);
-/* Destroy a gauge and free all runtime allocations. Accepts NULL. */
+
+/**
+ * Destroy a gauge and free all runtime allocations it owns.
+ *
+ * @param gauge Gauge to destroy. NULL is accepted.
+ */
 void Gauge_release(Gauge *gauge);
-/* Read the current logical value. */
+
+/**
+ * Read the current logical value.
+ *
+ * @param gauge Gauge to inspect.
+ * @return Current logical value, or 0 if gauge is NULL.
+ */
 u16 Gauge_getValue(const Gauge *gauge);
 
 #endif /* GAUGE_H */

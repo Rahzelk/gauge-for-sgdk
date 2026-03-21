@@ -1,79 +1,66 @@
+/* =============================================================================
+   GC-00 gauge.c Organization Summary
+
+   Purpose:
+   - Private implementation of the Gauge module declared in gauge.h.
+   - Owns the full lifecycle: definition sanitation, lane/layout build,
+     runtime logic, and the two render paths (fill and PIP).
+
+   Search tags:
+   - GC-API-10 : public API implementation
+   - GC-BLD-10 : build pipeline and runtime construction
+   - GC-LYT-10 : layout objects, optional views, and derived LUTs
+   - GC-LOG-10 : logic state, animation, blink, and LUT maintenance
+   - GC-RF-10  : fill renderer
+   - GC-RP-10  : PIP renderer
+
+   Reading order:
+   1. Start in gauge.h for public concepts and authoring structures.
+   2. Read GC-API-10 to understand the public lifecycle.
+   3. Read GC-BLD-10 to see how a declarative definition becomes runtime data.
+   4. Read GC-LYT-10 to understand what one built layout stores.
+   5. Read GC-LOG-10, GC-RF-10, and GC-RP-10 for per-frame behavior.
+
+   Glossary:
+   - lane       : one visual row or column of the gauge
+   - segment    : contiguous authored portion of a lane sharing one skin
+   - cell       : one rendered 8x8 tile in fill order
+   - strip      : ROM tile strip containing many visual states for one family
+   - pip        : one discrete logical step in PIP mode
+   - break zone : local area where value or trail partially covers a cell
+
+   Notes:
+   - Public API functions are implemented here but documented primarily in
+     gauge.h. Internal helpers are documented locally.
+   - The goal of this file layout is to let a junior developer follow the data
+     flow without reverse-engineering ownership, caches, or rendering rules.
+   ============================================================================= */
 #include "gauge.h"
 
 /* =============================================================================
-   gauge.c - HUD gauge implementation for SGDK (fill + pip, fixed-only)
-   =============================================================================
- 
-   TILE STRIP SYSTEM:
-   ------------------
-   Each segment has pre-rendered "strips" of tiles stored in ROM.
-   A 45-tile strip covers all fill combinations for one tile:
-     - 9 levels of value (0..8 px) x 9 levels of trail (0..8 px)
-     - Only valid combos where trail >= value (triangular matrix = 45 tiles)
-   A 64-tile strip is used for trail-specific edge rendering.
-
-   The LUT s_tileIndexByValueTrail[valuePx][trailPx] maps a (value, trail)
-   pixel pair to the correct tile index within a strip (O(1) lookup).
-
-   BREAK ZONE:
-   -----------
-   Most cells are trivially FULL (value=8, trail=8) or EMPTY (0,0).
-   The "break zone" is the small region where value/trail partially fill a tile.
-   Only break zone cells need per-pixel tile computation.
-
-   Cell types in the break zone (fill direction: left to right):
-
-     |FULL|FULL|VALUE_BREAK|TRAIL_FULL|TRAIL_BREAK|END|EMPTY|EMPTY|
-      <--- value --->|<--------- trail -------->|
-                     ^                          ^
-                value edge                 trail edge
-
-   VALUE_BREAK  : Cell where the value edge falls (0 < valuePx < 8)
-   TRAIL_FULL   : Cells fully covered by trail but no value (valuePx=0, trailPx=8)
-   TRAIL_BREAK  : Cell where the trail edge falls (0 < trailPx < 8)
-   TRAIL_BREAK2 : Second trail break (before END, when bridge forces split)
-   END          : Cell at the value/trail frontier (uses end tileset)
-
-   BLINK-OFF:
-   ----------
-   During trail blink OFF frames, the break zone is recomputed using the
-   "actual" trail (breakInfoActual) instead of the rendered trail (breakInfo).
-   Trail-zone tiles get replaced with blink-off tilesets for the visual effect.
-
-   PERFORMANCE:
-   ------------
-   - logicTickHandler: ~50-100 cycles (mostly conditionals)
-   - process_fill_mode: ~200 cycles/cell (DMA dominant), lazy strip eval
-   - Change detection avoids redundant DMA writes
-
-   ----------------------------------------------------------------------------- */
-
-/* =============================================================================
-   gauge.c Organization Summary
+   GC-PRV-05 Rendering Model Overview
    =============================================================================
 
-   1. Private constants, sentinels, runtime types, and shared private structs
-   2. Forward declarations
-   3. GAUGE API
-   4. GAUGE BUILD
-   5. GAUGE LAYOUT
-   6. GAUGE LOGIC
-   7. GAUGE RENDER FILL
-   8. GAUGE RENDER PIP
+   Fill mode:
+   - Each rendered cell owns one dedicated VRAM tile.
+   - ROM strips store the 8px x 8px fill and trail combinations used to update
+     those cells lazily through DMA.
 
-   Notes:
-   - Build code sanitizes definitions, validates lane topology, builds layouts,
-     allocates runtime, and wires lane/runtime ownership.
-   - Layout code owns bindings, optional pointer views, and derived bridge/PIP LUTs.
-   - Logic code updates value, trail, blink, and logical LUT state.
-   - Render code is split into fill and PIP paths, with a small shared render
-     infrastructure block for common tilemap/upload and frame-prep helpers.
+   PIP mode:
+   - Each logical pip is rendered through a compact authored tileset.
+   - HALF and QUARTER coverage can reuse one compact source tile through static
+     HFLIP / VFLIP tilemap attributes.
 
+   Break zone:
+   - Most cells are trivially full or empty.
+   - Only the local zone around the value/trail frontier needs fine-grained
+     per-pixel decisions.
    ============================================================================= */
 
-/* -----------------------------------------------------------------------------
-   Constants
-   ----------------------------------------------------------------------------- */
+/* =============================================================================
+   GC-PRV-10 Private Constants And Memory Helpers
+   ============================================================================= */
+
 #define TILE_TO_PIXEL_SHIFT  3
 
 /* Invalid/uninitialized marker for cache values */
@@ -95,6 +82,17 @@
 #define FILL_IDX_TO_OFFSET(idx)       (((u16)(idx)) << 3)              /* fillIndex * 8 = pixel offset (each cell = 8 px) */
 
 /* Simple zero-init allocator wrappers (SGDK MEM_alloc / MEM_free). */
+/**
+ * GC-PRV-11 Memory ownership helpers.
+ *
+ * The small helpers in this block wrap SGDK allocation and the module-local
+ * linear arena used during Gauge_init():
+ * - gauge_alloc_bytes() returns zeroed heap memory or NULL
+ * - gauge_free_ptr() frees a heap pointer and clears the caller slot
+ * - gauge_runtime_arena_align() computes the next aligned offset
+ * - gauge_runtime_arena_init() binds a raw memory block to an arena view
+ * - gauge_runtime_arena_alloc() performs monotonic sub-allocation inside it
+ */
 static void *gauge_alloc_bytes(u16 bytes)
 {
     if (bytes == 0)
@@ -225,7 +223,7 @@ typedef void GaugeLaneRenderHandler(GaugeLaneInstance *laneInstance,
                                     u8 trailModeChanged);
 
 /* =============================================================================
-   Internal Runtime Types
+   GC-PRV-20 Private Runtime Data Model
    =============================================================================
 
    These structures are intentionally private to gauge.c.
@@ -740,10 +738,10 @@ typedef struct
 static GaugeBuildScratch s_buildScratch;
 
 /* =============================================================================
-   Forward Declarations
+   GC-DEC-10 Forward Declarations By Subsystem
    ============================================================================= */
 
-/* --- Build --- */
+/* --- GC-DEC-20 Build helpers --- */
 static void gauge_sanitize_definition(const GaugeDefinition *definition,
                                       GaugeDefinition *outSanitized);
 static inline u8 sanitize_value_mode(u8 mode);
@@ -874,7 +872,7 @@ static u8 gauge_init_runtime(Gauge *gauge,
                              u16 vramBase);
 static void gauge_release_runtime(Gauge *gauge);
 
-/* --- Layout --- */
+/* --- GC-DEC-30 Layout helpers --- */
 static inline u8 segment_tileset_array_has_any(const u32 * const *tilesetsBySegment,
                                                u8 segmentCount);
 static u8 layout_ensure_segment_tileset_storage(const u32 ***segmentTilesetsBySegment,
@@ -967,7 +965,7 @@ static void sync_base_allocations(GaugeLaneLayout *layout,
                                   u8 hasCapEndFlags);
 static void finalize_layout_derived_state(GaugeLaneLayout *layout);
 
-/* --- Logic --- */
+/* --- GC-DEC-40 Logic helpers --- */
 static inline u16 value_to_pixels(const GaugeLogic *logic, u16 value);
 static void fill_value_to_pixels_lut(u16 *dest, u16 maxValue, u16 maxFillPixels);
 static void fill_pip_value_lut(u16 *dest, u16 maxValue, const GaugeLaneLayout *layout);
@@ -1017,7 +1015,7 @@ static inline void gauge_begin_gain_transition(GaugeLogic *logic,
                                                u8 holdFrames,
                                                u8 blinkFrames);
 
-/* --- Render Fill --- */
+/* --- GC-DEC-50 Fill render helpers --- */
 static inline u8 clamp_to_tile_size(s16 v);
 static inline void compute_fill_for_fill_index(const GaugeLaneLayout *layout,
                                                u8 fillIndex,
@@ -1218,7 +1216,7 @@ static inline void gauge_prepare_fill_frame(const GaugeLogic *logic,
                                             GaugeRenderFrame *frame);
 static void gauge_tick_and_render_fill(Gauge *gauge);
 
-/* --- Render PIP --- */
+/* --- GC-DEC-60 PIP render helpers --- */
 static inline void compute_pip_render_xy(const GaugeLaneLayout *layout,
                                          u16 originX,
                                          u16 originY,
@@ -1274,7 +1272,7 @@ static void gauge_tick_and_render_pip(Gauge *gauge);
 static GaugeTickAndRenderHandler *resolve_tick_and_render_handler(GaugeValueMode valueMode);
 
 /* =============================================================================
-   GAUGE API
+   GC-API-10 Public API Implementation
    ============================================================================= */
 
 Gauge *Gauge_init(const GaugeDefinition *definition,
@@ -1468,13 +1466,19 @@ u16 Gauge_getNextVramIndex(const Gauge *gauge)
 }
 
 /* =============================================================================
-   GAUGE BUILD
+   GC-BLD-10 Definition Sanitation, Validation, And Runtime Construction
    ============================================================================= */
 
 /* -----------------------------------------------------------------------------
-   Validation and lane planning
+   GC-BLD-20 Lane Sanitation And Validation
    ----------------------------------------------------------------------------- */
 
+/**
+ * GC-BLD-21 Scalar sanitizers.
+ *
+ * The helpers below normalize one authored scalar field each and return a safe
+ * runtime value when the authored input is outside the supported range.
+ */
 static inline u8 sanitize_value_mode(u8 mode)
 {
     return (mode == GAUGE_VALUE_MODE_PIP) ? GAUGE_VALUE_MODE_PIP : GAUGE_VALUE_MODE_FILL;
@@ -1500,6 +1504,16 @@ static inline u8 sanitize_palette_index(u8 palette)
     return (u8)(palette & 3);
 }
 
+/**
+ * Check whether a lane contains an authored hole.
+ *
+ * A hole means a valid segment appears after an empty slot. The build pipeline
+ * rejects that topology because later helpers assume segments form one compact
+ * prefix.
+ *
+ * @param lane Authored lane to inspect.
+ * @return 1 if a non-empty segment appears after an empty slot, else 0.
+ */
 static u8 lane_has_segment_holes(const GaugeLane *lane)
 {
     if (!lane)
@@ -1528,6 +1542,15 @@ static u8 lane_has_segment_holes(const GaugeLane *lane)
     return 0;
 }
 
+/**
+ * Validate the structural integrity of one authored lane.
+ *
+ * This helper checks the per-segment cell/skin pairing and rejects sparse
+ * layouts with holes. It does not look at base-lane relationships yet.
+ *
+ * @param lane Authored lane to validate.
+ * @return 1 when the lane is structurally valid, else 0.
+ */
 static u8 validate_lane_segments(const GaugeLane *lane)
 {
     if (!lane)
@@ -1561,6 +1584,18 @@ static u8 definition_lane_is_empty(const GaugeLane *lane)
     return 1;
 }
 
+/**
+ * Convert one authored segment into its rendered cell span.
+ *
+ * In fill mode, one authored cell maps to one rendered cell. In PIP mode, one
+ * authored cell expands to pipWidth rendered cells because one logical step can
+ * cover several tiles on screen.
+ *
+ * @param mode            Gauge mode being built.
+ * @param segment         Segment to inspect.
+ * @param outDisplayCells [out] Rendered cell count for this segment.
+ * @return 1 on success, 0 if the segment definition is unusable.
+ */
 static u8 compute_segment_display_cells(GaugeMode mode,
                                         const GaugeSegment *segment,
                                         u16 *outDisplayCells)
@@ -1633,6 +1668,16 @@ static s16 compute_lane_origin_axis(u16 base, s8 offset)
     return (s16)base + (s16)offset;
 }
 
+/**
+ * Select the authored base lane.
+ *
+ * The base lane is the longest non-empty validated lane. Other lanes sample its
+ * fill progression through firstValueCell and projection maps.
+ *
+ * @param definition   Sanitized build definition.
+ * @param outLaneIndex [out] Authored lane index chosen as base.
+ * @return 1 on success, 0 if no valid non-empty lane exists.
+ */
 static u8 find_baseLane_index(const GaugeDefinition *definition,
                               u8 *outLaneIndex)
 {
@@ -1666,6 +1711,19 @@ static u8 find_baseLane_index(const GaugeDefinition *definition,
     return 1;
 }
 
+/**
+ * Translate firstValueCell into a pixel-space fill offset.
+ *
+ * Shorter lanes do not necessarily start at the same logical position as the
+ * base lane. This helper expands the authored base-lane cells exactly the same
+ * way the renderer will, then converts the sampled starting cell to pixels.
+ *
+ * @param definition     Sanitized build definition.
+ * @param baseLane       Authored base lane used as logical reference.
+ * @param firstValueCell First authored base-lane cell sampled by the lane.
+ * @param outOffset      [out] Equivalent pixel offset in fill order.
+ * @return 1 on success, 0 if the sampled window is invalid.
+ */
 static u8 compute_fill_offset_pixels_for_lane(const GaugeDefinition *definition,
                                               const GaugeLane *baseLane,
                                               u8 firstValueCell,
@@ -1733,6 +1791,20 @@ static u8 resolve_lane_palette(const GaugeDefinition *definition,
     return sanitize_palette_index(definition->palette);
 }
 
+/**
+ * Resolve the compact authored geometry of one PIP skin.
+ *
+ * The authored tileset may describe a full pip, one mirrored half, or one
+ * mirrored quarter. This helper validates that contract and computes the source
+ * dimensions that later PIP LUT builders must reuse.
+ *
+ * @param skin            Authored PIP skin.
+ * @param outStateCount   [out] Number of authored visual states.
+ * @param outSourceWidth  [out] Width of the compact source art.
+ * @param outSourceHeight [out] Height of the compact source art.
+ * @param outHalfAxis     [out] Mirror axis used in HALF coverage mode.
+ * @return 1 when the tileset matches the declared geometry, else 0.
+ */
 static u8 resolve_pip_strip_geometry_from_skin(const GaugePipSkin *skin,
                                                u8 *outStateCount,
                                                u8 *outSourceWidth,
@@ -1820,6 +1892,12 @@ static u8 resolve_pip_strip_geometry_from_skin(const GaugePipSkin *skin,
     return 1;
 }
 
+/**
+ * GC-BLD-22 Temporary build cleanup helpers.
+ *
+ * These helpers release layouts built during Gauge_init() before ownership is
+ * transferred into the final Gauge object.
+ */
 static void release_built_layout(GaugeLaneLayout **layoutPtr)
 {
     if (!layoutPtr || !*layoutPtr)
@@ -1895,6 +1973,12 @@ static u8 build_segment_id_by_cell_from_lane(GaugeMode mode,
     return 1;
 }
 
+/**
+ * GC-BLD-23 Asset resolution helpers.
+ *
+ * The helpers below normalize authored asset families into the exact ROM strip
+ * pointers and usage flags expected by layout population.
+ */
 static inline const u32 *tileset_asset_to_rom(const TileSet *tileset)
 {
     return tileset ? tileset->tiles : NULL;
@@ -1997,6 +2081,12 @@ static void populate_layout_tileset_group_from_fill_assets(GaugeLaneLayout *layo
     }
 }
 
+/**
+ * GC-BLD-24 PIP style resolution helpers.
+ *
+ * This block expands authored PIP skin metadata into resolved runtime-friendly
+ * style descriptors before the layout is populated.
+ */
 static inline u8 resolve_pip_style(const GaugePipSkin *pip, ResolvedPipStyle *resolved)
 {
     if (!pip || !resolved)
@@ -2065,6 +2155,19 @@ static inline void assign_pip_style_to_layout(GaugeLaneLayout *layout,
         layout->pipSourceHeightBySegment[segmentIndex] = resolved->sourceHeight;
 }
 
+/**
+ * Prepare an empty GaugeLaneLayout from one validated lane plan.
+ *
+ * This is the common front half of the fill and PIP layout builders: it seeds
+ * the core layout fields, binds the body tilesets, and copies lane-level build
+ * data that both rendering modes need.
+ *
+ * @param definition   Sanitized build definition.
+ * @param lanePlan     Validated lane plan.
+ * @param layout       [out] Layout object to initialize.
+ * @param bodyTilesets Base body tileset view used by the lane.
+ * @return 1 on success, 0 if required storage could not be allocated.
+ */
 static u8 layout_prepare_from_lane_plan(const GaugeDefinition *definition,
                                        const GaugeBuildLanePlan *lanePlan,
                                        GaugeLaneLayout *layout,
@@ -2093,6 +2196,18 @@ static void layout_finalize_after_population(GaugeLaneLayout *layout)
     finalize_layout_derived_state(layout);
 }
 
+/**
+ * Build one fill-mode layout directly into an already allocated layout object.
+ *
+ * This function scans authored segments, resolves which tileset families are
+ * actually used, allocates only the optional views that are needed, then
+ * populates per-segment references and derived fill-only state.
+ *
+ * @param definition Sanitized build definition.
+ * @param lanePlan   Validated lane plan.
+ * @param layout     [out] Layout object to populate.
+ * @return 1 on success, 0 if validation or allocation fails.
+ */
 static u8 build_fill_layout_direct(const GaugeDefinition *definition,
                                    const GaugeBuildLanePlan *lanePlan,
                                    GaugeLaneLayout *layout)
@@ -2160,6 +2275,18 @@ static u8 build_fill_layout_direct(const GaugeDefinition *definition,
     return 1;
 }
 
+/**
+ * Build one PIP-mode layout directly into an already allocated layout object.
+ *
+ * Compared to fill mode, this builder resolves compact PIP style metadata,
+ * expands optional per-segment runtime views, and prepares the information used
+ * later to build tilemap placements and compact VRAM render slots.
+ *
+ * @param definition Sanitized build definition.
+ * @param lanePlan   Validated lane plan.
+ * @param layout     [out] Layout object to populate.
+ * @return 1 on success, 0 if authored PIP data is invalid or allocation fails.
+ */
 static u8 build_pip_layout_direct(const GaugeDefinition *definition,
                                   const GaugeBuildLanePlan *lanePlan,
                                   GaugeLaneLayout *layout)
@@ -2341,15 +2468,31 @@ static u8 build_layout_from_lane_plan(const GaugeDefinition *definition,
 }
 
 /* -----------------------------------------------------------------------------
-   Runtime sizing and lane wiring
+   GC-BLD-30 Runtime Sizing And Lane Wiring
    ----------------------------------------------------------------------------- */
 
 /* -----------------------------------------------------------------------------
-   Lane instance initialization
+   GC-BLD-31 Lane Instance Initialization
    ----------------------------------------------------------------------------- */
 
 /**
  * Initialize a GaugeLaneInstance with all parameters.
+ */
+/**
+ * Initialize one runtime lane instance.
+ *
+ * A lane instance binds a built layout to a concrete origin, VRAM base, render
+ * handler, and stream-cell storage inside the runtime arena. It also emits the
+ * initial tilemap and initial tile uploads for the chosen render mode.
+ *
+ * @param lane         [out] Runtime lane instance to initialize.
+ * @param gauge        Owning gauge.
+ * @param layout       Shared built layout referenced by the lane.
+ * @param originX      Tilemap origin X for this lane.
+ * @param originY      Tilemap origin Y for this lane.
+ * @param vramBase     First VRAM tile reserved for this lane.
+ * @param runtimeArena Arena used to allocate the stream-cell storage.
+ * @return 1 on success, 0 if runtime storage could not be reserved.
  */
 static u8 GaugeLaneInstance_initInternal(GaugeLaneInstance *lane,
                                          const Gauge *gauge,
@@ -2414,7 +2557,7 @@ static void GaugeLaneInstance_releaseInternal(GaugeLaneInstance *lane)
 
 
 /* -----------------------------------------------------------------------------
-   Build/runtime helpers
+   GC-BLD-32 Build Orchestration And Runtime Ownership
    ----------------------------------------------------------------------------- */
 
 static u8 gauge_compute_stream_cell_capacity(GaugeValueMode valueMode,
@@ -2585,6 +2728,13 @@ static void build_base_lane_projection_maps(Gauge *gauge)
    Build orchestration and lifecycle
    ----------------------------------------------------------------------------- */
 
+/**
+ * GC-BLD-33 Full build orchestration.
+ *
+ * The functions in this block perform the high-level Gauge_init() pipeline:
+ * sanitize authored data, build lane plans, allocate layouts and runtime, wire
+ * lane instances, then transfer ownership into the final Gauge.
+ */
 static void gauge_sanitize_definition(const GaugeDefinition *definition,
                                       GaugeDefinition *outSanitized)
 {
@@ -2605,6 +2755,16 @@ static void gauge_sanitize_definition(const GaugeDefinition *definition,
         outSanitized->maxValue = GAUGE_LUT_CAPACITY;
 }
 
+/**
+ * Build all intermediate lane plans for one Gauge_init() call.
+ *
+ * This pass finds the base lane, skips empty authored lanes, validates every
+ * live lane against the chosen base lane, and records the longest visible span.
+ *
+ * @param buildScratch    Shared temporary scratch storage for the build.
+ * @param outBuildContext [out] Global build context filled for later phases.
+ * @return 1 on success, 0 if any lane is invalid.
+ */
 static u8 gauge_build_lane_plans(GaugeBuildScratch *buildScratch,
                                  GaugeInitBuildContext *outBuildContext)
 {
@@ -2709,6 +2869,17 @@ static u8 gauge_build_layouts(GaugeInitBuildContext *buildContext)
     return 1;
 }
 
+/**
+ * Allocate the runtime arena and its top-level views.
+ *
+ * The Gauge object itself is already allocated by Gauge_init(). This helper
+ * allocates the contiguous runtime arena that will then host lane pointers,
+ * lane storage, stream cells, and runtime LUT buffers.
+ *
+ * @param buildContext      Completed build context.
+ * @param outRuntimeContext [out] Arena-backed runtime views.
+ * @return 1 on success, 0 if the arena or one required view cannot be reserved.
+ */
 static u8 gauge_allocate_runtime(const GaugeInitBuildContext *buildContext,
                                  GaugeInitRuntimeContext *outRuntimeContext)
 {
@@ -2852,6 +3023,18 @@ static void gauge_finalize_build(Gauge *gauge)
     build_base_lane_projection_maps(gauge);
 }
 
+/**
+ * Execute the full private Gauge_init() build pipeline.
+ *
+ * This helper is intentionally the orchestration layer only. Each phase does
+ * one job: sanitize, plan, build layouts, allocate runtime, initialize logic,
+ * initialize lanes, then finalize projection maps.
+ *
+ * @param gauge      Freshly allocated Gauge object.
+ * @param definition Public authored definition.
+ * @param vramBase   First VRAM tile reserved for the gauge.
+ * @return 1 on success, 0 on any validation or allocation failure.
+ */
 static u8 gauge_init_runtime(Gauge *gauge,
                              const GaugeDefinition *definition,
                              u16 vramBase)
@@ -2930,13 +3113,20 @@ static void gauge_release_runtime(Gauge *gauge)
 }
 
 /* =============================================================================
-   GAUGE LAYOUT
+   GC-LYT-10 Layout Objects, Optional Views, And Derived LUTs
    ============================================================================= */
 
 /* -----------------------------------------------------------------------------
-   Bindings, optional views, and derived LUT builders
+   GC-LYT-20 Bridge/PIP LUT Build And Optional View Orchestration
    ----------------------------------------------------------------------------- */
 
+/**
+ * GC-LYT-21 Generic optional storage helpers.
+ *
+ * The helpers in this block answer one question repeatedly during layout build:
+ * does a given optional view really need heap storage, or can the layout keep a
+ * shared sentinel view instead?
+ */
 static inline u8 segment_tileset_array_has_any(const u32 * const *tilesetsBySegment,
                                                u8 segmentCount)
 {
@@ -3364,12 +3554,18 @@ static void build_pip_luts(GaugeLaneLayout *layout)
 }
 
 /* -----------------------------------------------------------------------------
-   GaugeLaneLayout storage and lifetime
+   GC-LYT-30 Storage Helpers And Optional Buffer Ownership
    ----------------------------------------------------------------------------- */
 
 /* -----------------------------------------------------------------------------
-   GaugeLaneLayout implementation
+   GC-LYT-40 Core Layout Initialization And Synchronization
    ----------------------------------------------------------------------------- */
+/**
+ * GC-LYT-31 Optional pointer view helpers.
+ *
+ * These helpers allocate, reset, and free heap-backed optional views while
+ * preserving shared sentinel arrays when the layout can stay on defaults.
+ */
 static void layout_free_optional_ptr(void **ptr,
                                      const void *defaultViewA,
                                      const void *defaultViewB,
@@ -3868,6 +4064,13 @@ static u8 layout_alloc_buffers(GaugeLaneLayout *layout, u8 length, u8 segmentCou
     return 1;
 }
 
+/**
+ * Initialize the core immutable fields of one GaugeLaneLayout.
+ *
+ * This constructor-like helper seeds the fill-order mappings, plane/orientation
+ * flags, default tileset views, and the optional-pointer state required before
+ * fill- or pip-specific population can extend the layout.
+ */
 static void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
                                    u8 length,
                                    GaugeFillDirection fillDirection,
@@ -4080,11 +4283,11 @@ static void finalize_layout_derived_state(GaugeLaneLayout *layout)
 }
 
 /* =============================================================================
-   GAUGE LOGIC
+   GC-LOG-10 Runtime Logic, Animation, And LUT Maintenance
    ============================================================================= */
 
 /* -----------------------------------------------------------------------------
-   Value/LUT helpers
+   GC-LOG-20 Value/Pixels LUT Helpers
    ----------------------------------------------------------------------------- */
 
 /**
@@ -4152,14 +4355,20 @@ static void fill_pip_value_lut(u16 *dest, u16 maxValue, const GaugeLaneLayout *l
  */
 
 /* -----------------------------------------------------------------------------
-   GaugeLogic runtime state machine
+   GC-LOG-30 GaugeLogic Runtime State Machine
    ----------------------------------------------------------------------------- */
 
 /* -----------------------------------------------------------------------------
-   GaugeLogic implementation
+   GC-LOG-31 GaugeLogic Initialization And Tick Functions
    ----------------------------------------------------------------------------- */
 
 
+/**
+ * GC-LOG-21 Logic construction helpers.
+ *
+ * GaugeLogic_init() and GaugeLogic_initWithAnim() establish the baseline state
+ * of the runtime logic object before authored behavior is applied.
+ */
 static void GaugeLogic_init(GaugeLogic *logic,
                      u16 maxValue,
                      u16 maxFillPixels,
@@ -4239,6 +4448,13 @@ static void GaugeLogic_initWithAnim(GaugeLogic *logic,
 }
 
 /* Trail mode helpers (configuration/runtime). */
+/**
+ * GC-LOG-32 Trail mode helpers.
+ *
+ * The helpers below keep the configured trail mode, gain mode, and current
+ * runtime state machine aligned. They are intentionally small because they are
+ * reused by both the public API mutators and the per-frame tick path.
+ */
 static inline u8 is_critical_mode_active(const GaugeLogic *logic)
 {
     return (logic->currentValue <= logic->criticalValue) ? 1 : 0;
@@ -4542,9 +4758,16 @@ static inline void invalidate_render_cache(GaugeLogic *logic)
 }
 
 /* -----------------------------------------------------------------------------
-   Behavior application and transition helpers
+   GC-LOG-40 Behavior Application, LUT Rebuild, And Transition Helpers
    ----------------------------------------------------------------------------- */
 
+/**
+ * GC-LOG-41 Behavior application, LUT rebuild, and transition helpers.
+ *
+ * This block owns the pieces of logic that react to configuration changes or
+ * one-shot public API calls: rebuild LUTs, apply authored behavior, remap trail
+ * state, and start damage/gain transitions.
+ */
 static void gauge_rebuild_value_to_pixels_lut(Gauge *gauge)
 {
     if (!gauge || !gauge->logic.valueToPixelsData)
@@ -4709,7 +4932,7 @@ static inline void gauge_begin_gain_transition(GaugeLogic *logic,
 }
 
 /* =============================================================================
-   GAUGE RENDER FILL
+   GC-RF-10 Fill Renderer
    ============================================================================= */
 
 /* -----------------------------------------------------------------------------
@@ -7336,11 +7559,11 @@ static void gauge_tick_and_render_fill(Gauge *gauge)
  */
 
 /* =============================================================================
-   GAUGE RENDER PIP
+   GC-RP-10 PIP Renderer
    ============================================================================= */
 
 /* -----------------------------------------------------------------------------
-   PIP geometry, state selection, and quantization
+   GC-RP-20 PIP Geometry, State Selection, And Quantization
    ----------------------------------------------------------------------------- */
 
 static inline void compute_pip_render_xy(const GaugeLaneLayout *layout,
@@ -7634,7 +7857,7 @@ static void process_pip_mode(GaugeLaneInstance *lane,
 }
 
 /* -----------------------------------------------------------------------------
-   PIP tilemap initialization and frame path
+   GC-RP-30 PIP Tilemap Initialization And Frame Path
    ----------------------------------------------------------------------------- */
 
 static void write_tilemap_pip_init(GaugeLaneInstance *lane)
