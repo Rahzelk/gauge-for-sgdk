@@ -276,15 +276,19 @@ struct Gauge
 {
     GaugeLogic logic;
 
+    /* Runtime lane ownership and dispatch. */
     GaugeLaneInstance **lanes;
     GaugeTickAndRenderHandler *tickAndRenderHandler;
     GaugeLogicTickHandler *logicTickHandler;
+    GaugeLaneLayout *ownedLayouts[GAUGE_MAX_LANES];
+    void *runtimeArena;
+
+    /* Base-lane topology and per-frame shared decisions. */
     u8 laneCount;
     u8 baseLaneIndex;
     u8 baseLaneHasBridge;
     u8 debugMode;
     u16 baseLaneSpanPixels;
-
     u8 baseLaneDecisionTypeByFillIndex[GAUGE_MAX_LENGTH];
     u8 baseLaneDecisionIdxByFillIndex[GAUGE_MAX_LENGTH];
     u8 baseLaneDecisionCapStartBreakByFillIndex[GAUGE_MAX_LENGTH];
@@ -292,31 +296,38 @@ struct Gauge
     u8 baseLaneDecisionUseBlinkVariantByFillIndex[GAUGE_MAX_LENGTH];
     u8 baseLanePipStateByFillIndex[GAUGE_MAX_LENGTH];
 
-    GaugeLaneLayout *ownedLayouts[GAUGE_MAX_LANES];
+    /* Build/runtime ownership metadata. */
     u8 ownedLayoutCount;
-
-    u16 vramNextOffset;
     GaugeValueMode valueMode;
-    void *runtimeArena;
+    u16 vramBase;
+    u16 vramNextOffset;
 };
 
 struct GaugeLaneLayout
 {
+    /* Identity, dimensions, and lane-global render flags. */
     u16 fillOffset;
     u8 length;
     u8 segmentCount;
     u8 plane;
+    u8 orientation;
+    u8 palette;
+    u8 priority;
+    u8 verticalFlip;
+    u8 horizontalFlip;
+    u8 endOverrideEnabled;
 
+    /* Core per-cell mappings and tilemap positions. */
     u8 segmentIdByCellStorage[GAUGE_MAX_LENGTH];
     u8 fillIndexByCellStorage[GAUGE_MAX_LENGTH];
     u8 cellIndexByFillIndexStorage[GAUGE_MAX_LENGTH];
     u8 *segmentIdByCell;
     u8 *fillIndexByCell;
     u8 *cellIndexByFillIndex;
-
     Vect2D_u16 tilemapPosByCellStorage[GAUGE_MAX_LENGTH];
     Vect2D_u16 *tilemapPosByCell;
 
+    /* Base fill family and segment-local cap flags. */
     const u32 *tilesetBySegmentStorage[GAUGE_MAX_SEGMENTS];
     const u32 **tilesetBySegment;
     const u32 **tilesetEndBySegment;
@@ -328,6 +339,7 @@ struct GaugeLaneLayout
     const u32 **tilesetCapStartTrailBySegment;
     u8 *capEndBySegment;
 
+    /* Optional gain and blink fill families. */
     const u32 **gainTilesetBySegment;
     const u32 **gainTilesetEndBySegment;
     const u32 **gainTilesetTrailBySegment;
@@ -336,7 +348,6 @@ struct GaugeLaneLayout
     const u32 **gainTilesetCapEndBySegment;
     const u32 **gainTilesetCapStartBreakBySegment;
     const u32 **gainTilesetCapStartTrailBySegment;
-
     const u32 **blinkOffTilesetBySegment;
     const u32 **blinkOffTilesetEndBySegment;
     const u32 **blinkOffTilesetTrailBySegment;
@@ -345,7 +356,6 @@ struct GaugeLaneLayout
     const u32 **blinkOffTilesetCapEndBySegment;
     const u32 **blinkOffTilesetCapStartBreakBySegment;
     const u32 **blinkOffTilesetCapStartTrailBySegment;
-
     const u32 **gainBlinkOffTilesetBySegment;
     const u32 **gainBlinkOffTilesetEndBySegment;
     const u32 **gainBlinkOffTilesetTrailBySegment;
@@ -355,6 +365,7 @@ struct GaugeLaneLayout
     const u32 **gainBlinkOffTilesetCapStartBreakBySegment;
     const u32 **gainBlinkOffTilesetCapStartTrailBySegment;
 
+    /* Authored PIP style views by segment. */
     const u32 **pipTilesetBySegment;
     u8 *pipWidthBySegment;
     u8 *pipHeightBySegment;
@@ -365,6 +376,7 @@ struct GaugeLaneLayout
     u8 *pipSourceWidthBySegment;
     u8 *pipSourceHeightBySegment;
 
+    /* Derived PIP runtime views and bridge lookup tables. */
     u8 pipCount;
     u8 *pipIndexByFillIndex;
     u8 *pipLocalTileByFillIndex;
@@ -383,13 +395,7 @@ struct GaugeLaneLayout
     u8 *bridgeBreakByFillIndex;
     u8 *bridgeBreakBoundaryByFillIndex;
 
-    u8 orientation;
-    u8 palette;
-    u8 priority;
-    u8 verticalFlip;
-    u8 horizontalFlip;
-    u8 endOverrideEnabled;
-
+    /* Cached feature flags and shared ownership state. */
     u8 hasBlinkOff;
     u8 hasGainBlinkOff;
     u8 capStartEnabled;
@@ -735,11 +741,77 @@ typedef struct
     u16 renderStateIndex;
 } PipResolvedRenderState;
 
+/*
+ * Shared temporary scratch reused by every Gauge_init() call.
+ *
+ * This storage is deliberately module-global:
+ * - it keeps large temporary arrays off the 68K stack
+ * - it avoids per-build heap churn for temporary planning data
+ * - it makes the build pipeline non-reentrant by design
+ */
 static GaugeBuildScratch s_buildScratch;
+
+/* Last Gauge_init() diagnostic, updated on every build attempt. */
+static GaugeBuildError s_lastBuildError = GAUGE_BUILD_OK;
+
+static inline void gauge_set_last_build_error(GaugeBuildError error)
+{
+    s_lastBuildError = error;
+}
+
+static inline void gauge_set_last_build_error_if_ok(GaugeBuildError error)
+{
+    if (s_lastBuildError == GAUGE_BUILD_OK)
+        s_lastBuildError = error;
+}
+
+static const char *gauge_build_error_to_text(GaugeBuildError error)
+{
+    switch (error)
+    {
+    case GAUGE_BUILD_OK:
+        return "build ok";
+    case GAUGE_BUILD_ERR_NULL_DEFINITION:
+        return "definition is NULL";
+    case GAUGE_BUILD_ERR_GAUGE_ALLOC:
+        return "could not allocate Gauge";
+    case GAUGE_BUILD_ERR_INVALID_MODE:
+        return "invalid gauge mode";
+    case GAUGE_BUILD_ERR_INVALID_LANE:
+        return "invalid lane definition";
+    case GAUGE_BUILD_ERR_LANE_HOLE:
+        return "lane segments contain a hole";
+    case GAUGE_BUILD_ERR_LANE_WINDOW:
+        return "lane window does not fit base lane";
+    case GAUGE_BUILD_ERR_NO_BASE_LANE:
+        return "no valid base lane found";
+    case GAUGE_BUILD_ERR_INVALID_SEGMENT:
+        return "invalid segment or skin";
+    case GAUGE_BUILD_ERR_INVALID_ORIGIN:
+        return "lane origin is out of range";
+    case GAUGE_BUILD_ERR_LAYOUT_BUILD:
+        return "layout build failed";
+    case GAUGE_BUILD_ERR_RUNTIME_ALLOC:
+        return "runtime allocation failed";
+    default:
+        return "unknown build error";
+    }
+}
 
 /* =============================================================================
    GC-DEC-10 Forward Declarations By Subsystem
-   ============================================================================= */
+   =============================================================================
+
+   Private naming convention:
+   - sanitize_* : normalize authored scalars without rejecting the build
+   - validate_* : reject invalid authored topology or relationships
+   - build_*    : derive intermediate or cached data from authored input
+   - allocate_* : reserve memory only
+   - init_*     : initialize already allocated runtime objects
+   - finalize_* : finish derived state after the main build/population pass
+   - compute_*  : pure calculations with no ownership side effect
+   - resolve_*  : choose one variant, asset family, or render state
+ */
 
 /* --- GC-DEC-20 Build helpers --- */
 static void gauge_sanitize_definition(const GaugeDefinition *definition,
@@ -861,7 +933,8 @@ static u8 gauge_allocate_runtime(const GaugeInitBuildContext *buildContext,
                                  GaugeInitRuntimeContext *outRuntimeContext);
 static void gauge_init_logic_runtime(Gauge *gauge,
                                      const GaugeInitBuildContext *buildContext,
-                                     GaugeInitRuntimeContext *runtimeContext);
+                                     GaugeInitRuntimeContext *runtimeContext,
+                                     u16 vramBase);
 static u8 gauge_init_lane_instances(Gauge *gauge,
                                     u16 vramBase,
                                     const GaugeInitBuildContext *buildContext,
@@ -935,7 +1008,7 @@ static void layout_reset_core_views(GaugeLaneLayout *layout, u8 length, u8 segme
 static void layout_set_optional_views_to_defaults(GaugeLaneLayout *layout);
 static void layout_free_buffers(GaugeLaneLayout *layout);
 static u8 layout_alloc_buffers(GaugeLaneLayout *layout, u8 length, u8 segmentCount);
-static void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
+static u8 GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
                                    u8 length,
                                    GaugeFillDirection fillDirection,
                                    const u32 * const *bodyTilesets,
@@ -956,11 +1029,11 @@ static void GaugeLaneLayout_retain(GaugeLaneLayout *layout);
 static void GaugeLaneLayout_release(GaugeLaneLayout *layout);
 static inline u8 usage_flag_for_slot(const SkinSetUsageFlags *usageFlags,
                                      LayoutTilesetSlot slot);
-static void sync_layout_tileset_group_slots_from_usage(GaugeLaneLayout *layout,
+static u8 sync_layout_tileset_group_slots_from_usage(GaugeLaneLayout *layout,
                                                        LayoutTilesetGroupId group,
                                                        const SkinSetUsageFlags *usageFlags,
                                                        LayoutTilesetSlotMask slotMask);
-static void sync_base_allocations(GaugeLaneLayout *layout,
+static u8 sync_base_allocations(GaugeLaneLayout *layout,
                                   const SkinSetUsageFlags *f,
                                   u8 hasCapEndFlags);
 static void finalize_layout_derived_state(GaugeLaneLayout *layout);
@@ -994,7 +1067,7 @@ static void GaugeLogic_tick_follow_mode(GaugeLogic *logic);
 static inline u8 trail_mode_enables_trail(GaugeTrailMode mode);
 static inline u8 gain_mode_uses_trail(GaugeGainMode mode);
 static inline u8 compute_trail_enabled(GaugeTrailMode trailMode, GaugeGainMode gainMode);
-static inline void reset_follow_mode_state(GaugeLogic *logic);
+static inline void gauge_reset_transition_to_idle(GaugeLogic *logic);
 static inline void apply_configured_trail_mode_state(GaugeLogic *logic, u8 advanceBlinkTimer);
 static inline void invalidate_render_cache(GaugeLogic *logic);
 static void gauge_rebuild_value_to_pixels_lut(Gauge *gauge);
@@ -1014,6 +1087,15 @@ static inline void gauge_begin_damage_transition(GaugeLogic *logic,
 static inline void gauge_begin_gain_transition(GaugeLogic *logic,
                                                u8 holdFrames,
                                                u8 blinkFrames);
+static inline void gauge_apply_damage_target_change(Gauge *gauge,
+                                                    GaugeLogic *logic,
+                                                    u16 newValue,
+                                                    u8 holdFrames,
+                                                    u8 blinkFrames);
+static inline void gauge_apply_gain_target_change(GaugeLogic *logic,
+                                                  u16 newValue,
+                                                  u8 holdFrames,
+                                                  u8 blinkFrames);
 
 /* --- GC-DEC-50 Fill render helpers --- */
 static inline u8 clamp_to_tile_size(s16 v);
@@ -1166,6 +1248,38 @@ static inline const u32 *resolve_layout_mode_strip(const GaugeLaneLayout *layout
                                                    u8 segmentId,
                                                    u8 trailMode,
                                                    u8 blinkVariant);
+static inline const u32 *layout_get_body_strip(const GaugeLaneLayout *layout,
+                                               u8 segmentId,
+                                               u8 trailMode,
+                                               u8 useBlinkVariant);
+static inline const u32 *layout_get_end_strip(const GaugeLaneLayout *layout,
+                                              u8 segmentId,
+                                              u8 trailMode,
+                                              u8 useBlinkVariant);
+static inline const u32 *layout_get_trail_strip(const GaugeLaneLayout *layout,
+                                                u8 segmentId,
+                                                u8 trailMode,
+                                                u8 useBlinkVariant);
+static inline const u32 *layout_get_bridge_strip(const GaugeLaneLayout *layout,
+                                                 u8 segmentId,
+                                                 u8 trailMode,
+                                                 u8 useBlinkVariant);
+static inline const u32 *layout_get_cap_start_strip(const GaugeLaneLayout *layout,
+                                                    u8 segmentId,
+                                                    u8 trailMode,
+                                                    u8 useBlinkVariant);
+static inline const u32 *layout_get_cap_start_break_strip(const GaugeLaneLayout *layout,
+                                                          u8 segmentId,
+                                                          u8 trailMode,
+                                                          u8 useBlinkVariant);
+static inline const u32 *layout_get_cap_start_trail_strip(const GaugeLaneLayout *layout,
+                                                          u8 segmentId,
+                                                          u8 trailMode,
+                                                          u8 useBlinkVariant);
+static inline const u32 *layout_get_cap_end_strip(const GaugeLaneLayout *layout,
+                                                  u8 segmentId,
+                                                  u8 trailMode,
+                                                  u8 useBlinkVariant);
 static inline void build_local_strip_set(const GaugeLaneLayout *layout,
                                          u8 segmentId,
                                          u8 trailMode,
@@ -1280,20 +1394,40 @@ Gauge *Gauge_init(const GaugeDefinition *definition,
 {
     Gauge *gauge = NULL;
 
+    gauge_set_last_build_error(GAUGE_BUILD_OK);
+
     if (!definition)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_NULL_DEFINITION);
         return NULL;
+    }
 
     gauge = (Gauge *)gauge_alloc_bytes((u16)sizeof(*gauge));
     if (!gauge)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_GAUGE_ALLOC);
         return NULL;
+    }
 
     if (!gauge_init_runtime(gauge, definition, vramBase))
     {
+        gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         MEM_free(gauge);
         return NULL;
     }
 
+    gauge_set_last_build_error(GAUGE_BUILD_OK);
     return gauge;
+}
+
+GaugeBuildError Gauge_getLastBuildError(void)
+{
+    return s_lastBuildError;
+}
+
+const char *Gauge_getLastBuildErrorText(void)
+{
+    return gauge_build_error_to_text(s_lastBuildError);
 }
 
 /** Update gauge: tick logic + render all lanes. Call once per frame. */
@@ -1358,19 +1492,15 @@ void Gauge_decreaseEx(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
         return;
 
     GaugeLogic *logic = &gauge->logic;
-    logic->needUpdate = 1;
+    const u16 newValue = (logic->currentValue > amount)
+        ? (u16)(logic->currentValue - amount)
+        : 0;
 
-    gauge_set_current_value_and_target(logic,
-                                       (logic->currentValue > amount) ? (u16)(logic->currentValue - amount) : 0,
-                                       !logic->valueAnimEnabled);
-
-    if (gauge->logicTickHandler != GaugeLogic_tick_follow_mode)
-    {
-        apply_non_follow_trail_mode_state(logic, 0);
-        return;
-    }
-
-    gauge_begin_damage_transition(logic, holdFrames, blinkFrames);
+    gauge_apply_damage_target_change(gauge,
+                                     logic,
+                                     newValue,
+                                     holdFrames,
+                                     blinkFrames);
 }
 
 void Gauge_decrease(Gauge *gauge, u16 amount)
@@ -1390,33 +1520,14 @@ void Gauge_increaseEx(Gauge *gauge, u16 amount, u8 holdFrames, u8 blinkFrames)
         return;
 
     GaugeLogic *logic = &gauge->logic;
-    logic->needUpdate = 1;
+    const u16 newValue = (logic->currentValue + amount > logic->maxValue)
+        ? logic->maxValue
+        : (u16)(logic->currentValue + amount);
 
-    gauge_set_current_value_and_target(logic,
-                                       (logic->currentValue + amount > logic->maxValue)
-                                           ? logic->maxValue
-                                           : (u16)(logic->currentValue + amount),
-                                       !logic->valueAnimEnabled);
-
-    if ((GaugeGainMode)logic->configuredGainMode == GAUGE_GAIN_MODE_FOLLOW &&
-        logic->valueAnimEnabled)
-    {
-        gauge_begin_gain_transition(logic, holdFrames, blinkFrames);
-        return;
-    }
-
-    if ((GaugeTrailMode)logic->configuredTrailMode == GAUGE_TRAIL_MODE_FOLLOW)
-    {
-        logic->trailPixels = logic->valuePixels;
-        logic->holdFramesRemaining = 0;
-        logic->blinkFramesRemaining = 0;
-        logic->blinkTimer = 0;
-        logic->activeTrailState = GAUGE_TRAIL_STATE_NONE;
-    }
-    else
-    {
-        apply_non_follow_trail_mode_state(logic, 0);
-    }
+    gauge_apply_gain_target_change(logic,
+                                   newValue,
+                                   holdFrames,
+                                   blinkFrames);
 }
 
 void Gauge_increase(Gauge *gauge, u16 amount)
@@ -1459,10 +1570,10 @@ u8 Gauge_getDebugMode(const Gauge *gauge)
 
 u16 Gauge_getNextVramIndex(const Gauge *gauge)
 {
-    if (!gauge || !gauge->lanes || gauge->laneCount == 0 || !gauge->lanes[0])
+    if (!gauge)
         return 0;
 
-    return (u16)(gauge->lanes[0]->vramBase + gauge->vramNextOffset);
+    return (u16)(gauge->vramBase + gauge->vramNextOffset);
 }
 
 /* =============================================================================
@@ -1470,7 +1581,7 @@ u16 Gauge_getNextVramIndex(const Gauge *gauge)
    ============================================================================= */
 
 /* -----------------------------------------------------------------------------
-   GC-BLD-20 Lane Sanitation And Validation
+   GC-BLD-20 Scalar Sanitation And Lane Validation
    ----------------------------------------------------------------------------- */
 
 /**
@@ -1554,7 +1665,10 @@ static u8 lane_has_segment_holes(const GaugeLane *lane)
 static u8 validate_lane_segments(const GaugeLane *lane)
 {
     if (!lane)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_LANE);
         return 0;
+    }
 
     for (u8 segmentIndex = 0; segmentIndex < GAUGE_MAX_SEGMENTS; segmentIndex++)
     {
@@ -1563,10 +1677,19 @@ static u8 validate_lane_segments(const GaugeLane *lane)
         const u8 skinPresent = (segment->skin != NULL) ? 1 : 0;
 
         if (cellsPresent != skinPresent)
+        {
+            gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
             return 0;
+        }
     }
 
-    return lane_has_segment_holes(lane) ? 0 : 1;
+    if (lane_has_segment_holes(lane))
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_LANE_HOLE);
+        return 0;
+    }
+
+    return 1;
 }
 
 static u8 definition_lane_is_empty(const GaugeLane *lane)
@@ -1601,7 +1724,10 @@ static u8 compute_segment_display_cells(GaugeMode mode,
                                         u16 *outDisplayCells)
 {
     if (!segment || !segment->skin || !outDisplayCells || segment->cells == 0)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
         return 0;
+    }
 
     if (mode == GAUGE_MODE_PIP)
     {
@@ -1609,9 +1735,14 @@ static u8 compute_segment_display_cells(GaugeMode mode,
         const u8 pipWidth = pip->pipWidth ? pip->pipWidth : 1;
         *outDisplayCells = (u16)(segment->cells * pipWidth);
     }
-    else
+    else if (mode == GAUGE_MODE_FILL)
     {
         *outDisplayCells = segment->cells;
+    }
+    else
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_MODE);
+        return 0;
     }
 
     return 1;
@@ -1645,20 +1776,32 @@ static u8 validate_lane_window_against_base(const GaugeDefinition *definition,
                                             const GaugeLane *lane)
 {
     if (!definition || !baseLane || !lane)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_LANE);
         return 0;
+    }
 
     const u16 baseLaneCells = compute_lane_display_cells(definition, baseLane);
     const u16 laneCells = compute_lane_display_cells(definition, lane);
     const u16 firstValueCell = lane->firstValueCell;
 
     if (baseLaneCells == 0 || laneCells == 0)
+    {
+        gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LANE_WINDOW);
         return 0;
+    }
 
     if (firstValueCell > baseLaneCells)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_LANE_WINDOW);
         return 0;
+    }
 
     if ((u32)firstValueCell + (u32)laneCells > baseLaneCells)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_LANE_WINDOW);
         return 0;
+    }
 
     return 1;
 }
@@ -1682,7 +1825,10 @@ static u8 find_baseLane_index(const GaugeDefinition *definition,
                               u8 *outLaneIndex)
 {
     if (!definition || !outLaneIndex)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_LANE);
         return 0;
+    }
 
     u16 bestSpan = 0;
     u8 bestIndex = 0xFF;
@@ -1697,6 +1843,12 @@ static u8 find_baseLane_index(const GaugeDefinition *definition,
             continue;
 
         const u16 span = compute_lane_display_cells(definition, lane);
+        if (span == 0)
+        {
+            gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_INVALID_SEGMENT);
+            return 0;
+        }
+
         if (span > bestSpan || bestIndex == 0xFF)
         {
             bestSpan = span;
@@ -1705,7 +1857,10 @@ static u8 find_baseLane_index(const GaugeDefinition *definition,
     }
 
     if (bestIndex == 0xFF)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_NO_BASE_LANE);
         return 0;
+    }
 
     *outLaneIndex = bestIndex;
     return 1;
@@ -1730,7 +1885,10 @@ static u8 compute_fill_offset_pixels_for_lane(const GaugeDefinition *definition,
                                               u16 *outOffset)
 {
     if (!definition || !baseLane || !outOffset)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_LANE);
         return 0;
+    }
 
     *outOffset = 0;
     if (firstValueCell == 0)
@@ -1773,7 +1931,10 @@ static u8 compute_fill_offset_pixels_for_lane(const GaugeDefinition *definition,
     }
 
     if (remainingCells != 0)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_LANE_WINDOW);
         return 0;
+    }
 
     *outOffset = (u16)(displayCellsBefore << TILE_TO_PIXEL_SHIFT);
     return 1;
@@ -1812,20 +1973,32 @@ static u8 resolve_pip_strip_geometry_from_skin(const GaugePipSkin *skin,
                                                u8 *outHalfAxis)
 {
     if (!skin || !skin->tileset)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
         return 0;
+    }
 
     const u8 pipWidth = skin->pipWidth ? skin->pipWidth : 1;
     u8 pipHeight = skin->pipHeight ? skin->pipHeight : 1;
     if (pipHeight > 4)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
         return 0;
+    }
 
     const u16 pipTileCount = skin->tileset->numTile;
     if (pipTileCount == 0 || pipTileCount > 255)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
         return 0;
+    }
 
     const u8 stripCoverage = skin->coverage;
     if (stripCoverage > GAUGE_STRIP_COVERAGE_QUARTER)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
         return 0;
+    }
 
     u8 sourceWidth = pipWidth;
     u8 sourceHeight = pipHeight;
@@ -1841,7 +2014,10 @@ static u8 resolve_pip_strip_geometry_from_skin(const GaugePipSkin *skin,
         const u8 verticalValid = (verticalTilesPerState != 0) && ((pipTileCount % verticalTilesPerState) == 0);
 
         if (!horizontalValid && !verticalValid)
+        {
+            gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
             return 0;
+        }
 
         if (horizontalValid)
         {
@@ -1861,7 +2037,10 @@ static u8 resolve_pip_strip_geometry_from_skin(const GaugePipSkin *skin,
     else if (stripCoverage == GAUGE_STRIP_COVERAGE_QUARTER)
     {
         if ((pipWidth & 1) || (pipHeight & 1))
+        {
+            gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
             return 0;
+        }
 
         sourceWidth = (u8)(pipWidth >> 1);
         sourceHeight = (u8)(pipHeight >> 1);
@@ -1873,13 +2052,22 @@ static u8 resolve_pip_strip_geometry_from_skin(const GaugePipSkin *skin,
     }
 
     if (tilesPerState == 0)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
         return 0;
+    }
     if ((pipTileCount % tilesPerState) != 0)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
         return 0;
+    }
 
     const u16 stateCount = (u16)(pipTileCount / tilesPerState);
     if (stateCount < 2 || stateCount > 255)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
         return 0;
+    }
 
     if (outStateCount)
         *outStateCount = (u8)stateCount;
@@ -1926,7 +2114,10 @@ static u8 build_segment_id_by_cell_from_lane(GaugeMode mode,
                                              u8 *outSegmentCount)
 {
     if (!lane || !outSegmentIdByCell || !outLength || !outSegmentCount)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_LANE);
         return 0;
+    }
 
     u8 segmentByFillIndex[GAUGE_MAX_LENGTH] = {0};
     u8 cursor = 0;
@@ -1943,12 +2134,23 @@ static u8 build_segment_id_by_cell_from_lane(GaugeMode mode,
         {
             const GaugePipSkin *pip = &segment->skin->pip;
             if (!pip->tileset)
+            {
+                gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
                 return 0;
+            }
             expandedCellCount = (u16)(segment->cells * (pip->pipWidth ? pip->pipWidth : 1));
+        }
+        else if (mode != GAUGE_MODE_FILL)
+        {
+            gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_MODE);
+            return 0;
         }
 
         if ((u16)cursor + expandedCellCount > GAUGE_MAX_LENGTH)
+        {
+            gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
             return 0;
+        }
 
         for (u16 i = 0; i < expandedCellCount; i++)
             segmentByFillIndex[cursor++] = segmentCount;
@@ -1957,7 +2159,10 @@ static u8 build_segment_id_by_cell_from_lane(GaugeMode mode,
     }
 
     if (cursor == 0 || segmentCount == 0)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
         return 0;
+    }
 
     *outLength = cursor;
     *outSegmentCount = segmentCount;
@@ -2173,22 +2378,32 @@ static u8 layout_prepare_from_lane_plan(const GaugeDefinition *definition,
                                        GaugeLaneLayout *layout,
                                        const u32 * const *bodyTilesets)
 {
-    GaugeLaneLayout_initEx(layout,
-                           lanePlan->length,
-                           definition->fillDirection,
-                           bodyTilesets,
-                           NULL,
-                           NULL,
-                           NULL,
-                           lanePlan->segmentIdByCell,
-                           (u8)definition->plane,
-                           definition->orientation,
-                           lanePlan->palette,
-                           definition->priority,
-                           definition->verticalFlip,
-                           definition->horizontalFlip);
+    if (!definition || !lanePlan || !layout)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_LAYOUT_BUILD);
+        return 0;
+    }
 
-    return (layout->length != 0 && layout->segmentCount != 0) ? 1 : 0;
+    if (!GaugeLaneLayout_initEx(layout,
+                                lanePlan->length,
+                                definition->fillDirection,
+                                bodyTilesets,
+                                NULL,
+                                NULL,
+                                NULL,
+                                lanePlan->segmentIdByCell,
+                                (u8)definition->plane,
+                                definition->orientation,
+                                lanePlan->palette,
+                                definition->priority,
+                                definition->verticalFlip,
+                                definition->horizontalFlip))
+    {
+        gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LAYOUT_BUILD);
+        return 0;
+    }
+
+    return 1;
 }
 
 static void layout_finalize_after_population(GaugeLaneLayout *layout)
@@ -2224,7 +2439,10 @@ static u8 build_fill_layout_direct(const GaugeDefinition *definition,
     {
         const GaugeSegment *segment = &lanePlan->lane->segments[segmentIndex];
         if (!segment->skin || !segment->skin->fill.normal.body)
+        {
+            gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
             return 0;
+        }
 
         baseBodyTilesets[segmentIndex] = segment->skin->fill.normal.body->tiles;
         for (u8 groupIndex = 0; groupIndex < GAUGE_ARRAY_LEN(s_fillTilesetGroups); groupIndex++)
@@ -2239,15 +2457,26 @@ static u8 build_fill_layout_direct(const GaugeDefinition *definition,
     }
 
     if (!layout_prepare_from_lane_plan(definition, lanePlan, layout, baseBodyTilesets))
+    {
+        gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         return 0;
+    }
 
-    sync_base_allocations(layout, &groupUsage[0], capEndFlags);
+    if (!sync_base_allocations(layout, &groupUsage[0], capEndFlags))
+    {
+        gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LAYOUT_BUILD);
+        return 0;
+    }
     for (u8 groupIndex = 1; groupIndex < GAUGE_ARRAY_LEN(s_fillTilesetGroups); groupIndex++)
     {
-        sync_layout_tileset_group_slots_from_usage(layout,
-                                                   s_fillTilesetGroups[groupIndex],
-                                                   &groupUsage[groupIndex],
-                                                   LAYOUT_TILESET_SLOT_MASK_ALL);
+        if (!sync_layout_tileset_group_slots_from_usage(layout,
+                                                        s_fillTilesetGroups[groupIndex],
+                                                        &groupUsage[groupIndex],
+                                                        LAYOUT_TILESET_SLOT_MASK_ALL))
+        {
+            gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LAYOUT_BUILD);
+            return 0;
+        }
     }
 
     for (u8 segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++)
@@ -2304,18 +2533,25 @@ static u8 build_pip_layout_direct(const GaugeDefinition *definition,
     memset(resolvedStyles, 0, sizeof(resolvedStyles));
 
     if (!layout_prepare_from_lane_plan(definition, lanePlan, layout, NULL))
+    {
+        gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         return 0;
+    }
 
     for (u8 segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++)
     {
         const GaugeSegment *segment = &lanePlan->lane->segments[segmentIndex];
         if (!segment->skin)
+        {
+            gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
             return 0;
+        }
 
         const GaugePipSkin *pip = &segment->skin->pip;
         ResolvedPipStyle *resolved = &resolvedStyles[segmentIndex];
         if (!resolve_pip_style(pip, resolved))
         {
+            gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_INVALID_SEGMENT);
             return 0;
         }
 
@@ -2329,52 +2565,56 @@ static u8 build_pip_layout_direct(const GaugeDefinition *definition,
                              &hasCustomSourceHeights);
     }
 
-    layout_sync_optional_segment_tilesets_by_usage(
-        hasPipStyles,
-        &layout->pipTilesetBySegment,
-        layout->segmentCount);
-    layout_sync_optional_values_by_usage(
-        hasPipStyles && hasCustomWidths,
-        &layout->pipWidthBySegment,
-        layout->segmentCount,
-        s_oneSegmentFlags,
-        1);
-    layout_sync_optional_values_by_usage(
-        hasPipStyles && hasCustomHeights,
-        &layout->pipHeightBySegment,
-        layout->segmentCount,
-        s_oneSegmentFlags,
-        1);
-    layout_sync_optional_values_by_usage(
-        hasPipStyles,
-        &layout->pipStateCountBySegment,
-        layout->segmentCount,
-        s_zeroSegmentFlags,
-        0);
-    layout_sync_optional_values_by_usage(
-        hasPipStyles && hasCustomCoverage,
-        &layout->pipStripCoverageBySegment,
-        layout->segmentCount,
-        s_zeroSegmentFlags,
-        GAUGE_STRIP_COVERAGE_FULL);
-    layout_sync_optional_values_by_usage(
-        hasPipStyles && hasCustomHalfAxis,
-        &layout->pipHalfAxisBySegment,
-        layout->segmentCount,
-        s_zeroSegmentFlags,
-        PIP_HALF_AXIS_HORIZONTAL);
-    layout_sync_optional_values_by_usage(
-        hasPipStyles && hasCustomSourceWidths,
-        &layout->pipSourceWidthBySegment,
-        layout->segmentCount,
-        s_oneSegmentFlags,
-        1);
-    layout_sync_optional_values_by_usage(
-        hasPipStyles && hasCustomSourceHeights,
-        &layout->pipSourceHeightBySegment,
-        layout->segmentCount,
-        s_oneSegmentFlags,
-        1);
+    if (!layout_sync_optional_segment_tilesets_by_usage(
+            hasPipStyles,
+            &layout->pipTilesetBySegment,
+            layout->segmentCount) ||
+        !layout_sync_optional_values_by_usage(
+            hasPipStyles && hasCustomWidths,
+            &layout->pipWidthBySegment,
+            layout->segmentCount,
+            s_oneSegmentFlags,
+            1) ||
+        !layout_sync_optional_values_by_usage(
+            hasPipStyles && hasCustomHeights,
+            &layout->pipHeightBySegment,
+            layout->segmentCount,
+            s_oneSegmentFlags,
+            1) ||
+        !layout_sync_optional_values_by_usage(
+            hasPipStyles,
+            &layout->pipStateCountBySegment,
+            layout->segmentCount,
+            s_zeroSegmentFlags,
+            0) ||
+        !layout_sync_optional_values_by_usage(
+            hasPipStyles && hasCustomCoverage,
+            &layout->pipStripCoverageBySegment,
+            layout->segmentCount,
+            s_zeroSegmentFlags,
+            GAUGE_STRIP_COVERAGE_FULL) ||
+        !layout_sync_optional_values_by_usage(
+            hasPipStyles && hasCustomHalfAxis,
+            &layout->pipHalfAxisBySegment,
+            layout->segmentCount,
+            s_zeroSegmentFlags,
+            PIP_HALF_AXIS_HORIZONTAL) ||
+        !layout_sync_optional_values_by_usage(
+            hasPipStyles && hasCustomSourceWidths,
+            &layout->pipSourceWidthBySegment,
+            layout->segmentCount,
+            s_oneSegmentFlags,
+            1) ||
+        !layout_sync_optional_values_by_usage(
+            hasPipStyles && hasCustomSourceHeights,
+            &layout->pipSourceHeightBySegment,
+            layout->segmentCount,
+            s_oneSegmentFlags,
+            1))
+    {
+        gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LAYOUT_BUILD);
+        return 0;
+    }
 
     for (u8 segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++)
         assign_pip_style_to_layout(layout, segmentIndex, &resolvedStyles[segmentIndex]);
@@ -2390,7 +2630,10 @@ static u8 build_lane_plan(const GaugeDefinition *definition,
                           GaugeBuildLanePlan *outPlan)
 {
     if (!definition || !lane || !baseLane || !outPlan)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_LANE);
         return 0;
+    }
 
     if (!validate_lane_segments(lane))
         return 0;
@@ -2400,7 +2643,10 @@ static u8 build_lane_plan(const GaugeDefinition *definition,
     const s16 originX = compute_lane_origin_axis(definition->originX, lane->offsetX);
     const s16 originY = compute_lane_origin_axis(definition->originY, lane->offsetY);
     if (originX < 0 || originY < 0)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_ORIGIN);
         return 0;
+    }
 
     outPlan->lane = lane;
     outPlan->laneIndex = laneIndex;
@@ -2433,6 +2679,7 @@ static u8 build_lane_plan(const GaugeDefinition *definition,
     if (definition->orientation == GAUGE_ORIENT_VERTICAL &&
         outPlan->originY < (u16)(outPlan->length - 1))
     {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_ORIGIN);
         return 0;
     }
 
@@ -2444,18 +2691,32 @@ static u8 build_layout_from_lane_plan(const GaugeDefinition *definition,
                                       GaugeLaneLayout **outLayout)
 {
     if (!definition || !lanePlan || !outLayout)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         return 0;
+    }
 
     GaugeLaneLayout *layout = (GaugeLaneLayout *)gauge_alloc_bytes((u16)sizeof(GaugeLaneLayout));
     if (!layout)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         return 0;
+    }
 
-    const u8 buildOk = (definition->mode == GAUGE_MODE_FILL)
-        ? build_fill_layout_direct(definition, lanePlan, layout)
-        : build_pip_layout_direct(definition, lanePlan, layout);
+    u8 buildOk = 0;
+    if (definition->mode == GAUGE_MODE_FILL)
+        buildOk = build_fill_layout_direct(definition, lanePlan, layout);
+    else if (definition->mode == GAUGE_MODE_PIP)
+        buildOk = build_pip_layout_direct(definition, lanePlan, layout);
+    else
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_MODE);
+        buildOk = 0;
+    }
 
     if (!buildOk)
     {
+        gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         release_built_layout(&layout);
         return 0;
     }
@@ -2503,7 +2764,10 @@ static u8 GaugeLaneInstance_initInternal(GaugeLaneInstance *lane,
                                          GaugeRuntimeArena *runtimeArena)
 {
     if (!lane || !gauge || !layout || !runtimeArena || layout->length == 0)
+    {
+        gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         return 0;
+    }
 
     lane->originX = originX;
     lane->originY = originY;
@@ -2525,6 +2789,7 @@ static u8 GaugeLaneInstance_initInternal(GaugeLaneInstance *lane,
         2);
     if (!lane->cells)
     {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_RUNTIME_ALLOC);
         GaugeLaneLayout_release(layout);
         return 0;
     }
@@ -2786,7 +3051,10 @@ static u8 gauge_build_lane_plans(GaugeBuildScratch *buildScratch,
             continue;
 
         if (laneCount >= GAUGE_MAX_LANES)
+        {
+            gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_LANE);
             return 0;
+        }
 
         if (!build_lane_plan(sanitized,
                              laneIndex,
@@ -2804,7 +3072,10 @@ static u8 gauge_build_lane_plans(GaugeBuildScratch *buildScratch,
     }
 
     if (laneCount == 0)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_NO_BASE_LANE);
         return 0;
+    }
 
     outBuildContext->sanitized = sanitized;
     outBuildContext->lanePlans = lanePlans;
@@ -2829,6 +3100,7 @@ static u8 gauge_build_layouts(GaugeInitBuildContext *buildContext)
                                          &lanePlans[laneIndex],
                                          &builtLayouts[laneIndex]))
         {
+            gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LAYOUT_BUILD);
             return 0;
         }
     }
@@ -2843,7 +3115,10 @@ static u8 gauge_build_layouts(GaugeInitBuildContext *buildContext)
     }
 
     if (buildContext->baseLaneRuntimeIndex == CACHE_INVALID_U8)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_NO_BASE_LANE);
         return 0;
+    }
 
     GaugeLaneLayout *baseLayout = builtLayouts[buildContext->baseLaneRuntimeIndex];
     const u16 maxFillPixels = (sanitized->mode == GAUGE_MODE_PIP)
@@ -2860,7 +3135,10 @@ static u8 gauge_build_layouts(GaugeInitBuildContext *buildContext)
     resolvedMaxValue = clamp_max_value_to_capacity(resolvedMaxValue);
 
     if (maxFillPixels == 0 || resolvedMaxValue == 0)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         return 0;
+    }
 
     buildContext->baseLayout = baseLayout;
     buildContext->maxFillPixels = maxFillPixels;
@@ -2891,7 +3169,10 @@ static u8 gauge_allocate_runtime(const GaugeInitBuildContext *buildContext,
 
     void *runtimeArenaMemory = gauge_alloc_bytes(runtimeArenaBytes);
     if (!runtimeArenaMemory)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_RUNTIME_ALLOC);
         return 0;
+    }
 
     outRuntimeContext->runtimeArenaMemory = runtimeArenaMemory;
     gauge_runtime_arena_init(&outRuntimeContext->runtimeArena,
@@ -2930,6 +3211,7 @@ static u8 gauge_allocate_runtime(const GaugeInitBuildContext *buildContext,
         (buildContext->valueMode == GAUGE_VALUE_MODE_PIP &&
          !outRuntimeContext->pixelsToQuantizedPixelsLUT))
     {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_RUNTIME_ALLOC);
         gauge_free_ptr(&outRuntimeContext->runtimeArenaMemory);
         return 0;
     }
@@ -2939,7 +3221,8 @@ static u8 gauge_allocate_runtime(const GaugeInitBuildContext *buildContext,
 
 static void gauge_init_logic_runtime(Gauge *gauge,
                                      const GaugeInitBuildContext *buildContext,
-                                     GaugeInitRuntimeContext *runtimeContext)
+                                     GaugeInitRuntimeContext *runtimeContext,
+                                     u16 vramBase)
 {
     const u16 *valueToPixelsLUT = NULL;
     if (buildContext->valueMode == GAUGE_VALUE_MODE_PIP)
@@ -2958,6 +3241,7 @@ static void gauge_init_logic_runtime(Gauge *gauge,
             valueToPixelsLUT = runtimeContext->valueToPixelsData;
     }
 
+    gauge->vramBase = vramBase;
     gauge->lanes = runtimeContext->lanes;
     gauge->laneCount = buildContext->laneCount;
     gauge->baseLaneIndex = buildContext->baseLaneRuntimeIndex;
@@ -3007,6 +3291,7 @@ static u8 gauge_init_lane_instances(Gauge *gauge,
                                             nextVram,
                                             &runtimeContext->runtimeArena))
         {
+            gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_RUNTIME_ALLOC);
             return 0;
         }
 
@@ -3042,29 +3327,58 @@ static u8 gauge_init_runtime(Gauge *gauge,
     GaugeInitBuildContext buildContext;
     GaugeInitRuntimeContext runtimeContext;
 
-    if (!gauge || !definition)
+    if (!gauge)
+    {
+        gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_GAUGE_ALLOC);
         return 0;
+    }
+    if (!definition)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_NULL_DEFINITION);
+        return 0;
+    }
 
     memset(gauge, 0, sizeof(*gauge));
     memset(&s_buildScratch, 0, sizeof(s_buildScratch));
     memset(&buildContext, 0, sizeof(buildContext));
     memset(&runtimeContext, 0, sizeof(runtimeContext));
 
+    /* Build phases:
+     * 1. sanitize inputs
+     * 2. validate definition and build lane plans
+     * 3. build per-lane layouts
+     * 4. allocate the runtime arena
+     * 5. initialize logic runtime
+     * 6. initialize lane instances
+     * 7. finalize projection maps and derived ownership state
+     */
     gauge_sanitize_definition(definition, &s_buildScratch.sanitizedDefinition);
 
     if (!gauge_build_lane_plans(&s_buildScratch, &buildContext))
+    {
+        gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_INVALID_LANE);
         goto fail_before_runtime_attach;
+    }
 
     if (!gauge_build_layouts(&buildContext))
+    {
+        gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         goto fail_before_runtime_attach;
+    }
 
     if (!gauge_allocate_runtime(&buildContext, &runtimeContext))
+    {
+        gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_RUNTIME_ALLOC);
         goto fail_before_runtime_attach;
+    }
 
-    gauge_init_logic_runtime(gauge, &buildContext, &runtimeContext);
+    gauge_init_logic_runtime(gauge, &buildContext, &runtimeContext, vramBase);
 
     if (!gauge_init_lane_instances(gauge, vramBase, &buildContext, &runtimeContext))
+    {
+        gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_RUNTIME_ALLOC);
         goto fail_after_runtime_attach;
+    }
 
     gauge_finalize_build(gauge);
     return 1;
@@ -3588,7 +3902,10 @@ static u8 layout_ensure_segment_tileset_storage(const u32 ***segmentTilesetsBySe
                                                 u8 segmentCount)
 {
     if (!segmentTilesetsBySegment)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         return 0;
+    }
 
     if (*segmentTilesetsBySegment != NULL &&
         *segmentTilesetsBySegment != s_nullSegmentTilesets)
@@ -3600,6 +3917,7 @@ static u8 layout_ensure_segment_tileset_storage(const u32 ***segmentTilesetsBySe
         (u16)(segmentCount * (u8)sizeof(const u32 *)));
     if (!allocatedTilesets)
     {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         *segmentTilesetsBySegment = (const u32 **)s_nullSegmentTilesets;
         return 0;
     }
@@ -3614,7 +3932,10 @@ static u8 layout_ensure_optional_values(u8 **values,
                                         u8 defaultValue)
 {
     if (!values)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         return 0;
+    }
 
     if (*values != NULL && *values != defaultValues)
         return 1;
@@ -3622,6 +3943,7 @@ static u8 layout_ensure_optional_values(u8 **values,
     u8 *allocatedValues = (u8 *)gauge_alloc_bytes(valueCount);
     if (!allocatedValues)
     {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         *values = (u8 *)defaultValues;
         return 0;
     }
@@ -3636,7 +3958,10 @@ static u8 layout_sync_optional_segment_tilesets_by_usage(u8 hasAny,
                                                           u8 segmentCount)
 {
     if (!segmentTilesetsBySegment)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         return 0;
+    }
 
     if (!hasAny)
     {
@@ -3661,7 +3986,10 @@ static u8 layout_sync_optional_values_by_usage(u8 hasAny,
                                                u8 defaultValue)
 {
     if (!values)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         return 0;
+    }
 
     if (!hasAny)
     {
@@ -4070,8 +4398,10 @@ static u8 layout_alloc_buffers(GaugeLaneLayout *layout, u8 length, u8 segmentCou
  * This constructor-like helper seeds the fill-order mappings, plane/orientation
  * flags, default tileset views, and the optional-pointer state required before
  * fill- or pip-specific population can extend the layout.
+ *
+ * @return 1 on success, 0 if required core layout storage could not be prepared.
  */
-static void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
+static u8 GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
                                    u8 length,
                                    GaugeFillDirection fillDirection,
                                    const u32 * const *bodyTilesets,
@@ -4087,7 +4417,10 @@ static void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
                                    u8 horizontalFlip)
 {
     if (!layout)
-        return;
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_LAYOUT_BUILD);
+        return 0;
+    }
 
     /* Validate and clamp length */
     if (length == 0) length = 1;
@@ -4109,29 +4442,37 @@ static void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
 
     /* Rebuild layout state from scratch (layout must not be retained while rebuilt). */
     if (layout->refCount != 0)
-        return;
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_LAYOUT_BUILD);
+        return 0;
+    }
     layout_free_buffers(layout);
     if (!layout_alloc_buffers(layout, length, segmentCount))
-        return;
+    {
+        gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LAYOUT_BUILD);
+        return 0;
+    }
 
     layout->fillOffset = 0;
     layout->endOverrideEnabled = 1;
     layout->refCount = 0;
 
-    layout_sync_optional_segment_tilesets_by_usage(
-        segment_tileset_array_has_any(endTilesets, layout->segmentCount),
-        &layout->tilesetEndBySegment,
-        layout->segmentCount);
-
-    layout_sync_optional_segment_tilesets_by_usage(
-        segment_tileset_array_has_any(trailTilesets, layout->segmentCount),
-        &layout->tilesetTrailBySegment,
-        layout->segmentCount);
-
-    layout_sync_optional_segment_tilesets_by_usage(
-        segment_tileset_array_has_any(bridgeTilesets, layout->segmentCount),
-        &layout->tilesetBridgeBySegment,
-        layout->segmentCount);
+    if (!layout_sync_optional_segment_tilesets_by_usage(
+            segment_tileset_array_has_any(endTilesets, layout->segmentCount),
+            &layout->tilesetEndBySegment,
+            layout->segmentCount) ||
+        !layout_sync_optional_segment_tilesets_by_usage(
+            segment_tileset_array_has_any(trailTilesets, layout->segmentCount),
+            &layout->tilesetTrailBySegment,
+            layout->segmentCount) ||
+        !layout_sync_optional_segment_tilesets_by_usage(
+            segment_tileset_array_has_any(bridgeTilesets, layout->segmentCount),
+            &layout->tilesetBridgeBySegment,
+            layout->segmentCount))
+    {
+        gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LAYOUT_BUILD);
+        return 0;
+    }
 
     /* Copy mandatory BODY tilesets. */
     for (u8 i = 0; i < layout->segmentCount; i++)
@@ -4164,6 +4505,7 @@ static void GaugeLaneLayout_initEx(GaugeLaneLayout *layout,
 
     /* Direct layout builders refresh these cached flags after optional tilesets are wired. */
     layout_zero_optional_flags(layout);
+    return 1;
 }
 
 static void GaugeLaneLayout_applyFillDirection(GaugeLaneLayout *layout,
@@ -4230,13 +4572,16 @@ static inline u8 usage_flag_for_slot(const SkinSetUsageFlags *usageFlags,
         : ((const u8 *)usageFlags)[slot];
 }
 
-static void sync_layout_tileset_group_slots_from_usage(GaugeLaneLayout *layout,
+static u8 sync_layout_tileset_group_slots_from_usage(GaugeLaneLayout *layout,
                                                        LayoutTilesetGroupId group,
                                                        const SkinSetUsageFlags *usageFlags,
                                                        LayoutTilesetSlotMask slotMask)
 {
     if (!layout || !usageFlags)
-        return;
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_LAYOUT_BUILD);
+        return 0;
+    }
 
     for (u8 slot = 0; slot < LAYOUT_TILESET_SLOT_COUNT; slot++)
     {
@@ -4251,26 +4596,51 @@ static void sync_layout_tileset_group_slots_from_usage(GaugeLaneLayout *layout,
         if (!targetField)
             continue;
 
-        layout_sync_optional_segment_tilesets_by_usage(
-            usage_flag_for_slot(usageFlags, slotId),
-            targetField,
-            layout->segmentCount);
+        if (!layout_sync_optional_segment_tilesets_by_usage(
+                usage_flag_for_slot(usageFlags, slotId),
+                targetField,
+                layout->segmentCount))
+        {
+            gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LAYOUT_BUILD);
+            return 0;
+        }
     }
+
+    return 1;
 }
 
-static void sync_base_allocations(GaugeLaneLayout *layout,
+static u8 sync_base_allocations(GaugeLaneLayout *layout,
                                   const SkinSetUsageFlags *f,
                                   u8 hasCapEndFlags)
 {
+    if (!layout || !f)
+    {
+        gauge_set_last_build_error(GAUGE_BUILD_ERR_LAYOUT_BUILD);
+        return 0;
+    }
+
     const u8 sc = layout->segmentCount;
 
-    sync_layout_tileset_group_slots_from_usage(layout,
-                                               LAYOUT_TILESET_GROUP_BASE,
-                                               f,
-                                               LAYOUT_TILESET_SLOT_MASK_ALL);
+    if (!sync_layout_tileset_group_slots_from_usage(layout,
+                                                    LAYOUT_TILESET_GROUP_BASE,
+                                                    f,
+                                                    LAYOUT_TILESET_SLOT_MASK_ALL))
+    {
+        gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LAYOUT_BUILD);
+        return 0;
+    }
 
-    layout_sync_optional_values_by_usage(hasCapEndFlags,
-        &layout->capEndBySegment, sc, s_zeroSegmentFlags, 0);
+    if (!layout_sync_optional_values_by_usage(hasCapEndFlags,
+                                              &layout->capEndBySegment,
+                                              sc,
+                                              s_zeroSegmentFlags,
+                                              0))
+    {
+        gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LAYOUT_BUILD);
+        return 0;
+    }
+
+    return 1;
 }
 
 static void finalize_layout_derived_state(GaugeLaneLayout *layout)
@@ -4364,7 +4734,7 @@ static void fill_pip_value_lut(u16 *dest, u16 maxValue, const GaugeLaneLayout *l
 
 
 /**
- * GC-LOG-21 Logic construction helpers.
+ * GC-LOG-31 Logic construction helpers.
  *
  * GaugeLogic_init() and GaugeLogic_initWithAnim() establish the baseline state
  * of the runtime logic object before authored behavior is applied.
@@ -4728,7 +5098,7 @@ static inline u8 compute_trail_enabled(GaugeTrailMode trailMode, GaugeGainMode g
     return (trail_mode_enables_trail(trailMode) || gain_mode_uses_trail(gainMode)) ? 1 : 0;
 }
 
-static inline void reset_follow_mode_state(GaugeLogic *logic)
+static inline void gauge_reset_transition_to_idle(GaugeLogic *logic)
 {
     logic->trailPixels = logic->valuePixels;
     logic->holdFramesRemaining = 0;
@@ -4741,7 +5111,7 @@ static inline void apply_configured_trail_mode_state(GaugeLogic *logic, u8 advan
 {
     if ((GaugeTrailMode)logic->configuredTrailMode == GAUGE_TRAIL_MODE_FOLLOW)
     {
-        reset_follow_mode_state(logic);
+        gauge_reset_transition_to_idle(logic);
         return;
     }
 
@@ -4929,6 +5299,51 @@ static inline void gauge_begin_gain_transition(GaugeLogic *logic,
     logic->blinkFramesRemaining = blinkFrames;
     logic->blinkTimer = 0;
     logic->activeTrailState = GAUGE_TRAIL_STATE_GAIN;
+}
+
+/* Apply the public decrease/increase requests once the new logical target is known.
+ * These helpers keep the wrapper API short while preserving explicit follow vs.
+ * non-follow behavior in one place. */
+static inline void gauge_apply_damage_target_change(Gauge *gauge,
+                                                    GaugeLogic *logic,
+                                                    u16 newValue,
+                                                    u8 holdFrames,
+                                                    u8 blinkFrames)
+{
+    logic->needUpdate = 1;
+    gauge_set_current_value_and_target(logic, newValue, !logic->valueAnimEnabled);
+
+    if (gauge->logicTickHandler != GaugeLogic_tick_follow_mode)
+    {
+        apply_non_follow_trail_mode_state(logic, 0);
+        return;
+    }
+
+    gauge_begin_damage_transition(logic, holdFrames, blinkFrames);
+}
+
+static inline void gauge_apply_gain_target_change(GaugeLogic *logic,
+                                                  u16 newValue,
+                                                  u8 holdFrames,
+                                                  u8 blinkFrames)
+{
+    logic->needUpdate = 1;
+    gauge_set_current_value_and_target(logic, newValue, !logic->valueAnimEnabled);
+
+    if ((GaugeGainMode)logic->configuredGainMode == GAUGE_GAIN_MODE_FOLLOW &&
+        logic->valueAnimEnabled)
+    {
+        gauge_begin_gain_transition(logic, holdFrames, blinkFrames);
+        return;
+    }
+
+    if ((GaugeTrailMode)logic->configuredTrailMode == GAUGE_TRAIL_MODE_FOLLOW)
+    {
+        gauge_reset_transition_to_idle(logic);
+        return;
+    }
+
+    apply_non_follow_trail_mode_state(logic, 0);
 }
 
 /* =============================================================================
@@ -7101,58 +7516,196 @@ static inline const u32 *resolve_layout_mode_strip(const GaugeLaneLayout *layout
         : select_base_strip(normalStrip, gainStrip, trailMode);
 }
 
+static inline const u32 *layout_get_body_strip(const GaugeLaneLayout *layout,
+                                                      u8 segmentId,
+                                                      u8 trailMode,
+                                                      u8 useBlinkVariant)
+{
+    return useBlinkVariant
+        ? resolve_layout_mode_strip(layout,
+                                    LAYOUT_TILESET_GROUP_BLINK,
+                                    LAYOUT_TILESET_GROUP_GAIN_BLINK,
+                                    LAYOUT_TILESET_SLOT_BODY,
+                                    segmentId,
+                                    trailMode,
+                                    1)
+        : resolve_layout_mode_strip(layout,
+                                    LAYOUT_TILESET_GROUP_BASE,
+                                    LAYOUT_TILESET_GROUP_GAIN,
+                                    LAYOUT_TILESET_SLOT_BODY,
+                                    segmentId,
+                                    trailMode,
+                                    0);
+}
+
+static inline const u32 *layout_get_end_strip(const GaugeLaneLayout *layout,
+                                             u8 segmentId,
+                                             u8 trailMode,
+                                             u8 useBlinkVariant)
+{
+    return useBlinkVariant
+        ? resolve_layout_mode_strip(layout,
+                                    LAYOUT_TILESET_GROUP_BLINK,
+                                    LAYOUT_TILESET_GROUP_GAIN_BLINK,
+                                    LAYOUT_TILESET_SLOT_END,
+                                    segmentId,
+                                    trailMode,
+                                    1)
+        : resolve_layout_mode_strip(layout,
+                                    LAYOUT_TILESET_GROUP_BASE,
+                                    LAYOUT_TILESET_GROUP_GAIN,
+                                    LAYOUT_TILESET_SLOT_END,
+                                    segmentId,
+                                    trailMode,
+                                    0);
+}
+
+static inline const u32 *layout_get_trail_strip(const GaugeLaneLayout *layout,
+                                               u8 segmentId,
+                                               u8 trailMode,
+                                               u8 useBlinkVariant)
+{
+    return useBlinkVariant
+        ? resolve_layout_mode_strip(layout,
+                                    LAYOUT_TILESET_GROUP_BLINK,
+                                    LAYOUT_TILESET_GROUP_GAIN_BLINK,
+                                    LAYOUT_TILESET_SLOT_TRAIL,
+                                    segmentId,
+                                    trailMode,
+                                    1)
+        : resolve_layout_mode_strip(layout,
+                                    LAYOUT_TILESET_GROUP_BASE,
+                                    LAYOUT_TILESET_GROUP_GAIN,
+                                    LAYOUT_TILESET_SLOT_TRAIL,
+                                    segmentId,
+                                    trailMode,
+                                    0);
+}
+
+static inline const u32 *layout_get_bridge_strip(const GaugeLaneLayout *layout,
+                                                u8 segmentId,
+                                                u8 trailMode,
+                                                u8 useBlinkVariant)
+{
+    return useBlinkVariant
+        ? resolve_layout_mode_strip(layout,
+                                    LAYOUT_TILESET_GROUP_BLINK,
+                                    LAYOUT_TILESET_GROUP_GAIN_BLINK,
+                                    LAYOUT_TILESET_SLOT_BRIDGE,
+                                    segmentId,
+                                    trailMode,
+                                    1)
+        : resolve_layout_mode_strip(layout,
+                                    LAYOUT_TILESET_GROUP_BASE,
+                                    LAYOUT_TILESET_GROUP_GAIN,
+                                    LAYOUT_TILESET_SLOT_BRIDGE,
+                                    segmentId,
+                                    trailMode,
+                                    0);
+}
+
+static inline const u32 *layout_get_cap_start_strip(const GaugeLaneLayout *layout,
+                                                   u8 segmentId,
+                                                   u8 trailMode,
+                                                   u8 useBlinkVariant)
+{
+    return useBlinkVariant
+        ? resolve_layout_mode_strip(layout,
+                                    LAYOUT_TILESET_GROUP_BLINK,
+                                    LAYOUT_TILESET_GROUP_GAIN_BLINK,
+                                    LAYOUT_TILESET_SLOT_CAP_START,
+                                    segmentId,
+                                    trailMode,
+                                    1)
+        : resolve_layout_mode_strip(layout,
+                                    LAYOUT_TILESET_GROUP_BASE,
+                                    LAYOUT_TILESET_GROUP_GAIN,
+                                    LAYOUT_TILESET_SLOT_CAP_START,
+                                    segmentId,
+                                    trailMode,
+                                    0);
+}
+
+static inline const u32 *layout_get_cap_start_break_strip(const GaugeLaneLayout *layout,
+                                                         u8 segmentId,
+                                                         u8 trailMode,
+                                                         u8 useBlinkVariant)
+{
+    return useBlinkVariant
+        ? resolve_layout_mode_strip(layout,
+                                    LAYOUT_TILESET_GROUP_BLINK,
+                                    LAYOUT_TILESET_GROUP_GAIN_BLINK,
+                                    LAYOUT_TILESET_SLOT_CAP_START_BREAK,
+                                    segmentId,
+                                    trailMode,
+                                    1)
+        : resolve_layout_mode_strip(layout,
+                                    LAYOUT_TILESET_GROUP_BASE,
+                                    LAYOUT_TILESET_GROUP_GAIN,
+                                    LAYOUT_TILESET_SLOT_CAP_START_BREAK,
+                                    segmentId,
+                                    trailMode,
+                                    0);
+}
+
+static inline const u32 *layout_get_cap_start_trail_strip(const GaugeLaneLayout *layout,
+                                                         u8 segmentId,
+                                                         u8 trailMode,
+                                                         u8 useBlinkVariant)
+{
+    return useBlinkVariant
+        ? resolve_layout_mode_strip(layout,
+                                    LAYOUT_TILESET_GROUP_BLINK,
+                                    LAYOUT_TILESET_GROUP_GAIN_BLINK,
+                                    LAYOUT_TILESET_SLOT_CAP_START_TRAIL,
+                                    segmentId,
+                                    trailMode,
+                                    1)
+        : resolve_layout_mode_strip(layout,
+                                    LAYOUT_TILESET_GROUP_BASE,
+                                    LAYOUT_TILESET_GROUP_GAIN,
+                                    LAYOUT_TILESET_SLOT_CAP_START_TRAIL,
+                                    segmentId,
+                                    trailMode,
+                                    0);
+}
+
+static inline const u32 *layout_get_cap_end_strip(const GaugeLaneLayout *layout,
+                                                 u8 segmentId,
+                                                 u8 trailMode,
+                                                 u8 useBlinkVariant)
+{
+    return useBlinkVariant
+        ? resolve_layout_mode_strip(layout,
+                                    LAYOUT_TILESET_GROUP_BLINK,
+                                    LAYOUT_TILESET_GROUP_GAIN_BLINK,
+                                    LAYOUT_TILESET_SLOT_CAP_END,
+                                    segmentId,
+                                    trailMode,
+                                    1)
+        : resolve_layout_mode_strip(layout,
+                                    LAYOUT_TILESET_GROUP_BASE,
+                                    LAYOUT_TILESET_GROUP_GAIN,
+                                    LAYOUT_TILESET_SLOT_CAP_END,
+                                    segmentId,
+                                    trailMode,
+                                    0);
+}
+
 static inline void build_local_strip_set(const GaugeLaneLayout *layout,
                                          u8 segmentId,
                                          u8 trailMode,
                                          u8 useBlinkVariant,
                                          LocalStripSet *set)
 {
-    static const LayoutTilesetSlot s_localStripSlots[] = {
-        LAYOUT_TILESET_SLOT_BODY,
-        LAYOUT_TILESET_SLOT_END,
-        LAYOUT_TILESET_SLOT_TRAIL,
-        LAYOUT_TILESET_SLOT_BRIDGE,
-        LAYOUT_TILESET_SLOT_CAP_START,
-        LAYOUT_TILESET_SLOT_CAP_START_BREAK,
-        LAYOUT_TILESET_SLOT_CAP_START_TRAIL,
-        LAYOUT_TILESET_SLOT_CAP_END
-    };
-    const u32 **slotTargets[] = {
-        &set->body,
-        &set->end,
-        &set->trail,
-        &set->bridge,
-        &set->capStart,
-        &set->capStartBreak,
-        &set->capStartTrail,
-        &set->capEnd
-    };
-
-    for (u8 slotIndex = 0; slotIndex < GAUGE_ARRAY_LEN(s_localStripSlots); slotIndex++)
-    {
-        const LayoutTilesetSlot slot = s_localStripSlots[slotIndex];
-        *slotTargets[slotIndex] = resolve_layout_mode_strip(layout,
-                                                            LAYOUT_TILESET_GROUP_BASE,
-                                                            LAYOUT_TILESET_GROUP_GAIN,
-                                                            slot,
-                                                            segmentId,
-                                                            trailMode,
-                                                            0);
-
-        if (!useBlinkVariant)
-            continue;
-
-        const u32 *blinkStrip = resolve_layout_mode_strip(layout,
-                                                          LAYOUT_TILESET_GROUP_BLINK,
-                                                          LAYOUT_TILESET_GROUP_GAIN_BLINK,
-                                                          slot,
-                                                          segmentId,
-                                                          trailMode,
-                                                          1);
-        if (blinkStrip)
-            *slotTargets[slotIndex] = blinkStrip;
-    }
-
+    set->body = layout_get_body_strip(layout, segmentId, trailMode, useBlinkVariant);
+    set->end = layout_get_end_strip(layout, segmentId, trailMode, useBlinkVariant);
+    set->trail = layout_get_trail_strip(layout, segmentId, trailMode, useBlinkVariant);
+    set->bridge = layout_get_bridge_strip(layout, segmentId, trailMode, useBlinkVariant);
+    set->capStart = layout_get_cap_start_strip(layout, segmentId, trailMode, useBlinkVariant);
+    set->capStartBreak = layout_get_cap_start_break_strip(layout, segmentId, trailMode, useBlinkVariant);
+    set->capStartTrail = layout_get_cap_start_trail_strip(layout, segmentId, trailMode, useBlinkVariant);
+    set->capEnd = layout_get_cap_end_strip(layout, segmentId, trailMode, useBlinkVariant);
     set->valid = 1;
 }
 

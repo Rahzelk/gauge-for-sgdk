@@ -127,6 +127,23 @@ typedef enum
     GAUGE_GAIN_MODE_RESERVED_2 = 3
 } GaugeGainMode;
 
+/* Result code of the most recent Gauge_init() call. */
+typedef enum
+{
+    GAUGE_BUILD_OK = 0,
+    GAUGE_BUILD_ERR_NULL_DEFINITION,
+    GAUGE_BUILD_ERR_GAUGE_ALLOC,
+    GAUGE_BUILD_ERR_INVALID_MODE,
+    GAUGE_BUILD_ERR_INVALID_LANE,
+    GAUGE_BUILD_ERR_LANE_HOLE,
+    GAUGE_BUILD_ERR_LANE_WINDOW,
+    GAUGE_BUILD_ERR_NO_BASE_LANE,
+    GAUGE_BUILD_ERR_INVALID_SEGMENT,
+    GAUGE_BUILD_ERR_INVALID_ORIGIN,
+    GAUGE_BUILD_ERR_LAYOUT_BUILD,
+    GAUGE_BUILD_ERR_RUNTIME_ALLOC
+} GaugeBuildError;
+
 /* -----------------------------------------------------------------------------
    GH-30 Public Build-Time Data Structures
    ----------------------------------------------------------------------------- */
@@ -263,9 +280,25 @@ typedef struct
  * @param definition Public authored build description.
  * @param vramBase   First VRAM tile reserved for this gauge.
  * @return Heap-allocated opaque Gauge handle, or NULL on validation/allocation failure.
+ *         When NULL is returned, call Gauge_getLastBuildError() or
+ *         Gauge_getLastBuildErrorText() to inspect the failure reason.
  */
 Gauge *Gauge_init(const GaugeDefinition *definition,
                   u16 vramBase);
+
+/**
+ * Read the result code of the most recent Gauge_init() attempt.
+ *
+ * @return Last build result recorded by the module.
+ */
+GaugeBuildError Gauge_getLastBuildError(void);
+
+/**
+ * Read a short human-readable description of the most recent build result.
+ *
+ * @return Stable text for the last Gauge_init() result.
+ */
+const char *Gauge_getLastBuildErrorText(void);
 
 /**
  * Tick the gauge logic and render every lane once.
