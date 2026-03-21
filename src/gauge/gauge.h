@@ -29,11 +29,8 @@
    - PIP mode renders discrete steps through compact authored states.
    - The module owns the VRAM layout internally; callers only provide the first
      VRAM tile index reserved for the gauge.
-
-   Fixed-only note:
-   - Older revisions also had a dynamic VRAM path. The current module keeps a
-     single fixed VRAM strategy because it was simpler, more predictable, and
-     not slower in the representative gauges kept in this repository.
+   - Build and runtime stay intentionally separate: Gauge_init() performs the
+     expensive validation/build work once, then Gauge_update() stays allocation-free.
    ============================================================================= */
 
 /* -----------------------------------------------------------------------------
@@ -296,7 +293,9 @@ GaugeBuildError Gauge_getLastBuildError(void);
 /**
  * Read a short human-readable description of the most recent build result.
  *
- * @return Stable text for the last Gauge_init() result.
+ * @return Stable text for the last Gauge_init() result. When a build stage
+ *         identified a precise source, the text may include a lane/segment
+ *         suffix such as "lane 2, segment 1".
  */
 const char *Gauge_getLastBuildErrorText(void);
 

@@ -2,6 +2,27 @@
 #include "showcase_internal.h"
 #include "gauge_assets.h"
 
+/* Local externs for bevelback assets.
+ * These TILESET entries live in gauge_assets.res but may not appear yet in the
+ * generated gauge_assets.h until SGDK regenerates that header. Keeping the
+ * declarations local lets showcase_data.c reference the new assets immediately
+ * without editing generated files by hand.
+ */
+extern const TileSet gauge_h_bevelback_lightblue_strip_body;
+extern const TileSet gauge_h_bevelback_lightblue_strip_end;
+extern const TileSet gauge_h_bevelback_lightblue_strip_trail;
+extern const TileSet gauge_h_bevelback_lightblue_to_blue_strip_bridge;
+extern const TileSet gauge_h_bevelback_lightblue_gain_strip_body;
+extern const TileSet gauge_h_bevelback_lightblue_gain_strip_end;
+extern const TileSet gauge_h_bevelback_lightblue_gain_strip_trail;
+extern const TileSet gauge_h_bevelback_lightblue_gain_to_blue_strip_bridge;
+extern const TileSet gauge_h_bevelback_blue_strip_body;
+extern const TileSet gauge_h_bevelback_blue_strip_end;
+extern const TileSet gauge_h_bevelback_blue_strip_trail;
+extern const TileSet gauge_h_bevelback_blue_gain_strip_body;
+extern const TileSet gauge_h_bevelback_blue_gain_strip_end;
+extern const TileSet gauge_h_bevelback_blue_gain_strip_trail;
+
 /* =============================================================================
    Gauge showcase data
    ============================================================================= */
@@ -100,6 +121,38 @@ static const GaugeSkin g_skinBevelYellow = {
             .body = &gauge_h_bevel_yellow_gain_strip_body,
             .trail = &gauge_h_bevel_yellow_gain_strip_trail,
             .end = &gauge_h_bevel_yellow_gain_strip_end
+        }
+    }
+};
+
+static const GaugeSkin g_skinBevelbackLightBlue = {
+    .fill = {
+        .normal = {
+            .body = &gauge_h_bevelback_lightblue_strip_body,
+            .trail = &gauge_h_bevelback_lightblue_strip_trail,
+            .end = &gauge_h_bevelback_lightblue_strip_end,
+            .bridge = &gauge_h_bevelback_lightblue_to_blue_strip_bridge
+        },
+        .gain = {
+            .body = &gauge_h_bevelback_lightblue_gain_strip_body,
+            .trail = &gauge_h_bevelback_lightblue_gain_strip_trail,
+            .end = &gauge_h_bevelback_lightblue_gain_strip_end,
+            .bridge = &gauge_h_bevelback_lightblue_gain_to_blue_strip_bridge
+        }
+    }
+};
+
+static const GaugeSkin g_skinBevelbackBlue = {
+    .fill = {
+        .normal = {
+            .body = &gauge_h_bevelback_blue_strip_body,
+            .trail = &gauge_h_bevelback_blue_strip_trail,
+            .end = &gauge_h_bevelback_blue_strip_end
+        },
+        .gain = {
+            .body = &gauge_h_bevelback_blue_gain_strip_body,
+            .trail = &gauge_h_bevelback_blue_gain_strip_trail,
+            .end = &gauge_h_bevelback_blue_gain_strip_end
         }
     }
 };
@@ -689,6 +742,61 @@ static const GaugeDefinition g_screen2ThreeLanesDefinition = {
     }
 };
 
+static const GaugeDefinition g_screen2BevelbackLightBlueDefinition = {
+    .mode = GAUGE_MODE_FILL,
+    .plane = WINDOW,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .originX = 3,
+    .originY = 23,
+    .maxValue = 96,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 12, .skin = &g_skinBevelbackLightBlue }
+            }
+        }
+    },
+    .behavior = {
+        DEMO_DEFAULT_BEHAVIOR_TIMINGS,
+        .valueAnimEnabled = 1,
+        .valueAnimShift = 2,
+        .damageMode = GAUGE_TRAIL_MODE_FOLLOW,
+        .gainMode = GAUGE_GAIN_MODE_FOLLOW,
+        .gainAnimShift = 3
+    }
+};
+
+static const GaugeDefinition g_screen2BevelbackBridgeDefinition = {
+    .mode = GAUGE_MODE_FILL,
+    .plane = WINDOW,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .originX = 22,
+    .originY = 23,
+    .maxValue = 96,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 6, .skin = &g_skinBevelbackLightBlue },
+                { .cells = 6, .skin = &g_skinBevelbackBlue }
+            }
+        }
+    },
+    .behavior = {
+        DEMO_DEFAULT_BEHAVIOR_TIMINGS,
+        .valueAnimEnabled = 1,
+        .valueAnimShift = 2,
+        .damageMode = GAUGE_TRAIL_MODE_FOLLOW,
+        .gainMode = GAUGE_GAIN_MODE_FOLLOW,
+        .gainAnimShift = 3
+    }
+};
+
 static const DemoCaseSource g_screen2Cases[] = {
     {
         .descriptionLine1 = "Bevel skin shows body, trail, end.",
@@ -760,6 +868,30 @@ static const DemoCaseSource g_screen2Cases[] = {
         .gaugeCount = 1,
         .gauges = {
             { .definition = &g_screen2LowerBridgeDefinition }
+        }
+    },
+    {
+        .descriptionLine1 = "Bevelback lightblue uses gain strips.",
+        .descriptionLine2 = "Increase to inspect the gain family.",
+        .descriptionLine3 = "Check bevelback body, trail, and end.",
+        .cursorTileX = 1,
+        .cursorTileY = 23,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen2BevelbackLightBlueDefinition }
+        }
+    },
+    {
+        .descriptionLine1 = "Bevelback lightblue bridges into blue.",
+        .descriptionLine2 = "Increase to inspect the gain bridge.",
+        .descriptionLine3 = "Check segment order and bridge strips.",
+        .cursorTileX = 20,
+        .cursorTileY = 23,
+        .stepAmount = DEMO_FILL_STEP,
+        .gaugeCount = 1,
+        .gauges = {
+            { .definition = &g_screen2BevelbackBridgeDefinition }
         }
     }
 };

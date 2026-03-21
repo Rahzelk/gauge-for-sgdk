@@ -303,6 +303,9 @@ struct Gauge
     u16 vramNextOffset;
 };
 
+/* One built lane layout shared by runtime lanes.
+ * The fields stay explicit on purpose: the render paths read them directly and
+ * avoid generic indirection on the hot path. */
 struct GaugeLaneLayout
 {
     /* Identity, dimensions, and lane-global render flags. */
@@ -753,6 +756,39 @@ static GaugeBuildScratch s_buildScratch;
 
 /* Last Gauge_init() diagnostic, updated on every build attempt. */
 static GaugeBuildError s_lastBuildError = GAUGE_BUILD_OK;
+static char s_lastBuildErrorTextBuffer[96];
+
+typedef enum
+{
+    GAUGE_BUILD_REASON_NONE = 0,
+    GAUGE_BUILD_REASON_SEGMENT_PAIRING,
+    GAUGE_BUILD_REASON_SEGMENT_HOLE,
+    GAUGE_BUILD_REASON_EMPTY_LANE_SPAN,
+    GAUGE_BUILD_REASON_WINDOW_OUT_OF_RANGE,
+    GAUGE_BUILD_REASON_NEGATIVE_ORIGIN,
+    GAUGE_BUILD_REASON_VERTICAL_ORIGIN_UNDERFLOW,
+    GAUGE_BUILD_REASON_PIP_GEOMETRY,
+    GAUGE_BUILD_REASON_SEGMENT_SPAN_OVERFLOW,
+    GAUGE_BUILD_REASON_MISSING_FILL_BODY,
+    GAUGE_BUILD_REASON_LAYOUT_STORAGE,
+    GAUGE_BUILD_REASON_RUNTIME_STORAGE
+} GaugeBuildReasonCode;
+
+typedef struct
+{
+    u8 hasLaneIndex;
+    u8 hasSegmentIndex;
+    u8 laneIndex;
+    u8 segmentIndex;
+    GaugeBuildReasonCode reasonCode;
+} GaugeBuildDiagnosticContext;
+
+static GaugeBuildDiagnosticContext s_lastBuildDiagnostic;
+
+static inline void gauge_clear_last_build_context(void)
+{
+    memset(&s_lastBuildDiagnostic, 0, sizeof(s_lastBuildDiagnostic));
+}
 
 static inline void gauge_set_last_build_error(GaugeBuildError error)
 {
@@ -763,6 +799,43 @@ static inline void gauge_set_last_build_error_if_ok(GaugeBuildError error)
 {
     if (s_lastBuildError == GAUGE_BUILD_OK)
         s_lastBuildError = error;
+}
+
+static inline void gauge_note_last_build_reason(GaugeBuildReasonCode reasonCode)
+{
+    if (s_lastBuildDiagnostic.reasonCode == GAUGE_BUILD_REASON_NONE)
+        s_lastBuildDiagnostic.reasonCode = reasonCode;
+}
+
+static inline void gauge_note_last_build_lane(u8 laneIndex,
+                                              GaugeBuildReasonCode reasonCode)
+{
+    if (!s_lastBuildDiagnostic.hasLaneIndex)
+    {
+        s_lastBuildDiagnostic.hasLaneIndex = 1;
+        s_lastBuildDiagnostic.laneIndex = laneIndex;
+    }
+
+    gauge_note_last_build_reason(reasonCode);
+}
+
+static inline void gauge_note_last_build_segment(u8 laneIndex,
+                                                 u8 segmentIndex,
+                                                 GaugeBuildReasonCode reasonCode)
+{
+    gauge_note_last_build_lane(laneIndex, reasonCode);
+
+    if (!s_lastBuildDiagnostic.hasSegmentIndex)
+    {
+        s_lastBuildDiagnostic.hasSegmentIndex = 1;
+        s_lastBuildDiagnostic.segmentIndex = segmentIndex;
+    }
+}
+
+static inline void gauge_reset_last_build_diagnostic(void)
+{
+    gauge_set_last_build_error(GAUGE_BUILD_OK);
+    gauge_clear_last_build_context();
 }
 
 static const char *gauge_build_error_to_text(GaugeBuildError error)
@@ -798,6 +871,159 @@ static const char *gauge_build_error_to_text(GaugeBuildError error)
     }
 }
 
+static const char *gauge_build_reason_to_text(GaugeBuildReasonCode reasonCode)
+{
+    switch (reasonCode)
+    {
+    case GAUGE_BUILD_REASON_SEGMENT_PAIRING:
+        return "cells/skin mismatch";
+    case GAUGE_BUILD_REASON_SEGMENT_HOLE:
+        return "segment after empty slot";
+    case GAUGE_BUILD_REASON_EMPTY_LANE_SPAN:
+        return "lane produced no display span";
+    case GAUGE_BUILD_REASON_WINDOW_OUT_OF_RANGE:
+        return "window exceeds base lane";
+    case GAUGE_BUILD_REASON_NEGATIVE_ORIGIN:
+        return "origin underflows below zero";
+    case GAUGE_BUILD_REASON_VERTICAL_ORIGIN_UNDERFLOW:
+        return "vertical origin is above lane height";
+    case GAUGE_BUILD_REASON_PIP_GEOMETRY:
+        return "PIP tileset/geometry mismatch";
+    case GAUGE_BUILD_REASON_SEGMENT_SPAN_OVERFLOW:
+        return "expanded segment exceeds gauge limits";
+    case GAUGE_BUILD_REASON_MISSING_FILL_BODY:
+        return "missing normal fill body strip";
+    case GAUGE_BUILD_REASON_LAYOUT_STORAGE:
+        return "layout storage allocation/sync failed";
+    case GAUGE_BUILD_REASON_RUNTIME_STORAGE:
+        return "runtime arena allocation failed";
+    case GAUGE_BUILD_REASON_NONE:
+    default:
+        return NULL;
+    }
+}
+
+static u16 gauge_append_text(char *buffer, u16 cursor, u16 capacity, const char *text)
+{
+    if (!buffer || capacity == 0 || !text)
+        return cursor;
+
+    while (*text && cursor + 1 < capacity)
+        buffer[cursor++] = *text++;
+
+    buffer[cursor] = '\0';
+    return cursor;
+}
+
+static u16 gauge_append_u8_decimal(char *buffer, u16 cursor, u16 capacity, u8 value)
+{
+    if (!buffer || capacity == 0)
+        return cursor;
+
+    if (value >= 100)
+    {
+        if (cursor + 1 < capacity)
+            buffer[cursor++] = (char)('0' + (value / 100));
+        value = (u8)(value % 100);
+        if (cursor + 1 < capacity)
+            buffer[cursor++] = (char)('0' + (value / 10));
+        if (cursor + 1 < capacity)
+            buffer[cursor++] = (char)('0' + (value % 10));
+    }
+    else if (value >= 10)
+    {
+        if (cursor + 1 < capacity)
+            buffer[cursor++] = (char)('0' + (value / 10));
+        if (cursor + 1 < capacity)
+            buffer[cursor++] = (char)('0' + (value % 10));
+    }
+    else if (cursor + 1 < capacity)
+    {
+        buffer[cursor++] = (char)('0' + value);
+    }
+
+    buffer[cursor] = '\0';
+    return cursor;
+}
+
+static const char *gauge_build_error_text_with_context(GaugeBuildError error)
+{
+    const char *baseText = gauge_build_error_to_text(error);
+    const char *reasonText = gauge_build_reason_to_text(s_lastBuildDiagnostic.reasonCode);
+    u16 cursor = 0;
+    u8 wroteContext = 0;
+
+    s_lastBuildErrorTextBuffer[0] = '\0';
+    cursor = gauge_append_text(s_lastBuildErrorTextBuffer,
+                               cursor,
+                               (u16)sizeof(s_lastBuildErrorTextBuffer),
+                               baseText);
+
+    if (!s_lastBuildDiagnostic.hasLaneIndex &&
+        !s_lastBuildDiagnostic.hasSegmentIndex &&
+        !reasonText)
+    {
+        return s_lastBuildErrorTextBuffer;
+    }
+
+    cursor = gauge_append_text(s_lastBuildErrorTextBuffer,
+                               cursor,
+                               (u16)sizeof(s_lastBuildErrorTextBuffer),
+                               " (");
+
+    if (s_lastBuildDiagnostic.hasLaneIndex)
+    {
+        cursor = gauge_append_text(s_lastBuildErrorTextBuffer,
+                                   cursor,
+                                   (u16)sizeof(s_lastBuildErrorTextBuffer),
+                                   "lane ");
+        cursor = gauge_append_u8_decimal(s_lastBuildErrorTextBuffer,
+                                         cursor,
+                                         (u16)sizeof(s_lastBuildErrorTextBuffer),
+                                         s_lastBuildDiagnostic.laneIndex);
+        wroteContext = 1;
+    }
+
+    if (s_lastBuildDiagnostic.hasSegmentIndex)
+    {
+        if (wroteContext)
+        {
+            cursor = gauge_append_text(s_lastBuildErrorTextBuffer,
+                                       cursor,
+                                       (u16)sizeof(s_lastBuildErrorTextBuffer),
+                                       ", ");
+        }
+
+        cursor = gauge_append_text(s_lastBuildErrorTextBuffer,
+                                   cursor,
+                                   (u16)sizeof(s_lastBuildErrorTextBuffer),
+                                   "segment ");
+        cursor = gauge_append_u8_decimal(s_lastBuildErrorTextBuffer,
+                                         cursor,
+                                         (u16)sizeof(s_lastBuildErrorTextBuffer),
+                                         s_lastBuildDiagnostic.segmentIndex);
+        wroteContext = 1;
+    }
+
+    if (reasonText)
+    {
+        cursor = gauge_append_text(s_lastBuildErrorTextBuffer,
+                                   cursor,
+                                   (u16)sizeof(s_lastBuildErrorTextBuffer),
+                                   wroteContext ? ": " : "");
+        cursor = gauge_append_text(s_lastBuildErrorTextBuffer,
+                                   cursor,
+                                   (u16)sizeof(s_lastBuildErrorTextBuffer),
+                                   reasonText);
+    }
+
+    gauge_append_text(s_lastBuildErrorTextBuffer,
+                      cursor,
+                      (u16)sizeof(s_lastBuildErrorTextBuffer),
+                      ")");
+    return s_lastBuildErrorTextBuffer;
+}
+
 /* =============================================================================
    GC-DEC-10 Forward Declarations By Subsystem
    =============================================================================
@@ -821,23 +1047,30 @@ static inline u8 sanitize_plane(u8 plane);
 static inline u8 sanitize_orientation(u8 orientation);
 static inline u8 sanitize_fill_direction(u8 fillDirection);
 static inline u8 sanitize_palette_index(u8 palette);
-static u8 lane_has_segment_holes(const GaugeLane *lane);
-static u8 validate_lane_segments(const GaugeLane *lane);
+static u8 lane_has_segment_holes(const GaugeLane *lane,
+                                 u8 *outHoleSegmentIndex);
+static u8 validate_lane_segments(const GaugeLane *lane,
+                                 u8 laneIndex);
 static u8 definition_lane_is_empty(const GaugeLane *lane);
 static u8 compute_segment_display_cells(GaugeMode mode,
                                         const GaugeSegment *segment,
+                                        u8 laneIndex,
+                                        u8 segmentIndex,
                                         u16 *outDisplayCells);
 static u16 compute_lane_display_cells(const GaugeDefinition *definition,
-                                      const GaugeLane *lane);
+                                      const GaugeLane *lane,
+                                      u8 laneIndex);
 static u8 validate_lane_window_against_base(const GaugeDefinition *definition,
                                             const GaugeLane *baseLane,
-                                            const GaugeLane *lane);
+                                            const GaugeLane *lane,
+                                            u8 laneIndex);
 static s16 compute_lane_origin_axis(u16 base, s8 offset);
 static u8 find_baseLane_index(const GaugeDefinition *definition,
                               u8 *outLaneIndex);
 static u8 compute_fill_offset_pixels_for_lane(const GaugeDefinition *definition,
                                               const GaugeLane *baseLane,
                                               u8 firstValueCell,
+                                              u8 laneIndex,
                                               u16 *outOffset);
 static u8 resolve_lane_palette(const GaugeDefinition *definition,
                                const GaugeLane *lane);
@@ -851,6 +1084,7 @@ static void release_built_layouts(GaugeLaneLayout **builtLayouts);
 static u8 build_segment_id_by_cell_from_lane(GaugeMode mode,
                                              GaugeFillDirection fillDirection,
                                              const GaugeLane *lane,
+                                             u8 laneIndex,
                                              u8 *outSegmentIdByCell,
                                              u8 *outLength,
                                              u8 *outSegmentCount);
@@ -873,7 +1107,10 @@ static void populate_layout_tileset_group_from_fill_assets(GaugeLaneLayout *layo
                                                            LayoutTilesetGroupId group,
                                                            u8 segmentId,
                                                            const ResolvedFillAssets *resolved);
-static inline u8 resolve_pip_style(const GaugePipSkin *pip, ResolvedPipStyle *resolved);
+static inline u8 resolve_pip_style(const GaugePipSkin *pip,
+                                    ResolvedPipStyle *resolved,
+                                    u8 laneIndex,
+                                    u8 segmentIndex);
 static inline void scan_pip_style_usage(const ResolvedPipStyle *resolved,
                                         u8 *hasPipStyles,
                                         u8 *hasCustomWidths,
@@ -1394,7 +1631,7 @@ Gauge *Gauge_init(const GaugeDefinition *definition,
 {
     Gauge *gauge = NULL;
 
-    gauge_set_last_build_error(GAUGE_BUILD_OK);
+    gauge_reset_last_build_diagnostic();
 
     if (!definition)
     {
@@ -1416,7 +1653,7 @@ Gauge *Gauge_init(const GaugeDefinition *definition,
         return NULL;
     }
 
-    gauge_set_last_build_error(GAUGE_BUILD_OK);
+    gauge_reset_last_build_diagnostic();
     return gauge;
 }
 
@@ -1427,7 +1664,7 @@ GaugeBuildError Gauge_getLastBuildError(void)
 
 const char *Gauge_getLastBuildErrorText(void)
 {
-    return gauge_build_error_to_text(s_lastBuildError);
+    return gauge_build_error_text_with_context(s_lastBuildError);
 }
 
 /** Update gauge: tick logic + render all lanes. Call once per frame. */
@@ -1625,7 +1862,8 @@ static inline u8 sanitize_palette_index(u8 palette)
  * @param lane Authored lane to inspect.
  * @return 1 if a non-empty segment appears after an empty slot, else 0.
  */
-static u8 lane_has_segment_holes(const GaugeLane *lane)
+static u8 lane_has_segment_holes(const GaugeLane *lane,
+                                 u8 *outHoleSegmentIndex)
 {
     if (!lane)
         return 0;
@@ -1647,7 +1885,11 @@ static u8 lane_has_segment_holes(const GaugeLane *lane)
         }
 
         if (foundEmptySegment)
+        {
+            if (outHoleSegmentIndex)
+                *outHoleSegmentIndex = segmentIndex;
             return 1;
+        }
     }
 
     return 0;
@@ -1662,10 +1904,14 @@ static u8 lane_has_segment_holes(const GaugeLane *lane)
  * @param lane Authored lane to validate.
  * @return 1 when the lane is structurally valid, else 0.
  */
-static u8 validate_lane_segments(const GaugeLane *lane)
+static u8 validate_lane_segments(const GaugeLane *lane,
+                                 u8 laneIndex)
 {
+    u8 holeSegmentIndex = 0;
+
     if (!lane)
     {
+        gauge_note_last_build_lane(laneIndex, GAUGE_BUILD_REASON_NONE);
         gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_LANE);
         return 0;
     }
@@ -1678,13 +1924,19 @@ static u8 validate_lane_segments(const GaugeLane *lane)
 
         if (cellsPresent != skinPresent)
         {
+            gauge_note_last_build_segment(laneIndex,
+                                          segmentIndex,
+                                          GAUGE_BUILD_REASON_SEGMENT_PAIRING);
             gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
             return 0;
         }
     }
 
-    if (lane_has_segment_holes(lane))
+    if (lane_has_segment_holes(lane, &holeSegmentIndex))
     {
+        gauge_note_last_build_segment(laneIndex,
+                                      holeSegmentIndex,
+                                      GAUGE_BUILD_REASON_SEGMENT_HOLE);
         gauge_set_last_build_error(GAUGE_BUILD_ERR_LANE_HOLE);
         return 0;
     }
@@ -1721,10 +1973,15 @@ static u8 definition_lane_is_empty(const GaugeLane *lane)
  */
 static u8 compute_segment_display_cells(GaugeMode mode,
                                         const GaugeSegment *segment,
+                                        u8 laneIndex,
+                                        u8 segmentIndex,
                                         u16 *outDisplayCells)
 {
     if (!segment || !segment->skin || !outDisplayCells || segment->cells == 0)
     {
+        gauge_note_last_build_segment(laneIndex,
+                                      segmentIndex,
+                                      GAUGE_BUILD_REASON_SEGMENT_PAIRING);
         gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
         return 0;
     }
@@ -1749,7 +2006,8 @@ static u8 compute_segment_display_cells(GaugeMode mode,
 }
 
 static u16 compute_lane_display_cells(const GaugeDefinition *definition,
-                                      const GaugeLane *lane)
+                                      const GaugeLane *lane,
+                                      u8 laneIndex)
 {
     if (!definition || definition_lane_is_empty(lane))
         return 0;
@@ -1762,7 +2020,11 @@ static u16 compute_lane_display_cells(const GaugeDefinition *definition,
             break;
 
         u16 displayCells = 0;
-        if (!compute_segment_display_cells(definition->mode, segment, &displayCells))
+        if (!compute_segment_display_cells(definition->mode,
+                                           segment,
+                                           laneIndex,
+                                           segmentIndex,
+                                           &displayCells))
             return 0;
 
         totalCells = (u16)(totalCells + displayCells);
@@ -1773,32 +2035,37 @@ static u16 compute_lane_display_cells(const GaugeDefinition *definition,
 
 static u8 validate_lane_window_against_base(const GaugeDefinition *definition,
                                             const GaugeLane *baseLane,
-                                            const GaugeLane *lane)
+                                            const GaugeLane *lane,
+                                            u8 laneIndex)
 {
     if (!definition || !baseLane || !lane)
     {
+        gauge_note_last_build_lane(laneIndex, GAUGE_BUILD_REASON_NONE);
         gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_LANE);
         return 0;
     }
 
-    const u16 baseLaneCells = compute_lane_display_cells(definition, baseLane);
-    const u16 laneCells = compute_lane_display_cells(definition, lane);
+    const u16 baseLaneCells = compute_lane_display_cells(definition, baseLane, laneIndex);
+    const u16 laneCells = compute_lane_display_cells(definition, lane, laneIndex);
     const u16 firstValueCell = lane->firstValueCell;
 
     if (baseLaneCells == 0 || laneCells == 0)
     {
+        gauge_note_last_build_lane(laneIndex, GAUGE_BUILD_REASON_EMPTY_LANE_SPAN);
         gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LANE_WINDOW);
         return 0;
     }
 
     if (firstValueCell > baseLaneCells)
     {
+        gauge_note_last_build_lane(laneIndex, GAUGE_BUILD_REASON_WINDOW_OUT_OF_RANGE);
         gauge_set_last_build_error(GAUGE_BUILD_ERR_LANE_WINDOW);
         return 0;
     }
 
     if ((u32)firstValueCell + (u32)laneCells > baseLaneCells)
     {
+        gauge_note_last_build_lane(laneIndex, GAUGE_BUILD_REASON_WINDOW_OUT_OF_RANGE);
         gauge_set_last_build_error(GAUGE_BUILD_ERR_LANE_WINDOW);
         return 0;
     }
@@ -1836,15 +2103,16 @@ static u8 find_baseLane_index(const GaugeDefinition *definition,
     for (u8 laneIndex = 0; laneIndex < GAUGE_MAX_LANES; laneIndex++)
     {
         const GaugeLane *lane = &definition->lanes[laneIndex];
-        if (!validate_lane_segments(lane))
+        if (!validate_lane_segments(lane, laneIndex))
             return 0;
 
         if (definition_lane_is_empty(lane))
             continue;
 
-        const u16 span = compute_lane_display_cells(definition, lane);
+        const u16 span = compute_lane_display_cells(definition, lane, laneIndex);
         if (span == 0)
         {
+            gauge_note_last_build_lane(laneIndex, GAUGE_BUILD_REASON_EMPTY_LANE_SPAN);
             gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_INVALID_SEGMENT);
             return 0;
         }
@@ -1882,10 +2150,12 @@ static u8 find_baseLane_index(const GaugeDefinition *definition,
 static u8 compute_fill_offset_pixels_for_lane(const GaugeDefinition *definition,
                                               const GaugeLane *baseLane,
                                               u8 firstValueCell,
+                                              u8 laneIndex,
                                               u16 *outOffset)
 {
     if (!definition || !baseLane || !outOffset)
     {
+        gauge_note_last_build_lane(laneIndex, GAUGE_BUILD_REASON_NONE);
         gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_LANE);
         return 0;
     }
@@ -1909,7 +2179,11 @@ static u8 compute_fill_offset_pixels_for_lane(const GaugeDefinition *definition,
         if (remainingCells >= segment->cells)
         {
             u16 displayCells = 0;
-            if (!compute_segment_display_cells(definition->mode, segment, &displayCells))
+            if (!compute_segment_display_cells(definition->mode,
+                                               segment,
+                                               laneIndex,
+                                               segmentIndex,
+                                               &displayCells))
                 return 0;
             displayCellsBefore = (u16)(displayCellsBefore + displayCells);
             remainingCells = (u8)(remainingCells - segment->cells);
@@ -1932,6 +2206,7 @@ static u8 compute_fill_offset_pixels_for_lane(const GaugeDefinition *definition,
 
     if (remainingCells != 0)
     {
+        gauge_note_last_build_lane(laneIndex, GAUGE_BUILD_REASON_WINDOW_OUT_OF_RANGE);
         gauge_set_last_build_error(GAUGE_BUILD_ERR_LANE_WINDOW);
         return 0;
     }
@@ -2109,12 +2384,14 @@ static void release_built_layouts(GaugeLaneLayout **builtLayouts)
 static u8 build_segment_id_by_cell_from_lane(GaugeMode mode,
                                              GaugeFillDirection fillDirection,
                                              const GaugeLane *lane,
+                                             u8 laneIndex,
                                              u8 *outSegmentIdByCell,
                                              u8 *outLength,
                                              u8 *outSegmentCount)
 {
     if (!lane || !outSegmentIdByCell || !outLength || !outSegmentCount)
     {
+        gauge_note_last_build_lane(laneIndex, GAUGE_BUILD_REASON_NONE);
         gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_LANE);
         return 0;
     }
@@ -2135,6 +2412,9 @@ static u8 build_segment_id_by_cell_from_lane(GaugeMode mode,
             const GaugePipSkin *pip = &segment->skin->pip;
             if (!pip->tileset)
             {
+                gauge_note_last_build_segment(laneIndex,
+                                              segmentIndex,
+                                              GAUGE_BUILD_REASON_PIP_GEOMETRY);
                 gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
                 return 0;
             }
@@ -2148,6 +2428,9 @@ static u8 build_segment_id_by_cell_from_lane(GaugeMode mode,
 
         if ((u16)cursor + expandedCellCount > GAUGE_MAX_LENGTH)
         {
+            gauge_note_last_build_segment(laneIndex,
+                                          segmentIndex,
+                                          GAUGE_BUILD_REASON_SEGMENT_SPAN_OVERFLOW);
             gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
             return 0;
         }
@@ -2160,6 +2443,7 @@ static u8 build_segment_id_by_cell_from_lane(GaugeMode mode,
 
     if (cursor == 0 || segmentCount == 0)
     {
+        gauge_note_last_build_lane(laneIndex, GAUGE_BUILD_REASON_EMPTY_LANE_SPAN);
         gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
         return 0;
     }
@@ -2292,10 +2576,18 @@ static void populate_layout_tileset_group_from_fill_assets(GaugeLaneLayout *layo
  * This block expands authored PIP skin metadata into resolved runtime-friendly
  * style descriptors before the layout is populated.
  */
-static inline u8 resolve_pip_style(const GaugePipSkin *pip, ResolvedPipStyle *resolved)
+static inline u8 resolve_pip_style(const GaugePipSkin *pip,
+                                    ResolvedPipStyle *resolved,
+                                    u8 laneIndex,
+                                    u8 segmentIndex)
 {
     if (!pip || !resolved)
+    {
+        gauge_note_last_build_segment(laneIndex,
+                                      segmentIndex,
+                                      GAUGE_BUILD_REASON_PIP_GEOMETRY);
         return 0;
+    }
 
     resolved->tiles = pip->tileset ? pip->tileset->tiles : NULL;
     resolved->pipWidth = pip->pipWidth ? pip->pipWidth : 1;
@@ -2305,11 +2597,19 @@ static inline u8 resolve_pip_style(const GaugePipSkin *pip, ResolvedPipStyle *re
     resolved->sourceHeight = 1;
     resolved->halfAxis = PIP_HALF_AXIS_HORIZONTAL;
 
-    return resolve_pip_strip_geometry_from_skin(pip,
-                                                &resolved->stateCount,
-                                                &resolved->sourceWidth,
-                                                &resolved->sourceHeight,
-                                                &resolved->halfAxis);
+    if (!resolve_pip_strip_geometry_from_skin(pip,
+                                             &resolved->stateCount,
+                                             &resolved->sourceWidth,
+                                             &resolved->sourceHeight,
+                                             &resolved->halfAxis))
+    {
+        gauge_note_last_build_segment(laneIndex,
+                                      segmentIndex,
+                                      GAUGE_BUILD_REASON_PIP_GEOMETRY);
+        return 0;
+    }
+
+    return 1;
 }
 
 static inline void scan_pip_style_usage(const ResolvedPipStyle *resolved,
@@ -2380,6 +2680,11 @@ static u8 layout_prepare_from_lane_plan(const GaugeDefinition *definition,
 {
     if (!definition || !lanePlan || !layout)
     {
+        if (lanePlan)
+            gauge_note_last_build_lane(lanePlan->laneIndex,
+                                       GAUGE_BUILD_REASON_LAYOUT_STORAGE);
+        else
+            gauge_note_last_build_reason(GAUGE_BUILD_REASON_LAYOUT_STORAGE);
         gauge_set_last_build_error(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         return 0;
     }
@@ -2399,6 +2704,8 @@ static u8 layout_prepare_from_lane_plan(const GaugeDefinition *definition,
                                 definition->verticalFlip,
                                 definition->horizontalFlip))
     {
+        gauge_note_last_build_lane(lanePlan->laneIndex,
+                                   GAUGE_BUILD_REASON_LAYOUT_STORAGE);
         gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         return 0;
     }
@@ -2440,6 +2747,9 @@ static u8 build_fill_layout_direct(const GaugeDefinition *definition,
         const GaugeSegment *segment = &lanePlan->lane->segments[segmentIndex];
         if (!segment->skin || !segment->skin->fill.normal.body)
         {
+            gauge_note_last_build_segment(lanePlan->laneIndex,
+                                          segmentIndex,
+                                          GAUGE_BUILD_REASON_MISSING_FILL_BODY);
             gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
             return 0;
         }
@@ -2543,13 +2853,16 @@ static u8 build_pip_layout_direct(const GaugeDefinition *definition,
         const GaugeSegment *segment = &lanePlan->lane->segments[segmentIndex];
         if (!segment->skin)
         {
+            gauge_note_last_build_segment(lanePlan->laneIndex,
+                                          segmentIndex,
+                                          GAUGE_BUILD_REASON_SEGMENT_PAIRING);
             gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_SEGMENT);
             return 0;
         }
 
         const GaugePipSkin *pip = &segment->skin->pip;
         ResolvedPipStyle *resolved = &resolvedStyles[segmentIndex];
-        if (!resolve_pip_style(pip, resolved))
+        if (!resolve_pip_style(pip, resolved, lanePlan->laneIndex, segmentIndex))
         {
             gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_INVALID_SEGMENT);
             return 0;
@@ -2635,7 +2948,7 @@ static u8 build_lane_plan(const GaugeDefinition *definition,
         return 0;
     }
 
-    if (!validate_lane_segments(lane))
+    if (!validate_lane_segments(lane, laneIndex))
         return 0;
 
     memset(outPlan, 0, sizeof(*outPlan));
@@ -2644,6 +2957,7 @@ static u8 build_lane_plan(const GaugeDefinition *definition,
     const s16 originY = compute_lane_origin_axis(definition->originY, lane->offsetY);
     if (originX < 0 || originY < 0)
     {
+        gauge_note_last_build_lane(laneIndex, GAUGE_BUILD_REASON_NEGATIVE_ORIGIN);
         gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_ORIGIN);
         return 0;
     }
@@ -2653,12 +2967,13 @@ static u8 build_lane_plan(const GaugeDefinition *definition,
     outPlan->originX = (u16)originX;
     outPlan->originY = (u16)originY;
 
-    if (!validate_lane_window_against_base(definition, baseLane, lane))
+    if (!validate_lane_window_against_base(definition, baseLane, lane, laneIndex))
         return 0;
 
     if (!compute_fill_offset_pixels_for_lane(definition,
                                              baseLane,
                                              lane->firstValueCell,
+                                             laneIndex,
                                              &outPlan->fillOffset))
     {
         return 0;
@@ -2669,6 +2984,7 @@ static u8 build_lane_plan(const GaugeDefinition *definition,
     if (!build_segment_id_by_cell_from_lane(definition->mode,
                                             definition->fillDirection,
                                             lane,
+                                            laneIndex,
                                             outPlan->segmentIdByCell,
                                             &outPlan->length,
                                             &outPlan->segmentCount))
@@ -2679,6 +2995,8 @@ static u8 build_lane_plan(const GaugeDefinition *definition,
     if (definition->orientation == GAUGE_ORIENT_VERTICAL &&
         outPlan->originY < (u16)(outPlan->length - 1))
     {
+        gauge_note_last_build_lane(laneIndex,
+                                   GAUGE_BUILD_REASON_VERTICAL_ORIGIN_UNDERFLOW);
         gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_ORIGIN);
         return 0;
     }
@@ -2692,6 +3010,11 @@ static u8 build_layout_from_lane_plan(const GaugeDefinition *definition,
 {
     if (!definition || !lanePlan || !outLayout)
     {
+        if (lanePlan)
+            gauge_note_last_build_lane(lanePlan->laneIndex,
+                                       GAUGE_BUILD_REASON_LAYOUT_STORAGE);
+        else
+            gauge_note_last_build_reason(GAUGE_BUILD_REASON_LAYOUT_STORAGE);
         gauge_set_last_build_error(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         return 0;
     }
@@ -2699,6 +3022,8 @@ static u8 build_layout_from_lane_plan(const GaugeDefinition *definition,
     GaugeLaneLayout *layout = (GaugeLaneLayout *)gauge_alloc_bytes((u16)sizeof(GaugeLaneLayout));
     if (!layout)
     {
+        gauge_note_last_build_lane(lanePlan->laneIndex,
+                                   GAUGE_BUILD_REASON_LAYOUT_STORAGE);
         gauge_set_last_build_error(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         return 0;
     }
@@ -2710,12 +3035,14 @@ static u8 build_layout_from_lane_plan(const GaugeDefinition *definition,
         buildOk = build_pip_layout_direct(definition, lanePlan, layout);
     else
     {
+        gauge_note_last_build_lane(lanePlan->laneIndex, GAUGE_BUILD_REASON_NONE);
         gauge_set_last_build_error(GAUGE_BUILD_ERR_INVALID_MODE);
         buildOk = 0;
     }
 
     if (!buildOk)
     {
+        gauge_note_last_build_lane(lanePlan->laneIndex, GAUGE_BUILD_REASON_NONE);
         gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_LAYOUT_BUILD);
         release_built_layout(&layout);
         return 0;
@@ -3291,6 +3618,8 @@ static u8 gauge_init_lane_instances(Gauge *gauge,
                                             nextVram,
                                             &runtimeContext->runtimeArena))
         {
+            gauge_note_last_build_lane(buildContext->lanePlans[laneIndex].laneIndex,
+                                       GAUGE_BUILD_REASON_RUNTIME_STORAGE);
             gauge_set_last_build_error_if_ok(GAUGE_BUILD_ERR_RUNTIME_ALLOC);
             return 0;
         }

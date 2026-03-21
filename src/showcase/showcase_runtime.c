@@ -28,6 +28,48 @@ Gauge *buildGaugeFromDefinition(const GaugeDefinition *definition,
     return gauge;
 }
 
+/* Demo-only build failure logging.
+ * Gauge_init() stores the last build failure in a module-global diagnostic slot.
+ * tryBuildCase() fails when one of its Gauge_init() calls returns NULL, so the
+ * showcase must read Gauge_getLastBuildError() immediately after that failure
+ * path, before another build attempt overwrites the diagnostic.
+ *
+ * Example trigger:
+ * - in showcase_data.c, temporarily give a case an invalid lane definition
+ *   (for example a lane hole)
+ * - or keep a PIP case but assign an invalid PIP skin geometry
+ * - reload that screen in the showcase
+ * This logger will then print the failing screen title, the case description,
+ * plus the public build error code and text exposed by the Gauge module.
+ */
+static void logShowcaseBuildFailure(const DemoScreenSource *screen,
+                                    u8 screenIndex,
+                                    u8 caseIndex,
+                                    const DemoCaseSource *sourceCase)
+{
+    GaugeBuildError buildError = Gauge_getLastBuildError();
+
+    KLog("SHOWCASE: case build failed");
+    KLog_U2("SHOWCASE screen: ", screenIndex,
+            " case: ", caseIndex);
+
+    if (screen && screen->title)
+    {
+        KLog("SHOWCASE screen title:");
+        KLog((char *)screen->title);
+    }
+
+    if (sourceCase && sourceCase->descriptionLine1)
+    {
+        KLog("SHOWCASE case description:");
+        KLog((char *)sourceCase->descriptionLine1);
+    }
+
+    KLog_U1("SHOWCASE build error code: ", (u16)buildError);
+    KLog("SHOWCASE build error text:");
+    KLog((char *)Gauge_getLastBuildErrorText());
+}
+
 void releaseActiveScreen(void)
 {
     u8 gaugeIndex;
@@ -114,9 +156,10 @@ void loadScreen(u8 screenIndex)
 
         if (!tryBuildCase(&screen->cases[caseIndex], &runtimeCase, &gaugeCursor, &nextVram))
         {
-            KLog_U2("SHOWCASE screen: ", screenIndex,
-                    " case: ", caseIndex);
-            KLog("SHOWCASE: case build failed");
+            logShowcaseBuildFailure(screen,
+                                    screenIndex,
+                                    caseIndex,
+                                    &screen->cases[caseIndex]);
             continue;
         }
 
