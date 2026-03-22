@@ -126,6 +126,6 @@ TILESET gauge_v_straight_blue_strip "tilesets/gauge_v_straight_blue_strip.png" N
 TILESET gauge_h_straight_lightblue_strip "tilesets/gauge_h_straight_lightblue_strip.png" NONE NONE
 TILESET gauge_v_straight_lightblue_strip "tilesets/gauge_v_straight_lightblue_strip.png" NONE NONE
 
-PALETTE gauge_palette "tilesets/gauge_h_straight_yellow_strip.png" NONE NONE
-PALETTE gauge_blue_palette "tilesets/gauge_h_straight_blue_strip.png" NONE NONE
-PALETTE gauge_lightblue_palette "tilesets/gauge_h_straight_lightblue_strip.png" NONE NONE
+PALETTE gauge_palette_0 "pal0.png" NONE NONE
+PALETTE gauge_palette_1 "pal1.png" NONE NONE
+PALETTE gauge_palette_2 "pal2.png" NONE NONE

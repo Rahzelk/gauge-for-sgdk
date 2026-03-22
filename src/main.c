@@ -63,13 +63,13 @@ void runGaugeShowcase(bool hardReset);
 
 int main(bool hardReset)
 {
+    if (!hardReset)
+        SYS_hardReset();
+    
 #if GAUGE_DEMO_USE_SHOWCASE
     runGaugeShowcase(hardReset);
     return 0;
 #else
-
-    if (!hardReset)
-        SYS_hardReset();
 
     JOY_init();
 

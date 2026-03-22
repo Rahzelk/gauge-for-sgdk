@@ -1,37 +1,46 @@
 #include <genesis.h>
 #include "showcase_internal.h"
 
-Gauge *g_runtimeGaugePool[DEMO_MAX_ACTIVE_GAUGES];
 DemoCaseRuntime g_activeCases[DEMO_MAX_CASES_PER_SCREEN];
 u8 g_activeCaseCount = 0;
-u8 g_activeGaugeCount = 0;
 
 u16 g_previousPad = 0;
 u8 g_selectedScreen = 0;
 u8 g_selectedCase = 0;
-u8 g_holdA = 0;
-u8 g_holdB = 0;
+u8 g_buttonAHoldFrames = 0;
+u8 g_buttonBHoldFrames = 0;
 u16 g_frameCount = 0;
 Sprite *g_cursorSprite = NULL;
 
-Gauge *buildGaugeFromDefinition(const GaugeDefinition *definition,
-                                u16 *nextVram)
+static Gauge *buildGaugeFromDefinition(const GaugeDefinition *definition,
+                                       u16 *nextVram)
 {
     Gauge *gauge = NULL;
+    /* Each case receives the next free VRAM tile index.
+     * Gauge_init() uses it as the start of that gauge's fixed BG allocation.
+     */
     const u16 vramBase = *nextVram;
 
+    /* Gauge_init() consumes the authored definition from showcase_data.c and
+     * builds the full runtime object once. If it fails, the caller uses the
+     * module-global build error diagnostic to explain why.
+     */
     gauge = Gauge_init(definition, vramBase);
     if (!gauge)
         return NULL;
 
+    /* Gauge_getNextVramIndex() returns the first tile index still free after
+     * this instance's allocation. Chaining that value keeps screen loading
+     * monotonic and easy to reason about.
+     */
     *nextVram = Gauge_getNextVramIndex(gauge);
     return gauge;
 }
 
 /* Demo-only build failure logging.
  * Gauge_init() stores the last build failure in a module-global diagnostic slot.
- * tryBuildCase() fails when one of its Gauge_init() calls returns NULL, so the
- * showcase must read Gauge_getLastBuildError() immediately after that failure
+ * tryBuildCase() fails when its Gauge_init() call returns NULL, so the showcase
+ * must read Gauge_getLastBuildError() immediately after that failure
  * path, before another build attempt overwrites the diagnostic.
  *
  * Example trigger:
@@ -72,69 +81,53 @@ static void logShowcaseBuildFailure(const DemoScreenSource *screen,
 
 void releaseActiveScreen(void)
 {
-    u8 gaugeIndex;
+    u8 caseIndex;
 
-    for (gaugeIndex = 0; gaugeIndex < g_activeGaugeCount; gaugeIndex++)
+    for (caseIndex = 0; caseIndex < g_activeCaseCount; caseIndex++)
     {
-        Gauge_release(g_runtimeGaugePool[gaugeIndex]);
-        g_runtimeGaugePool[gaugeIndex] = NULL;
+        if (g_activeCases[caseIndex].gauge)
+        {
+            /* Gauge_release() is the exact runtime counterpart of Gauge_init().
+             * The showcase always releases screen-local instances before it
+             * rebuilds another screen.
+             */
+            Gauge_release(g_activeCases[caseIndex].gauge);
+            g_activeCases[caseIndex].gauge = NULL;
+        }
     }
 
-    memset(g_runtimeGaugePool, 0, sizeof(g_runtimeGaugePool));
     memset(g_activeCases, 0, sizeof(g_activeCases));
     g_activeCaseCount = 0;
-    g_activeGaugeCount = 0;
 }
 
+/* Each showcase case owns exactly one Gauge instance.
+ * If that build fails, the case is skipped and the screen keeps loading.
+ * This keeps the demo usable while the build-failure log points at the broken
+ * case and the Gauge module exposes the exact error text.
+ */
 u8 tryBuildCase(const DemoCaseSource *sourceCase,
                 DemoCaseRuntime *runtimeCase,
-                u8 *gaugeCursor,
                 u16 *nextVram)
 {
-    const u8 startGaugeIndex = *gaugeCursor;
-    u8 localGaugeCount = 0;
-    u8 sourceGaugeIndex;
-
     memset(runtimeCase, 0, sizeof(*runtimeCase));
+    /* Copy the short HUD metadata from the authored case, then build the
+     * single Gauge instance that this runtime case owns.
+     */
     runtimeCase->descriptionLine1 = sourceCase->descriptionLine1;
     runtimeCase->descriptionLine2 = sourceCase->descriptionLine2;
     runtimeCase->descriptionLine3 = sourceCase->descriptionLine3;
     runtimeCase->cursorTileX = sourceCase->cursorTileX;
     runtimeCase->cursorTileY = sourceCase->cursorTileY;
     runtimeCase->stepAmount = sourceCase->stepAmount;
+    runtimeCase->vramBase = *nextVram;
+    runtimeCase->gauge = buildGaugeFromDefinition(sourceCase->definition, nextVram);
 
-    for (sourceGaugeIndex = 0; sourceGaugeIndex < sourceCase->gaugeCount; sourceGaugeIndex++)
+    if (!runtimeCase->gauge)
     {
-        Gauge *gauge = NULL;
-        const DemoGaugeSource *sourceGauge = &sourceCase->gauges[sourceGaugeIndex];
-
-        if (*gaugeCursor >= DEMO_MAX_ACTIVE_GAUGES)
-            break;
-
-        runtimeCase->vramBaseByGauge[localGaugeCount] = *nextVram;
-        gauge = buildGaugeFromDefinition(sourceGauge->definition, nextVram);
-        if (!gauge)
-            break;
-
-        g_runtimeGaugePool[*gaugeCursor] = gauge;
-        runtimeCase->gauges[localGaugeCount] = gauge;
-        localGaugeCount++;
-        (*gaugeCursor)++;
-    }
-
-    if (localGaugeCount != sourceCase->gaugeCount)
-    {
-        while (*gaugeCursor > startGaugeIndex)
-        {
-            (*gaugeCursor)--;
-            Gauge_release(g_runtimeGaugePool[*gaugeCursor]);
-            g_runtimeGaugePool[*gaugeCursor] = NULL;
-        }
         memset(runtimeCase, 0, sizeof(*runtimeCase));
         return 0;
     }
 
-    runtimeCase->gaugeCount = localGaugeCount;
     return 1;
 }
 
@@ -143,10 +136,16 @@ void loadScreen(u8 screenIndex)
     const DemoScreenSource *screen = &g_screens[screenIndex];
     u8 caseIndex;
     u8 activeCaseCount = 0;
-    u8 gaugeCursor = 0;
+    /* The showcase rebuilds each screen from TILE_USER_INDEX and then allocates
+     * monotonically as each case succeeds. That keeps VRAM usage predictable
+     * and makes the HUD's "VRAM Base / Tiles used" line easy to explain.
+     */
     u16 nextVram = TILE_USER_INDEX;
 
     releaseActiveScreen();
+    /* The showcase redraws the planes and HUD every time a screen changes, but
+     * the authored GaugeDefinition data remains static in showcase_data.c.
+     */
     clearScreenPlanes();
     drawHudStatic();
 
@@ -154,7 +153,7 @@ void loadScreen(u8 screenIndex)
     {
         DemoCaseRuntime runtimeCase;
 
-        if (!tryBuildCase(&screen->cases[caseIndex], &runtimeCase, &gaugeCursor, &nextVram))
+        if (!tryBuildCase(&screen->cases[caseIndex], &runtimeCase, &nextVram))
         {
             logShowcaseBuildFailure(screen,
                                     screenIndex,
@@ -168,7 +167,6 @@ void loadScreen(u8 screenIndex)
     }
 
     g_activeCaseCount = activeCaseCount;
-    g_activeGaugeCount = gaugeCursor;
 
     if (g_activeCaseCount == 0)
         g_selectedCase = 0;
@@ -190,35 +188,35 @@ DemoCaseRuntime *getSelectedCase(void)
 void applyActionToSelectedCase(u8 isIncrease, u16 amount)
 {
     DemoCaseRuntime *selectedCase = getSelectedCase();
-    u8 gaugeIndex;
 
-    if (!selectedCase)
+    if (!selectedCase || !selectedCase->gauge)
         return;
 
-    for (gaugeIndex = 0; gaugeIndex < selectedCase->gaugeCount; gaugeIndex++)
-    {
-        if (isIncrease)
-            Gauge_increase(selectedCase->gauges[gaugeIndex], amount);
-        else
-            Gauge_decrease(selectedCase->gauges[gaugeIndex], amount);
-    }
+    /* These public helpers use the timings authored in the GaugeDefinition's
+     * behavior block. That is why a normal press follows the case's configured
+     * hold / blink rules instead of changing the value immediately.
+     */
+    if (isIncrease)
+        Gauge_increase(selectedCase->gauge, amount);
+    else
+        Gauge_decrease(selectedCase->gauge, amount);
 }
 
 void applyImmediateActionToSelectedCase(u8 isIncrease, u16 amount)
 {
     DemoCaseRuntime *selectedCase = getSelectedCase();
-    u8 gaugeIndex;
 
-    if (!selectedCase)
+    if (!selectedCase || !selectedCase->gauge)
         return;
 
-    for (gaugeIndex = 0; gaugeIndex < selectedCase->gaugeCount; gaugeIndex++)
-    {
-        if (isIncrease)
-            Gauge_increaseEx(selectedCase->gauges[gaugeIndex], amount, 0, 0);
-        else
-            Gauge_decreaseEx(selectedCase->gauges[gaugeIndex], amount, 0, 0);
-    }
+    /* The Ex variants let the showcase override hold / blink timings.
+     * Passing 0,0 makes held-button repeat advance immediately so the user can
+     * inspect fine-grained intermediate states one point at a time.
+     */
+    if (isIncrease)
+        Gauge_increaseEx(selectedCase->gauge, amount, 0, 0);
+    else
+        Gauge_decreaseEx(selectedCase->gauge, amount, 0, 0);
 }
 
 void changeSelection(s16 direction)
@@ -231,8 +229,8 @@ void changeSelection(s16 direction)
     else
         g_selectedCase = (u8)((g_selectedCase + 1) % g_activeCaseCount);
 
-    g_holdA = 0;
-    g_holdB = 0;
+    g_buttonAHoldFrames = 0;
+    g_buttonBHoldFrames = 0;
     updateHudDynamic();
     updateCursorSprite();
 }
@@ -241,19 +239,25 @@ void changeScreen(void)
 {
     g_selectedScreen = (u8)((g_selectedScreen + 1) % DEMO_SCREEN_COUNT);
     g_selectedCase = 0;
-    g_holdA = 0;
-    g_holdB = 0;
+    g_buttonAHoldFrames = 0;
+    g_buttonBHoldFrames = 0;
     loadScreen(g_selectedScreen);
 }
 
 void updateActiveGauges(void)
 {
-    u8 gaugeIndex;
+    u8 caseIndex;
 
-    for (gaugeIndex = 0; gaugeIndex < g_activeGaugeCount; gaugeIndex++)
+    for (caseIndex = 0; caseIndex < g_activeCaseCount; caseIndex++)
     {
-        Gauge *gauge = g_runtimeGaugePool[gaugeIndex];
+        Gauge *gauge = g_activeCases[caseIndex].gauge;
         if (gauge)
+        {
+            /* Gauge_update() is the module's per-frame tick.
+             * It advances animations, resolves trail / gain / blink state, and
+             * emits any VRAM or tilemap work needed for this frame.
+             */
             Gauge_update(gauge);
+        }
     }
 }

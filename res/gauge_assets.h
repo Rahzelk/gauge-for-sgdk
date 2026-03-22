@@ -86,8 +86,8 @@ extern const TileSet gauge_h_straight_blue_strip;
 extern const TileSet gauge_v_straight_blue_strip;
 extern const TileSet gauge_h_straight_lightblue_strip;
 extern const TileSet gauge_v_straight_lightblue_strip;
-extern const Palette gauge_palette;
-extern const Palette gauge_blue_palette;
-extern const Palette gauge_lightblue_palette;
+extern const Palette gauge_palette_0;
+extern const Palette gauge_palette_1;
+extern const Palette gauge_palette_2;
 
 #endif // _RES_GAUGE_ASSETS_H_

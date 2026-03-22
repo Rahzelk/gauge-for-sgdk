@@ -2,34 +2,27 @@
 #include "showcase_internal.h"
 #include "gauge_assets.h"
 
-/* Local externs for bevelback assets.
- * These TILESET entries live in gauge_assets.res but may not appear yet in the
- * generated gauge_assets.h until SGDK regenerates that header. Keeping the
- * declarations local lets showcase_data.c reference the new assets immediately
- * without editing generated files by hand.
- */
-extern const TileSet gauge_h_bevelback_lightblue_strip_body;
-extern const TileSet gauge_h_bevelback_lightblue_strip_end;
-extern const TileSet gauge_h_bevelback_lightblue_strip_trail;
-extern const TileSet gauge_h_bevelback_lightblue_to_blue_strip_bridge;
-extern const TileSet gauge_h_bevelback_lightblue_gain_strip_body;
-extern const TileSet gauge_h_bevelback_lightblue_gain_strip_end;
-extern const TileSet gauge_h_bevelback_lightblue_gain_strip_trail;
-extern const TileSet gauge_h_bevelback_lightblue_gain_to_blue_strip_bridge;
-extern const TileSet gauge_h_bevelback_blue_strip_body;
-extern const TileSet gauge_h_bevelback_blue_strip_end;
-extern const TileSet gauge_h_bevelback_blue_strip_trail;
-extern const TileSet gauge_h_bevelback_blue_gain_strip_body;
-extern const TileSet gauge_h_bevelback_blue_gain_strip_end;
-extern const TileSet gauge_h_bevelback_blue_gain_strip_trail;
-
 /* =============================================================================
    Gauge showcase data
+
+   This file is the showcase's main teaching document.
+   HUD descriptions stay intentionally short, so the comments below explain why
+   each case exists, which fields deserve attention, and what visual result a
+   junior developer should expect.
+
+   Reading a GaugeDefinition:
+   - top-level fields place the gauge and choose the renderer family
+   - lanes / segments describe geometry and art ownership
+   - behavior controls how value, damage, gain, and blink evolve over time
    ============================================================================= */
 
 /* -----------------------------------------------------------------------------
    Reusable skins
    ----------------------------------------------------------------------------- */
+/* Straight fill strips.
+ * These are the simplest art families and make it easy to isolate runtime
+ * behavior from stylized rendering details.
+ */
 static const GaugeSkin g_skinYellowStraight = {
     .fill = {
         .normal = {
@@ -68,6 +61,18 @@ static const GaugeSkin g_skinBlueStraight = {
     }
 };
 
+/* Small straight strip.
+ * This asset intentionally exposes the minimum authored surface: one body strip
+ * and no dedicated trail / end variants.
+ */
+static const GaugeSkin g_skinBlueStraightSmall = {
+    .fill = {
+        .normal = {
+            .body = &gauge_h_straight_small_blue_strip
+        }
+    }
+};
+
 static const GaugeSkin g_skinLightBlueStraight = {
     .fill = {
         .normal = {
@@ -76,6 +81,10 @@ static const GaugeSkin g_skinLightBlueStraight = {
     }
 };
 
+/* Bevel and bevelback strips.
+ * These families are used to teach body / trail / end / bridge selection and
+ * how gain strips can mirror the normal art family.
+ */
 static const GaugeSkin g_skinBevelLightBlue = {
     .fill = {
         .normal = {
@@ -157,6 +166,10 @@ static const GaugeSkin g_skinBevelbackBlue = {
     }
 };
 
+/* Border variants.
+ * These skins exist to highlight fixed caps and blink-off art on the same
+ * underlying fill logic.
+ */
 static const GaugeSkin g_skinBorderBlueCapStart = {
     .fill = {
         .normal = {
@@ -185,6 +198,21 @@ static const GaugeSkin g_skinBorderBlue = {
             .trail = &gauge_h_bevel_blue_with_border_blink_off_strip_trail,
             .end = &gauge_h_bevel_blue_with_border_blink_off_strip_end,
             .bridge = &gauge_h_bevel_blue_to_yellow_with_border_blink_off_strip_bridge
+        }
+    }
+};
+
+static const GaugeSkin g_skinBorderYellowCapStart = {
+    .fill = {
+        .normal = {
+            .body = &gauge_h_bevel_yellow_with_border_cap_start_strip_body,
+            .trail = &gauge_h_bevel_yellow_with_border_cap_start_strip_trail,
+            .end = &gauge_h_bevel_yellow_with_border_cap_start_strip_end
+        },
+        .blinkOff = {
+            .body = &gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_body,
+            .trail = &gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_trail,
+            .end = &gauge_h_bevel_yellow_with_border_cap_start_blink_off_strip_end
         }
     }
 };
@@ -219,6 +247,10 @@ static const GaugeSkin g_skinBorderYellowCapEnd = {
     }
 };
 
+/* Vertical fill strips.
+ * Vertical gauges keep the same Gauge behaviors but need dedicated art because
+ * Mega Drive background tiles cannot be rotated at runtime.
+ */
 static const GaugeSkin g_skinVerticalBlue = {
     .fill = {
         .normal = {
@@ -257,6 +289,10 @@ static const GaugeSkin g_skinVerticalYellowGainBlinkOff = {
     }
 };
 
+/* PIP skins.
+ * These cases teach quantization and shared-source rendering in PIP mode,
+ * including HALF and QUARTER mirroring.
+ */
 static const GaugeSkin g_skinPipDoubleHalf = {
     .pip = {
         .tileset = &gauge_h_pip_double_half_strip,
@@ -295,7 +331,16 @@ static const GaugeSkin g_skinPipSingle = {
 
 /* -----------------------------------------------------------------------------
    Screen 1: basic fill horizontal
+
+   Teaching goal:
+   - establish the baseline mental model for fill gauges
+   - separate direction, gain, blink, and lane composition
+   - keep the art simple so the runtime rules stay easy to see
    ----------------------------------------------------------------------------- */
+/* Single-lane baseline.
+ * Read mode, orientation, fillDirection, and the one-lane / one-segment setup.
+ * This is the first case to inspect when learning the module.
+ */
 static const GaugeDefinition g_screen1BasicSingleDefinition = {
     .mode = GAUGE_MODE_FILL,
     .plane = WINDOW,
@@ -319,6 +364,10 @@ static const GaugeDefinition g_screen1BasicSingleDefinition = {
     }
 };
 
+/* Multi-lane baseline with the same straight art family.
+ * This case shows that one Gauge definition can drive several aligned lanes.
+ * Focus on offsetY and how all lanes share the same value logic.
+ */
 static const GaugeDefinition g_screen1BasicTwoLanesDefinition = {
     .mode = GAUGE_MODE_FILL,
     .plane = WINDOW,
@@ -348,6 +397,10 @@ static const GaugeDefinition g_screen1BasicTwoLanesDefinition = {
     }
 };
 
+/* Mirrored direction on the same simple strip.
+ * Compare this with the first case to see how fillDirection and horizontalFlip
+ * change the visual direction without changing the overall fill rules.
+ */
 static const GaugeDefinition g_screen1BasicMirrorDefinition = {
     .mode = GAUGE_MODE_FILL,
     .plane = WINDOW,
@@ -374,6 +427,10 @@ static const GaugeDefinition g_screen1BasicMirrorDefinition = {
     }
 };
 
+/* Lane windows and palette overrides.
+ * These extra lanes start later than the base lane and switch palette to make
+ * firstValueCell and overridePalette easy to spot.
+ */
 static const GaugeDefinition g_screen1PaletteLanesDefinition = {
     .mode = GAUGE_MODE_FILL,
     .plane = WINDOW,
@@ -417,6 +474,9 @@ static const GaugeDefinition g_screen1PaletteLanesDefinition = {
     }
 };
 
+/* Gain follow on simple art.
+ * This case exists to isolate gainMode behavior from more stylized strip sets.
+ */
 static const GaugeDefinition g_screen1GainDefinition = {
     .mode = GAUGE_MODE_FILL,
     .plane = WINDOW,
@@ -446,6 +506,10 @@ static const GaugeDefinition g_screen1GainDefinition = {
     }
 };
 
+/* Critical blink with a dedicated blinkOff strip family.
+ * Lower the value past criticalValue to see where blinkOff art replaces the
+ * regular strip family.
+ */
 static const GaugeDefinition g_screen1BlinkOffDefinition = {
     .mode = GAUGE_MODE_FILL,
     .plane = WINDOW,
@@ -471,30 +535,55 @@ static const GaugeDefinition g_screen1BlinkOffDefinition = {
     }
 };
 
+/* Minimal authored strip.
+ * This case teaches that a usable fill gauge can be built from a single body
+ * strip when the art does not need dedicated trail or end variants.
+ */
+static const GaugeDefinition g_screen1SmallBlueDefinition = {
+    .mode = GAUGE_MODE_FILL,
+    .plane = WINDOW,
+    .orientation = GAUGE_ORIENT_HORIZONTAL,
+    .fillDirection = GAUGE_FILL_FORWARD,
+    .originX = 3,
+    .originY = 23,
+    .maxValue = 96,
+    .palette = PAL0,
+    .priority = 1,
+    .lanes = {
+        {
+            .segments = {
+                { .cells = 12, .skin = &g_skinBlueStraightSmall }
+            }
+        }
+    },
+    .behavior = {
+        DEMO_DEFAULT_BEHAVIOR_TIMINGS,
+        .damageMode = GAUGE_TRAIL_MODE_DISABLED
+    }
+};
+
+/* Screen 1 HUD summaries.
+ * Keep these lines short: they only help the player identify the selected case.
+ * The detailed teaching notes live above the definitions.
+ */
 static const DemoCaseSource g_screen1Cases[] = {
     {
-        .descriptionLine1 = "One fill lane, one segment, forward.",
+        .descriptionLine1 = "One fill forward lane, one segment.",
         .descriptionLine2 = "Watch follow damage trail on loss.",
         .descriptionLine3 = "Check one lane and one segment.",
         .cursorTileX = 1,
         .cursorTileY = 12,
         .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen1BasicSingleDefinition }
-        }
+        .definition = &g_screen1BasicSingleDefinition
     },
     {
         .descriptionLine1 = "Reverse fill with horizontal mirror.",
-        .descriptionLine2 = "Value animates from right to left.",
+        .descriptionLine2 = "No trail definition.",
         .descriptionLine3 = "Check fillDirection and hFlip.",
         .cursorTileX = 20,
         .cursorTileY = 12,
         .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen1BasicMirrorDefinition }
-        }
+        .definition = &g_screen1BasicMirrorDefinition
     },
     {
         .descriptionLine1 = "Gain mode follow adds a leading trail.",
@@ -503,10 +592,7 @@ static const DemoCaseSource g_screen1Cases[] = {
         .cursorTileX = 1,
         .cursorTileY = 15,
         .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen1GainDefinition }
-        }
+        .definition = &g_screen1GainDefinition
     },
     {
         .descriptionLine1 = "Critical static trail uses blinkOff.",
@@ -515,10 +601,7 @@ static const DemoCaseSource g_screen1Cases[] = {
         .cursorTileX = 20,
         .cursorTileY = 15,
         .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen1BlinkOffDefinition }
-        }
+        .definition = &g_screen1BlinkOffDefinition
     },
     {
         .descriptionLine1 = "Two aligned lanes share one value.",
@@ -527,10 +610,7 @@ static const DemoCaseSource g_screen1Cases[] = {
         .cursorTileX = 1,
         .cursorTileY = 18,
         .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen1BasicTwoLanesDefinition }
-        }
+        .definition = &g_screen1BasicTwoLanesDefinition
     },
     {
         .descriptionLine1 = "Three lanes use windows and palettes.",
@@ -539,17 +619,32 @@ static const DemoCaseSource g_screen1Cases[] = {
         .cursorTileX = 20,
         .cursorTileY = 18,
         .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen1PaletteLanesDefinition }
-        }
+        .definition = &g_screen1PaletteLanesDefinition
+    },
+    {
+        .descriptionLine1 = "Small blue strip uses one body tile set.",
+        .descriptionLine2 = "No trail or end art is authored here.",
+        .descriptionLine3 = "Check the minimal body-only skin.",
+        .cursorTileX = 1,
+        .cursorTileY = 23,
+        .stepAmount = DEMO_FILL_STEP,
+        .definition = &g_screen1SmallBlueDefinition
     }
 };
 
 /* -----------------------------------------------------------------------------
    Screen 2: stylized fill horizontal
+
+   Teaching goal:
+   - reuse the same Gauge rules with more expressive art families
+   - show bridges, caps, lane windows, and gain families on stylized strips
+   - make strip selection visible without changing the HUD format
    ----------------------------------------------------------------------------- */
-static const GaugeDefinition g_screen2BevelDefinition = {
+/* Yellow border caps without bridges.
+ * This case isolates fixed start / end caps inside one uniform yellow border
+ * family so a junior can inspect cap art without color transitions.
+ */
+static const GaugeDefinition g_screen2BorderYellowCapsDefinition = {
     .mode = GAUGE_MODE_FILL,
     .plane = WINDOW,
     .orientation = GAUGE_ORIENT_HORIZONTAL,
@@ -557,21 +652,31 @@ static const GaugeDefinition g_screen2BevelDefinition = {
     .originX = 3,
     .originY = 12,
     .maxValue = 96,
+    .fixedStartCap = 1,
+    .fixedEndCap = 1,
     .palette = PAL0,
     .priority = 1,
     .lanes = {
         {
             .segments = {
-                { .cells = 12, .skin = &g_skinBevelYellow }
+                { .cells = 1, .skin = &g_skinBorderYellowCapStart },
+                { .cells = 10, .skin = &g_skinBorderYellow },
+                { .cells = 1, .skin = &g_skinBorderYellowCapEnd }
             }
         }
     },
     .behavior = {
         DEMO_DEFAULT_BEHAVIOR_TIMINGS,
-        .damageMode = GAUGE_TRAIL_MODE_FOLLOW
+        .damageMode = GAUGE_TRAIL_MODE_STATIC_TRAIL_CRITICAL_BLINK,
+        .criticalValue = 32,
+        .damageBlinkShift = 2
     }
 };
 
+/* Bevel strips and bridges.
+ * Start with one stylized family, then add segment bridges to show where the
+ * renderer swaps bridge art instead of the normal body / end strips.
+ */
 static const GaugeDefinition g_screen2BridgeDefinition = {
     .mode = GAUGE_MODE_FILL,
     .plane = WINDOW,
@@ -605,6 +710,10 @@ static const GaugeDefinition g_screen2BridgeDefinition = {
     }
 };
 
+/* Fixed caps on stylized art.
+ * These two definitions compare forward and reverse fills while the fixed cap
+ * art stays obvious at both ends.
+ */
 static const GaugeDefinition g_screen2CapsLeftDefinition = {
     .mode = GAUGE_MODE_FILL,
     .plane = WINDOW,
@@ -635,6 +744,9 @@ static const GaugeDefinition g_screen2CapsLeftDefinition = {
     }
 };
 
+/* Reverse counterpart of the previous cap example.
+ * Read fillDirection and horizontalFlip together with the fixed caps.
+ */
 static const GaugeDefinition g_screen2CapsRightDefinition = {
     .mode = GAUGE_MODE_FILL,
     .plane = WINDOW,
@@ -666,6 +778,10 @@ static const GaugeDefinition g_screen2CapsRightDefinition = {
     }
 };
 
+/* Lower linked lane with stylized bridges.
+ * This case focuses on offsetY, firstValueCell, and how a shorter lower lane
+ * reuses the base lane's value mapping.
+ */
 static const GaugeDefinition g_screen2LowerBridgeDefinition = {
     .mode = GAUGE_MODE_FILL,
     .plane = WINDOW,
@@ -701,6 +817,9 @@ static const GaugeDefinition g_screen2LowerBridgeDefinition = {
     }
 };
 
+/* Three stylized lanes with lane-local windows.
+ * Read lane offsets, firstValueCell, and palette ownership on each lane.
+ */
 static const GaugeDefinition g_screen2ThreeLanesDefinition = {
     .mode = GAUGE_MODE_FILL,
     .plane = WINDOW,
@@ -742,6 +861,10 @@ static const GaugeDefinition g_screen2ThreeLanesDefinition = {
     }
 };
 
+/* Bevelback variants.
+ * These cases add another art family to compare gain follow and a clean
+ * lightblue -> blue bridge on the same horizontal runtime rules.
+ */
 static const GaugeDefinition g_screen2BevelbackLightBlueDefinition = {
     .mode = GAUGE_MODE_FILL,
     .plane = WINDOW,
@@ -769,6 +892,9 @@ static const GaugeDefinition g_screen2BevelbackLightBlueDefinition = {
     }
 };
 
+/* Two-segment bevelback bridge.
+ * The interesting fields are the segment order and the gain bridge strips.
+ */
 static const GaugeDefinition g_screen2BevelbackBridgeDefinition = {
     .mode = GAUGE_MODE_FILL,
     .plane = WINDOW,
@@ -797,18 +923,19 @@ static const GaugeDefinition g_screen2BevelbackBridgeDefinition = {
     }
 };
 
+/* Screen 2 HUD summaries.
+ * The text stays compact on purpose, so the surrounding comments explain the
+ * art families, fields, and behaviors in more detail.
+ */
 static const DemoCaseSource g_screen2Cases[] = {
     {
-        .descriptionLine1 = "Bevel skin shows body, trail, end.",
-        .descriptionLine2 = "Use it to inspect strip selection.",
-        .descriptionLine3 = "Check body, trail, and end strips.",
+        .descriptionLine1 = "Yellow border caps frame one strip family.",
+        .descriptionLine2 = "Lower below critical to see blinkOff caps.",
+        .descriptionLine3 = "Check cap start, body, and cap end.",
         .cursorTileX = 1,
         .cursorTileY = 12,
         .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen2BevelDefinition }
-        }
+        .definition = &g_screen2BorderYellowCapsDefinition
     },
     {
         .descriptionLine1 = "Segment bridges link different skins.",
@@ -817,10 +944,7 @@ static const DemoCaseSource g_screen2Cases[] = {
         .cursorTileX = 20,
         .cursorTileY = 12,
         .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen2BridgeDefinition }
-        }
+        .definition = &g_screen2BridgeDefinition
     },
     {
         .descriptionLine1 = "Fixed caps on a forward fill gauge.",
@@ -829,10 +953,7 @@ static const DemoCaseSource g_screen2Cases[] = {
         .cursorTileX = 1,
         .cursorTileY = 15,
         .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen2CapsLeftDefinition }
-        }
+        .definition = &g_screen2CapsLeftDefinition
     },
     {
         .descriptionLine1 = "Fixed caps with mirrored reverse fill.",
@@ -841,10 +962,7 @@ static const DemoCaseSource g_screen2Cases[] = {
         .cursorTileX = 20,
         .cursorTileY = 15,
         .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen2CapsRightDefinition }
-        }
+        .definition = &g_screen2CapsRightDefinition
     },
     {
         .descriptionLine1 = "Three stylized lanes use lane windows.",
@@ -853,10 +971,7 @@ static const DemoCaseSource g_screen2Cases[] = {
         .cursorTileX = 1,
         .cursorTileY = 18,
         .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen2ThreeLanesDefinition }
-        }
+        .definition = &g_screen2ThreeLanesDefinition
     },
     {
         .descriptionLine1 = "Lower linked lane adds a bridge strip.",
@@ -865,10 +980,7 @@ static const DemoCaseSource g_screen2Cases[] = {
         .cursorTileX = 20,
         .cursorTileY = 18,
         .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen2LowerBridgeDefinition }
-        }
+        .definition = &g_screen2LowerBridgeDefinition
     },
     {
         .descriptionLine1 = "Bevelback lightblue uses gain strips.",
@@ -877,10 +989,7 @@ static const DemoCaseSource g_screen2Cases[] = {
         .cursorTileX = 1,
         .cursorTileY = 23,
         .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen2BevelbackLightBlueDefinition }
-        }
+        .definition = &g_screen2BevelbackLightBlueDefinition
     },
     {
         .descriptionLine1 = "Bevelback lightblue bridges into blue.",
@@ -889,16 +998,22 @@ static const DemoCaseSource g_screen2Cases[] = {
         .cursorTileX = 20,
         .cursorTileY = 23,
         .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen2BevelbackBridgeDefinition }
-        }
+        .definition = &g_screen2BevelbackBridgeDefinition
     }
 };
 
 /* -----------------------------------------------------------------------------
    Screen 3: basic fill vertical
+
+   Teaching goal:
+   - show the vertical counterpart of the horizontal fill rules
+   - remind the reader that vertical gauges need dedicated art
+   - reuse the same behavior vocabulary on a different orientation
    ----------------------------------------------------------------------------- */
+/* Vertical baseline with gain follow.
+ * This is the first vertical case to inspect because it combines a simple lane
+ * setup with an easy-to-see gain trail.
+ */
 static const GaugeDefinition g_screen3VerticalSingleDefinition = {
     .mode = GAUGE_MODE_FILL,
     .plane = WINDOW,
@@ -928,6 +1043,9 @@ static const GaugeDefinition g_screen3VerticalSingleDefinition = {
     }
 };
 
+/* Two aligned vertical lanes.
+ * Compare this to the horizontal two-lane case and focus on offsetX.
+ */
 static const GaugeDefinition g_screen3VerticalTwoLanesDefinition = {
     .mode = GAUGE_MODE_FILL,
     .plane = WINDOW,
@@ -957,6 +1075,10 @@ static const GaugeDefinition g_screen3VerticalTwoLanesDefinition = {
     }
 };
 
+/* Three vertical lanes with palette changes.
+ * Read firstValueCell, offsetX, and overridePalette to see how the same ideas
+ * from Screen 1 apply vertically.
+ */
 static const GaugeDefinition g_screen3VerticalThreeLanesDefinition = {
     .mode = GAUGE_MODE_FILL,
     .plane = WINDOW,
@@ -1000,6 +1122,10 @@ static const GaugeDefinition g_screen3VerticalThreeLanesDefinition = {
     }
 };
 
+/* Reverse vertical fill with blinkOff behavior.
+ * This case exists to compare reverse direction and critical blink on a
+ * vertical gauge.
+ */
 static const GaugeDefinition g_screen3VerticalMirrorDefinition = {
     .mode = GAUGE_MODE_FILL,
     .plane = WINDOW,
@@ -1028,6 +1154,9 @@ static const GaugeDefinition g_screen3VerticalMirrorDefinition = {
     }
 };
 
+/* Screen 3 HUD summaries.
+ * As on the other screens, the HUD lines only identify the selected case.
+ */
 static const DemoCaseSource g_screen3Cases[] = {
     {
         .descriptionLine1 = "Vertical fill with gain follow trail.",
@@ -1036,10 +1165,7 @@ static const DemoCaseSource g_screen3Cases[] = {
         .cursorTileX = 4,
         .cursorTileY = 18,
         .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen3VerticalSingleDefinition }
-        }
+        .definition = &g_screen3VerticalSingleDefinition
     },
     {
         .descriptionLine1 = "Two vertical lanes share one value.",
@@ -1048,10 +1174,7 @@ static const DemoCaseSource g_screen3Cases[] = {
         .cursorTileX = 12,
         .cursorTileY = 18,
         .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen3VerticalTwoLanesDefinition }
-        }
+        .definition = &g_screen3VerticalTwoLanesDefinition
     },
     {
         .descriptionLine1 = "Three lanes stack with lane windows.",
@@ -1060,10 +1183,7 @@ static const DemoCaseSource g_screen3Cases[] = {
         .cursorTileX = 20,
         .cursorTileY = 18,
         .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen3VerticalThreeLanesDefinition }
-        }
+        .definition = &g_screen3VerticalThreeLanesDefinition
     },
     {
         .descriptionLine1 = "Reverse vertical fill uses blinkOff.",
@@ -1072,16 +1192,21 @@ static const DemoCaseSource g_screen3Cases[] = {
         .cursorTileX = 30,
         .cursorTileY = 18,
         .stepAmount = DEMO_FILL_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen3VerticalMirrorDefinition }
-        }
+        .definition = &g_screen3VerticalMirrorDefinition
     }
 };
 
 /* -----------------------------------------------------------------------------
    Screen 4: PIP
+
+   Teaching goal:
+   - introduce PIP quantization as a distinct renderer
+   - compare single-tile, HALF, and QUARTER coverage
+   - keep the same showcase interaction while changing the rendering model
    ----------------------------------------------------------------------------- */
+/* HALF coverage.
+ * One logical pip reuses one source tile and mirrors it horizontally.
+ */
 static const GaugeDefinition g_screen4PipHalfDefinition = {
     .mode = GAUGE_MODE_PIP,
     .plane = WINDOW,
@@ -1108,6 +1233,9 @@ static const GaugeDefinition g_screen4PipHalfDefinition = {
     }
 };
 
+/* QUARTER coverage.
+ * One logical pip reuses one source tile four times with H/V mirroring.
+ */
 static const GaugeDefinition g_screen4PipQuarterDefinition = {
     .mode = GAUGE_MODE_PIP,
     .plane = WINDOW,
@@ -1134,6 +1262,9 @@ static const GaugeDefinition g_screen4PipQuarterDefinition = {
     }
 };
 
+/* Compact two-lane PIP bar.
+ * This case teaches lane windows and critical blink in PIP mode.
+ */
 static const GaugeDefinition g_screen4MiniPipTwoLanesDefinition = {
     .mode = GAUGE_MODE_PIP,
     .plane = WINDOW,
@@ -1166,6 +1297,10 @@ static const GaugeDefinition g_screen4MiniPipTwoLanesDefinition = {
     }
 };
 
+/* Simplest PIP baseline.
+ * Start here to understand the one-cell -> one-tile version before reading
+ * the mirrored HALF and QUARTER cases.
+ */
 static const GaugeDefinition g_screen4PipSingleTileDefinition = {
     .mode = GAUGE_MODE_PIP,
     .plane = WINDOW,
@@ -1189,6 +1324,9 @@ static const GaugeDefinition g_screen4PipSingleTileDefinition = {
     }
 };
 
+/* Vertical PIP lanes.
+ * This is the PIP counterpart of the vertical multi-lane fill cases.
+ */
 static const GaugeDefinition g_screen4VerticalPipDefinition = {
     .mode = GAUGE_MODE_PIP,
     .plane = WINDOW,
@@ -1228,6 +1366,10 @@ static const GaugeDefinition g_screen4VerticalPipDefinition = {
     }
 };
 
+/* Screen 4 HUD summaries.
+ * The short lines name the selected PIP case; the comments above explain the
+ * underlying rendering strategy in more detail.
+ */
 static const DemoCaseSource g_screen4Cases[] = {
     {
         .descriptionLine1 = "One pip cell maps to one tile.",
@@ -1236,10 +1378,7 @@ static const DemoCaseSource g_screen4Cases[] = {
         .cursorTileX = 2,
         .cursorTileY = 12,
         .stepAmount = DEMO_PIP_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen4PipSingleTileDefinition }
-        }
+        .definition = &g_screen4PipSingleTileDefinition
     },
     {
         .descriptionLine1 = "HALF mirrors one source tile.",
@@ -1248,10 +1387,7 @@ static const DemoCaseSource g_screen4Cases[] = {
         .cursorTileX = 2,
         .cursorTileY = 15,
         .stepAmount = DEMO_PIP_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen4PipHalfDefinition }
-        }
+        .definition = &g_screen4PipHalfDefinition
     },
     {
         .descriptionLine1 = "QUARTER mirrors one source tile.",
@@ -1260,10 +1396,7 @@ static const DemoCaseSource g_screen4Cases[] = {
         .cursorTileX = 2,
         .cursorTileY = 18,
         .stepAmount = DEMO_PIP_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen4PipQuarterDefinition }
-        }
+        .definition = &g_screen4PipQuarterDefinition
     },
     {
         .descriptionLine1 = "Two compact pip lanes share a value.",
@@ -1272,10 +1405,7 @@ static const DemoCaseSource g_screen4Cases[] = {
         .cursorTileX = 2,
         .cursorTileY = 21,
         .stepAmount = DEMO_PIP_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen4MiniPipTwoLanesDefinition }
-        }
+        .definition = &g_screen4MiniPipTwoLanesDefinition
     },
     {
         .descriptionLine1 = "Three vertical pip lanes share steps.",
@@ -1284,10 +1414,7 @@ static const DemoCaseSource g_screen4Cases[] = {
         .cursorTileX = 27,
         .cursorTileY = 15,
         .stepAmount = DEMO_PIP_STEP,
-        .gaugeCount = 1,
-        .gauges = {
-            { .definition = &g_screen4VerticalPipDefinition }
-        }
+        .definition = &g_screen4VerticalPipDefinition
     }
 };
 
